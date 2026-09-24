@@ -149,17 +149,21 @@ fun DashboardScreen(
                 }
             },
         )
-        if (state.refreshing) {
+        if (state.refreshing || state.backgroundWorkMessage != null) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
-        if (!state.statusMessage.isNullOrBlank() && state.startupPhase != com.discountscreener.android.domain.model.DashboardStartupPhase.Ready) {
+        val visibleWorkMessage = state.backgroundWorkMessage
+            ?: state.statusMessage.takeUnless {
+                state.startupPhase == com.discountscreener.android.domain.model.DashboardStartupPhase.Ready
+            }
+        if (!visibleWorkMessage.isNullOrBlank()) {
             Surface(
                 tonalElevation = 1.dp,
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    text = state.statusMessage,
+                    text = visibleWorkMessage,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -443,10 +447,12 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
                         "Phase: ${state.startupPhase.name.lowercase()}",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Text(
-                        "Progress: ${state.refreshCompletedSymbols}/${state.refreshTargetSymbols.coerceAtLeast(state.trackedSymbols.size)}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                    systemFeedProgressLabel(state)?.let { progress ->
+                        Text(progress, style = MaterialTheme.typography.bodySmall)
+                    }
+                    state.backgroundWorkMessage?.let { work ->
+                        Text(work, style = MaterialTheme.typography.bodySmall)
+                    }
                     state.lastUpdatedAtEpochSeconds?.let {
                         Text(
                             "Last updated: ${formatUpdatedTime(it)}",
@@ -550,6 +556,13 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
         )
     }
 }
+
+internal fun systemFeedProgressLabel(state: DashboardUiState): String? =
+    if (state.startupPhase == com.discountscreener.android.domain.model.DashboardStartupPhase.Ready) {
+        null
+    } else {
+        "Progress: ${state.refreshCompletedSymbols}/${state.refreshTargetSymbols.coerceAtLeast(state.trackedSymbols.size)}"
+    }
 
 internal data class ProviderStatusSummary(
     val title: String,
@@ -696,8 +709,8 @@ private fun MeasurementCard(
                 Text("Run Retrospective", maxLines = 1, textAlign = TextAlign.Center)
             }
             Text(
-                "Joins the score journal to the daily bars that followed and reports each model's " +
-                    "top-minus-bottom forward return. Street upside appears as context only.",
+                "Joins paired V2/V5 scores to later daily bars. Reports both models and three " +
+                    "controlled ablations. Street upside remains diagnostic context.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

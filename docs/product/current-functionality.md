@@ -52,6 +52,13 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 ### Android App
 
 - Opportunities as the default landing surface.
+- Opportunity ordinals follow visible list order, including filtered and pinned rows.
+- Background enrichment shows its pass and progress after the quote refresh reaches its total. System hides the feed counter when refresh ends.
+- System provider status reflects feed data. Detail keeps legacy DCF source warnings with each value.
+- Empty year charts enter bounded retry rounds.
+- System shows active errors only. Recovered errors stay in stored history.
+- DCF disagreement does not dispute analyst ranges while the model remains provisional.
+- Estimates withholds the index DCF projection. Analyst gaps show no timed return or zero without target coverage.
 - Aggressive opportunity scoring selected by default with legacy scoring available.
 - Tracked, opportunity, watchlist, system, and detail surfaces.
 - Symbol detail with EMA/price/MACD charts, valuation, consensus, evidence, alerts, chart range selection, and replay controls.
@@ -63,6 +70,8 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - Local warm-start persistence for tracked symbols, watchlist, issues, chart cache, revision history, and on-demand complete ticker price history.
 - Plans tab (Android-only). See [Dip](android-plans-dip.md), [Cross](android-plans-cross.md), and [Leftover](android-plans-leftover.md).
 - Earnings tab (Android-only). See [Earnings gate](earnings-gate.md).
+- Daily V1-through-V5 evaluation capture after enrichment and market processing finish.
+- Outcome reports from stored score cohorts and later daily company prices.
 
 ### Flutter Client
 
@@ -103,6 +112,8 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - Warm start restores bounded current state needed for initial UI readiness.
 - Full per-ticker history is available through on-demand loading paths.
 - Persistence failures degrade into reset/recovery paths rather than crashing the primary app flow where possible.
+- Android preserves one atomic scoring evaluation snapshot per profile and UTC day.
+- Warm-start reset preserves evaluation snapshots, score journals, and outcome candles.
 
 ### External Data
 

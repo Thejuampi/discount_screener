@@ -529,7 +529,7 @@ class MarketDataRepositoryTest {
     }
 
     @Test
-    fun a_failed_market_bundle_removes_staged_bars_without_publishing_them() = runTest {
+    fun a_failed_market_bundle_still_publishes_complete_universe_bars() = runTest {
         val stagingDirectory = Files.createTempDirectory("market-candle-failure-test").toFile()
         val sink = RecordingCandleSink()
         val market = MarketDataRepository(
@@ -542,7 +542,7 @@ class MarketDataRepositoryTest {
         try {
             runCatching { market.refreshIfStale(tickers()) }
 
-            assertEquals(0, sink.callCount)
+            assertEquals(tickers().toSet(), sink.stored.keys)
             assertEquals(0, stagingDirectory.listFiles().orEmpty().size)
         } finally {
             stagingDirectory.deleteRecursively()
@@ -571,8 +571,8 @@ class MarketDataRepositoryTest {
     }
 
     /**
-     * A round that failed hard enough to be unusable is a round whose bars are as likely partial,
-     * and a partial year written into the retrospective is worse than a missing day.
+     * A total data failure has no bars to store. This differs from a failed market policy with
+     * complete tracked-symbol histories, which still supplies valid outcome prices.
      */
     @Test
     fun a_reading_no_policy_can_score_stores_no_bars() = runTest {
@@ -588,6 +588,32 @@ class MarketDataRepositoryTest {
         assertEquals(0, sink.callCount)
         assertEquals(0, stagingDirectory.listFiles().orEmpty().size)
         stagingDirectory.deleteRecursively()
+    }
+
+    /**
+     * Outcome prices do not depend on market-regime usability.
+     *
+     * The tracked symbols can return complete daily histories while the index series fail. Those
+     * histories still measure later returns, even though the fourth score bucket is unavailable.
+     */
+    @Test
+    fun complete_universe_bars_survive_an_unusable_market_reading() = runTest {
+        val sink = RecordingCandleSink()
+        val failedMarketSeries = (MARKET_SERIES.map { request -> request.symbol } + "SPY").toSet()
+        val stagingDirectory = Files.createTempDirectory("market-candle-outcome-test").toFile()
+        try {
+            repository(
+                yahoo = RecordingYahooClient(failFor = failedMarketSeries),
+                fearGreed = AbsentFearGreedClient(),
+                sink = sink,
+                stagingDirectory = stagingDirectory,
+            ).refreshIfStale(tickers())
+
+            assertEquals(tickers().toSet(), sink.stored.keys)
+            assertEquals(0, stagingDirectory.listFiles().orEmpty().size)
+        } finally {
+            stagingDirectory.deleteRecursively()
+        }
     }
 
     // ── Fixtures ─────────────────────────────────────────────────────────────

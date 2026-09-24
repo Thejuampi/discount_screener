@@ -18,7 +18,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * The table that will eventually say whether V4 is better than V3, rather than only cleaner.
+ * The table that will eventually compare models with forward outcomes.
  *
  * Every test reopens the store before reading. The journal exists to be read weeks after it was
  * written, so a same-instance round trip would prove the wrong thing.
@@ -45,11 +45,11 @@ class ScoreJournalStoreTest {
     }
 
     /**
-     * The point of the whole table. If a pass under V4 replaced the same day's pass under V3, the
-     * two models could never be compared on the same day, and the journal would answer nothing.
+     * Model rows from one pass must remain separate. Otherwise, paired comparisons would lose one
+     * side of the experiment.
      */
     @Test
-    fun the_two_models_are_kept_side_by_side_for_the_same_symbol_and_day() = runTest {
+    fun models_are_kept_side_by_side_for_the_same_symbol_and_day() = runTest {
         append(listOf(row(model = "AggressiveV3"), row(model = "AggressiveV4", composite = 51)))
 
         assertEquals(listOf("AggressiveV3", "AggressiveV4"), load().map { it.scoringModel })

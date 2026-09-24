@@ -85,45 +85,15 @@ private fun EstimatesContent(
     notice: DashboardNotice?,
 ) {
     val hero = remember(report) { buildEstimatesHeroSummary(report) }
-    val coverage = report.dcfCoverage
-
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         notice?.let { activeNotice ->
             item { NoticeBanner(activeNotice) }
         }
         item { HeroCard(hero, report) }
-        when (dcfCoverageBannerKind(coverage)) {
-            DcfCoverageBannerKind.Unavailable -> item {
-                DcfErrorBanner(coverage.coveredSymbols, coverage.totalEligibleSymbols)
-            }
-            DcfCoverageBannerKind.LowConfidence -> item {
-                DcfLowConfidenceBanner(coverage.coveredSymbols, coverage.totalEligibleSymbols)
-            }
-            DcfCoverageBannerKind.Partial -> item {
-                DcfLowConfidenceBanner(coverage.coveredSymbols, coverage.totalEligibleSymbols)
-            }
-            DcfCoverageBannerKind.Provisional -> item {
-                DcfProvisionalBanner(coverage)
-            }
-            DcfCoverageBannerKind.None -> Unit
-        }
-        item {
-            ScenarioRangeCard(
-                title = "Internal DCF model",
-                subtitle = "Market-cap weighted fair value vs price",
-                lowLabel = "Bear",
-                midLabel = "Base",
-                highLabel = "Bull",
-                lowBps = hero.bearUpsideBps,
-                midBps = hero.baseUpsideBps,
-                highBps = hero.bullUpsideBps,
-                coverageNote = hero.baseCoverageCount?.let { "$it companies with live DCF" },
-            )
-        }
         item {
             ScenarioRangeCard(
                 title = "Wall Street analysts",
-                subtitle = "Yahoo low / high targets, cap-weighted",
+                subtitle = "Target date unavailable. Price gap only; no timed return.",
                 lowLabel = "Low",
                 midLabel = null,
                 highLabel = "High",
@@ -132,9 +102,6 @@ private fun EstimatesContent(
                 highBps = hero.analystHighBps,
                 coverageNote = hero.analystCoverageCount?.let { "$it companies with targets" },
             )
-        }
-        item {
-            EstimatesTrendChart(estimatesHistory)
         }
     }
 }
@@ -329,7 +296,7 @@ private fun HeroCard(hero: EstimatesHeroSummary, report: IndexEstimatesReport) {
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                text = "Cap-weighted implied upside vs today’s prices · Updated ${formatRelativeTime(report.computedAtEpochSeconds)}",
+                text = "DCF index estimate withheld · Updated ${formatRelativeTime(report.computedAtEpochSeconds)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -13,6 +13,7 @@ import com.discountscreener.core.model.EstimateScenario
 import com.discountscreener.core.model.ExternalSignalStatus
 import com.discountscreener.core.model.FundamentalSnapshot
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.IssueRecord
 import com.discountscreener.core.model.ProjectedChartStatus
 import com.discountscreener.core.model.ProjectedConfidence
 import com.discountscreener.core.model.ProjectedAnalystTargetStatistic
@@ -212,7 +213,7 @@ class ScreenDataProjectionEngineTest {
     }
 
     @Test
-    fun quant_lens_row_marks_material_model_analyst_gap_disputed_without_dcf_upside_range() {
+    fun quant_lens_row_uses_analyst_range_while_dcf_is_experimental() {
         val result = projectSingleSymbol(
             symbol = "AMZN",
             detail = detail(
@@ -236,10 +237,10 @@ class ScreenDataProjectionEngineTest {
         val state = result.trackedRows.single().quantLensSummary
             ?.lensStates
             ?.single { it.lensId == QuantLensLensId.ExpectedValueRange }
-        assertEquals(QuantLensPrimaryStatus.Disputed, state?.primaryStatus)
-        assertEquals(QuantLensRowLabel.EvDisputed, state?.label)
-        assertEquals(null, state?.evLowUpsideBps)
-        assertEquals(null, state?.evHighUpsideBps)
+        assertEquals(QuantLensPrimaryStatus.Available, state?.primaryStatus)
+        assertEquals(QuantLensRowLabel.EvRange, state?.label)
+        assertEquals(true, (state?.evLowUpsideBps ?: 0) < 0)
+        assertEquals(true, (state?.evHighUpsideBps ?: 0) > 0)
     }
 
     @Test
@@ -450,6 +451,38 @@ class ScreenDataProjectionEngineTest {
         )
 
         assertEquals(fxSourceFreeLegacyExpectation(), projectionExpectation(result))
+    }
+
+    @Test
+    fun legacy_dcf_source_does_not_override_live_feed_provider_status() {
+        val result = projectSingleSymbol(
+            symbol = "LIVE",
+            detail = detail(symbol = "LIVE", marketPriceCents = 10_000L, intrinsicValueCents = 12_000L, confidence = ConfidenceBand.High),
+            dcfAnalysis = dcf(
+                source = null,
+                resolverState = ResolverState.RestoredOnly,
+                bearIntrinsicValueCents = 10_000L,
+                baseIntrinsicValueCents = 12_000L,
+                bullIntrinsicValueCents = 14_000L,
+            ),
+            symbolState = liveState("LIVE"),
+        )
+
+        assertEquals(ProjectedProviderCategory.Live, result.providerState.category)
+        assertEquals(emptyList(), result.providerState.affectedSymbols)
+    }
+
+    @Test
+    fun active_chart_issue_stays_visible_without_relabeling_live_quote_provider() {
+        val issue = IssueRecord("LIVE:chart:Year", "Chart load failed", "Year chart unavailable", "error", true, 1, 42L)
+        val result = projectSingleSymbol(
+            symbol = "LIVE",
+            detail = detail(symbol = "LIVE", marketPriceCents = 10_000L, intrinsicValueCents = 12_000L, confidence = ConfidenceBand.High),
+            issues = listOf(issue),
+        )
+
+        assertEquals(ProjectedProviderCategory.Live, result.providerState.category)
+        assertEquals(listOf(issue), result.providerState.issues)
     }
 
     @Test
@@ -687,6 +720,7 @@ class ScreenDataProjectionEngineTest {
         dcfAnalysis: DcfAnalysis? = null,
         symbolState: ProjectionSymbolState = liveState(symbol),
         analystTargetStatistic: ProjectedAnalystTargetStatistic? = null,
+        issues: List<IssueRecord> = emptyList(),
     ) = ScreenDataProjectionEngine().project(
         ScreenDataProjectionRequest(
             profile = ProjectionProfileFacts(currentProfile = "test"),
@@ -696,6 +730,7 @@ class ScreenDataProjectionEngineTest {
             detailsBySymbol = mapOf(symbol to detail),
             dcfBySymbol = listOfNotNull(dcfAnalysis?.let { symbol to it }).toMap(),
             symbolStateBySymbol = mapOf(symbol to symbolState),
+            issues = issues,
             analystTargetStatisticBySymbol = analystTargetStatistic?.let { mapOf(symbol to it) }.orEmpty(),
         ),
     ).requireSuccess()
@@ -874,7 +909,7 @@ class ScreenDataProjectionEngineTest {
         detailFairValueCents = 12_500L,
         detailSourceLabel = "Weighted target",
         evLowUpsideBps = 1_000,
-        evHighUpsideBps = 6_000,
+        evHighUpsideBps = 4_000,
         providerCategory = ProjectedProviderCategory.Live,
         providerStatusCopy = "Live provider data",
         dcfCoverageStatus = DcfCoverageStatus.Ready,

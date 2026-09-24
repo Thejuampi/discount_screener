@@ -34,6 +34,7 @@ import com.discountscreener.android.data.remote.isUsableCompanyName
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.JournalFactors
 import com.discountscreener.android.domain.model.ScoreJournalRow
+import com.discountscreener.android.domain.model.ScoringEvaluationSnapshot
 import com.discountscreener.android.domain.model.ScoringPreferences
 import kotlin.math.abs
 import com.discountscreener.android.domain.model.LogTableInfo
@@ -303,6 +304,9 @@ open class SQLiteStateStore(
             } else {
                 createScoreJournalSchema(db)
             }
+        }
+        if (oldVersion < 12 && newVersion >= 12) {
+            createScoringEvaluationSnapshotSchema(db)
         }
     }
 
@@ -1049,6 +1053,7 @@ open class SQLiteStateStore(
         createDiscoverySchema(db)
         createTipRanksSchema(db)
         createScoreJournalSchema(db)
+        createScoringEvaluationSnapshotSchema(db)
         createSymbolNoteSchema(db)
         createPortfolioLotSchema(db)
     }
@@ -1174,6 +1179,32 @@ open class SQLiteStateStore(
             """.trimIndent(),
         )
         db.execSQL("CREATE INDEX score_journal_time_idx ON score_journal(scored_at, scoring_model)")
+    }
+
+    /** One row contains one complete evaluation pass. The JSON payload is the atomic boundary. */
+    private fun createScoringEvaluationSnapshotSchema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE scoring_evaluation_snapshot (
+                snapshot_id TEXT PRIMARY KEY,
+                captured_at INTEGER NOT NULL,
+                observation_day_utc TEXT NOT NULL,
+                profile_name TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                policy_version TEXT NOT NULL,
+                input_fingerprint TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX scoring_evaluation_snapshot_time_idx " +
+                "ON scoring_evaluation_snapshot(captured_at, profile_name)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX scoring_evaluation_snapshot_day_idx " +
+                "ON scoring_evaluation_snapshot(profile_name, observation_day_utc)",
+        )
     }
 
     private fun loadTrackedSymbols(db: SQLiteDatabase): List<String> =
@@ -2149,6 +2180,51 @@ open class SQLiteStateStore(
         }
     }
 
+    /** Saves a full scoring pass in one SQLite row and one transaction. */
+    open suspend fun appendScoringEvaluationSnapshot(snapshot: ScoringEvaluationSnapshot) =
+        withContext(ioDispatcher) {
+            val db = writableDatabase
+            db.beginTransaction()
+            try {
+                db.insertWithOnConflict(
+                    "scoring_evaluation_snapshot",
+                    null,
+                    ContentValues().apply {
+                        put("snapshot_id", snapshot.snapshotId)
+                        put("captured_at", snapshot.capturedAtEpochSeconds)
+                        put("observation_day_utc", snapshot.observationDateUtc)
+                        put("profile_name", snapshot.profileName)
+                        put("schema_version", snapshot.schemaVersion)
+                        put("policy_version", snapshot.policyVersion)
+                        put("input_fingerprint", snapshot.inputFingerprint)
+                        put("payload_json", json.encodeToString(snapshot))
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+        }
+
+    /** Complete evaluation passes, oldest first. No automatic retention applies. */
+    suspend fun loadScoringEvaluationSnapshots(
+        profileName: String? = null,
+    ): List<ScoringEvaluationSnapshot> = withContext(ioDispatcher) {
+        val where = if (profileName == null) "" else "WHERE profile_name = ?"
+        val args = if (profileName == null) emptyArray<String>() else arrayOf(profileName)
+        readableDatabase.rawQuery(
+            "SELECT payload_json FROM scoring_evaluation_snapshot $where ORDER BY captured_at, snapshot_id",
+            args,
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(json.decodeFromString<ScoringEvaluationSnapshot>(cursor.getString(0)))
+                }
+            }
+        }
+    }
+
     suspend fun queryDiscoveryScores(
         minScore: Int,
         limit: Int,
@@ -2412,7 +2488,7 @@ open class SQLiteStateStore(
     private fun nowEpochSeconds(): Long = System.currentTimeMillis() / 1_000
 
     companion object {
-        private const val SQLITE_SCHEMA_VERSION = 11
+        private const val SQLITE_SCHEMA_VERSION = 12
 
         /**
          * The `chart_range` value the retrospective's daily bars are stored under.
@@ -2461,7 +2537,7 @@ open class SQLiteStateStore(
             "estimates_snapshot",
             "discovery_symbol", "discovery_score", "discovery_job",
             "tipranks_forecast_cache", "tipranks_usage_snapshot", "tipranks_attempt",
-            "score_journal", "symbol_note", "portfolio_lot",
+            "score_journal", "scoring_evaluation_snapshot", "symbol_note", "portfolio_lot",
         )
         private val LOG_TABLE_QUERIES = listOf(
             LogTableQuery("raw_capture", "captured_at"),
@@ -2470,6 +2546,7 @@ open class SQLiteStateStore(
             LogTableQuery("discovery_job", "started_at"),
             LogTableQuery("tipranks_attempt", "reserved_at"),
             LogTableQuery("score_journal", "scored_at"),
+            LogTableQuery("scoring_evaluation_snapshot", "captured_at"),
         )
     }
 

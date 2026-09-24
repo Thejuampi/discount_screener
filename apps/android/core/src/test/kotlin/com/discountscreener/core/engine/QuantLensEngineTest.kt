@@ -90,7 +90,7 @@ class QuantLensEngineTest {
             ),
         ).requireSuccess()
 
-        assertEquals(QuantLensPrimaryStatus.Available, report.expectedValueRange.primaryStatus)
+        assertEquals(QuantLensPrimaryStatus.Provisional, report.expectedValueRange.primaryStatus)
         assertEquals(ExpectedValueRangeBand.ScenarioWeighted, report.expectedValueRange.band)
         assertEquals(ExpectedValueRangeSource.Dcf, report.expectedValueRange.source)
         assertEquals(12_000, report.expectedValueRange.weightedFairValueCents)
@@ -123,7 +123,7 @@ class QuantLensEngineTest {
     }
 
     @Test
-    fun expected_value_marks_amzn_like_model_analyst_gap_disputed_without_single_upside() {
+    fun experimental_model_gap_does_not_dispute_analyst_range() {
         val report = QuantLensEngine.analyze(
             minimalInput(
                 detail = detail(
@@ -146,17 +146,15 @@ class QuantLensEngineTest {
             ),
         ).requireSuccess()
 
-        assertEquals(QuantLensPrimaryStatus.Disputed, report.expectedValueRange.primaryStatus)
-        assertEquals(ExpectedValueRangeBand.Disputed, report.expectedValueRange.band)
-        assertEquals(null, report.expectedValueRange.weightedFairValueCents)
-        assertEquals(null, report.expectedValueRange.weightedUpsideBps)
-        assertEquals(1_152L, report.expectedValueRange.modelLowFairValueCents)
+        assertEquals(QuantLensPrimaryStatus.Available, report.expectedValueRange.primaryStatus)
+        assertEquals(ExpectedValueRangeBand.ScenarioWeighted, report.expectedValueRange.band)
+        assertEquals(null, report.expectedValueRange.modelLowFairValueCents)
         assertEquals(31_500L, report.expectedValueRange.analystBaseFairValueCents)
-        assertEquals(true, report.expectedValueRange.reasonCodes.contains(QuantLensReasonCode.ModelAnalystDisagreement))
+        assertEquals(false, report.expectedValueRange.reasonCodes.contains(QuantLensReasonCode.ModelAnalystDisagreement))
     }
 
     @Test
-    fun expected_value_marks_2501_to_5000_bps_gap_as_tension_without_primary() {
+    fun experimental_model_gap_does_not_report_tension() {
         val selection = QuantLensExpectedValuePolicy.select(
             detail = detail(
                 marketPriceCents = 20_000,
@@ -175,9 +173,9 @@ class QuantLensEngineTest {
             ),
         )
 
-        assertEquals(QuantLensPrimaryStatus.Disputed, selection.primaryStatus)
-        assertEquals(ExpectedValueRangeBand.Tension, selection.band)
-        assertEquals(null, selection.weightedFairValueCents)
+        assertEquals(QuantLensPrimaryStatus.Available, selection.primaryStatus)
+        assertEquals(ExpectedValueRangeBand.ScenarioWeighted, selection.band)
+        assertEquals(null, selection.disagreementBps)
     }
 
     @Test

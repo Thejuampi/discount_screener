@@ -3,6 +3,8 @@ package com.discountscreener.android.domain.usecase
 import com.discountscreener.android.data.debug.OutcomeReportBuilder
 import com.discountscreener.android.data.market.DailyCandleSource
 import com.discountscreener.android.domain.model.ScoreJournalRow
+import com.discountscreener.android.domain.model.JournalFactors
+import com.discountscreener.android.domain.model.ScoringEvaluationSnapshot
 import java.io.File
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -11,13 +13,14 @@ import kotlinx.coroutines.withContext
 /** Where the report landed, and how much journal it had to read. */
 data class OutcomeResult(val path: String, val rowCount: Int, val symbolCount: Int)
 
-/**
- * The journal's reader side. Narrow for the same reason [DailyCandleSource] is: the store writes
- * scores on every refresh and this use case reads them once on demand, and one combined interface
- * would hand each side a method it has no business calling.
- */
+/** Legacy reader for reports built before atomic evaluation snapshots existed. */
 fun interface ScoreJournalSource {
     suspend fun load(): List<ScoreJournalRow>
+}
+
+/** Profile-aware source of atomic scoring cohorts. */
+fun interface ScoringEvaluationSnapshotSource {
+    suspend fun load(profile: String): List<ScoringEvaluationSnapshot>
 }
 
 /**
@@ -31,22 +34,26 @@ fun interface StreetDiagnosticSource {
 }
 
 /**
- * Runs the outcome measurement over the score journal and writes the report.
+ * Runs the outcome measurement over profile-scoped atomic snapshots and writes the report.
  *
- * This is the reading half of the journal's reason to exist: the app records what each model said
- * on the day it said it, and this joins those rows to the daily bars that followed. Same private-
- * storage discipline as the retrospective — readable with
+ * The app records what each model said on the day it said it.
+ * This use case joins those rows to later daily bars. It keeps the retrospective's private-storage
+ * discipline and remains readable with
  * `adb exec-out run-as <applicationId> cat files/<name>.txt`.
  */
 class RunOutcomeReportUseCase(
-    private val journalSource: ScoreJournalSource,
+    private val journalSource: ScoreJournalSource? = null,
+    private val evaluationSnapshotSource: ScoringEvaluationSnapshotSource? = null,
     private val candleSource: DailyCandleSource,
     private val streetDiagnosticSource: StreetDiagnosticSource,
     private val exportDirectory: File,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     suspend operator fun invoke(profile: String): OutcomeResult = withContext(ioDispatcher) {
-        var rows = journalSource.load()
+        val rows = evaluationSnapshotSource
+            ?.load(profile)
+            ?.flatMap { snapshot -> snapshot.toJournalRows() }
+            ?: journalSource?.load().orEmpty()
         var candles = candleSource.loadBacktestCandles()
         var street = streetDiagnosticSource.upsideBpsBySymbol()
         var target = File(exportDirectory, "outcome-$profile.txt")
@@ -62,5 +69,27 @@ class RunOutcomeReportUseCase(
             ),
         )
         OutcomeResult(target.absolutePath, rows.size, candles.size)
+    }
+}
+
+private fun ScoringEvaluationSnapshot.toJournalRows(): List<ScoreJournalRow> = modelResults.flatMap { result ->
+    result.rows.map { row ->
+        ScoreJournalRow(
+            symbol = row.symbol,
+            scoringModel = result.model.name,
+            scoredAtEpochSeconds = capturedAtEpochSeconds,
+            fundamentalsScore = row.fundamentalsScore,
+            technicalScore = row.technicalScore,
+            forecastScore = row.forecastScore,
+            regimeScore = row.regimeScore,
+            compositeScore = row.compositeScore,
+            compositeScoreBase = row.compositeScoreBase,
+            marketPriceCents = row.marketPriceCents,
+            factors = JournalFactors(
+                fundamentals = row.fundamentalsFactors,
+                technical = row.technicalFactors,
+                forecast = row.forecastFactors,
+            ),
+        )
     }
 }

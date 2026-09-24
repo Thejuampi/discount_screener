@@ -44,7 +44,7 @@ import kotlinx.coroutines.withContext
  * The daily *bars* are the exception, and the reason the earlier rule changed. The retrospective
  * needs dated prices and nothing else in the app has them: these bars are fetched at `1y`/`1d`,
  * used once, and were dropped on exit. They now go through a bounded [CandleSpool] before a
- * [DailyCandleSink] writes them. Only a usable reading drains that spool into the store.
+ * [DailyCandleSink] writes them. Market-policy usability does not control outcome-price storage.
  *
  * The original rule's last clause still holds. The sink stores them under a key that is not a
  * `ChartRange` name, so the second per-symbol series stays off a published contract.
@@ -138,17 +138,21 @@ open class MarketDataRepository(
         try {
             spool = sink?.let { CandleSpool(candleStagingDirectory ?: defaultCandleStagingDirectory()) }
             val fetched = fetchUniverse(symbols, now, spool)
-            val regime = computeMarketRegime(
-                bundle = fetchBundle(now),
-                universe = fetched.views,
-                previousExposurePct = cachedRegime()?.suggestedExposurePct,
-            )
-            val usable = RegimeScoringPolicy.fromRegime(regime) != null
-            // Persist first. A malformed or failed spool must not publish a fresh regime that
-            // prevents the next refresh from retrying its evidence.
-            if (usable && sink != null) {
-                spool?.persistInto(sink, now)
+            val regime = try {
+                computeMarketRegime(
+                    bundle = fetchBundle(now),
+                    universe = fetched.views,
+                    previousExposurePct = cachedRegime()?.suggestedExposurePct,
+                )
+            } finally {
+                // The retrospective needs the tracked prices, even when index or sentiment data
+                // makes the market bucket unavailable. Spool validation still prevents partial
+                // publication when the staged file itself is damaged.
+                if (sink != null) {
+                    spool?.persistInto(sink, now)
+                }
             }
+            val usable = RegimeScoringPolicy.fromRegime(regime) != null
             mutex.withLock {
                 lastComputed = regime
                 if (usable) {

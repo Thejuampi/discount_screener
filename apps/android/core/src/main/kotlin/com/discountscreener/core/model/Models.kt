@@ -98,6 +98,16 @@ enum class OpportunityScoringModel {
     AggressiveV5,
 }
 
+/** Stable formula identity stored with every outcome cohort. */
+fun OpportunityScoringModel.formulaVersion(): String = when (this) {
+    OpportunityScoringModel.Legacy -> "legacy-buffett/1"
+    OpportunityScoringModel.Aggressive -> "aggressive-v1/1"
+    OpportunityScoringModel.AggressiveV2 -> "aggressive-v2/1"
+    OpportunityScoringModel.AggressiveV3 -> "aggressive-v3/1"
+    OpportunityScoringModel.AggressiveV4 -> "aggressive-v4/1"
+    OpportunityScoringModel.AggressiveV5 -> "aggressive-v5/1"
+}
+
 /**
  * Whether this model has a fourth, market bucket at all.
  *

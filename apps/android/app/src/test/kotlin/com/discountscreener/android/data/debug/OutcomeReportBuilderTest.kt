@@ -81,6 +81,31 @@ class OutcomeReportBuilderTest {
         assertTrue("insufficient" in text)
     }
 
+    @Test
+    fun paired_v2_and_v5_rows_emit_the_controlled_ablation_section() {
+        var symbols = listOf("AAPL", "MSFT", "F", "T", "XOM", "JPM", "PG", "CVX", "CAT", "LIN", "NEE", "AMT")
+        var paired = symbols.flatMap { symbol ->
+            listOf(row(symbol = symbol, model = "AggressiveV2"), row(symbol = symbol, model = "AggressiveV5"))
+        }
+
+        var text = build(rows = paired)
+
+        assertTrue("== Paired V2/V5 experiment ==" in text)
+        assertTrue("paired rows: 12" in text)
+        assertTrue("-- v5-no-market --" in text)
+        assertTrue("-- v5-mean-no-bonus-no-beta --" in text)
+        assertTrue("-- v5-fundamentals-v2-shell --" in text)
+    }
+
+    @Test
+    fun unpaired_legacy_rows_are_named_as_unavailable_for_the_experiment() {
+        var text = build(rows = listOf(row(model = "AggressiveV2"), row(symbol = "MSFT", model = "AggressiveV5")))
+
+        assertTrue("== Paired V2/V5 experiment ==" in text)
+        assertTrue("paired rows: 0" in text)
+        assertTrue("no exact symbol-time pairs" in text)
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
     private fun rows(

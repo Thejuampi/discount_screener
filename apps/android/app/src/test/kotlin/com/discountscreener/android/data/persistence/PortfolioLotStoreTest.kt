@@ -27,9 +27,9 @@ class PortfolioLotStoreTest {
     }
 
     @Test
-    fun schema_version_is_eleven() = runTest {
+    fun schema_version_is_twelve() = runTest {
         withStore { store ->
-            assertEquals(11, store.readableDatabase.version)
+            assertEquals(12, store.readableDatabase.version)
         }
     }
 

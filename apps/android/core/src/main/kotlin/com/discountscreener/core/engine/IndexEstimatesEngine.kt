@@ -36,7 +36,7 @@ object IndexEstimatesEngine {
         }
 
         val scenarios = EstimateScenario.entries.map { scenario ->
-            computeScenario(scenario, symbols, dcfBySymbol, totalMarketCapDollars, currentWeightedPriceCents)
+            computeScenario(scenario, symbols, dcfBySymbol)
         }
 
         return IndexEstimatesReport(
@@ -106,27 +106,29 @@ object IndexEstimatesEngine {
         scenario: EstimateScenario,
         symbols: List<SymbolDetail>,
         dcfBySymbol: Map<String, DcfAnalysis>,
-        totalMarketCapDollars: Long,
-        currentWeightedPriceCents: Long,
     ): ScenarioEstimate {
         var numerator = 0.0
+        var upsideNumerator = 0.0
         var denominatorCap = 0L
         var coverage = 0
 
         for (symbol in symbols) {
             val cap = symbol.fundamentals?.marketCapDollars ?: continue
-            if (cap <= 0L) continue
+            if (cap <= 0L || symbol.marketPriceCents <= 0L) continue
             val fairValue = scenarioFairValue(scenario, symbol, dcfBySymbol) ?: continue
+            if (fairValue <= 0L) continue
             numerator += fairValue.toDouble() * cap.toDouble()
+            upsideNumerator +=
+                (fairValue.toDouble() / symbol.marketPriceCents.toDouble() - 1.0) * cap.toDouble()
             denominatorCap += cap
             coverage++
         }
 
         val weightedPrice = if (denominatorCap > 0L) (numerator / denominatorCap).toLong() else 0L
-        val impliedUpside = if (currentWeightedPriceCents <= 0L || coverage == 0) {
+        val impliedUpside = if (denominatorCap <= 0L) {
             0
         } else {
-            ((weightedPrice.toDouble() / currentWeightedPriceCents - 1.0) * 10_000).roundToInt()
+            (upsideNumerator / denominatorCap.toDouble() * 10_000).roundToInt()
         }
 
         return ScenarioEstimate(

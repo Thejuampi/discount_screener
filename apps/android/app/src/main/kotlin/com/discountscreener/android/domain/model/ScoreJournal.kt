@@ -11,8 +11,8 @@ import kotlinx.serialization.Serializable
  * replay against. So the app records what each model said, on the day it said it, and the answer
  * arrives in weeks rather than being asserted now.
  *
- * Both models are journalled whenever the user views one, so V3 and V4 accumulate against the same
- * days and the same prices. A comparison built from two different date ranges would be worthless.
+ * Every completed refresh journals V1 through V5 from the same inputs and timestamp. Model
+ * selection does not change the comparison population.
  *
  * [compositeScoreBase] is kept beside [compositeScore] because the difference is what the market
  * dimension did, and a journal that stored only the final could never separate "the model changed"

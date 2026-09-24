@@ -164,7 +164,7 @@ internal fun OpportunityList(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        RankOrdinal(index = (row.scoreRank ?: (index + 1)) - 1)
+                        RankOrdinal(index = index)
                         SymbolCompanyTitle(
                             symbol = row.symbol,
                             companyName = row.companyName,
