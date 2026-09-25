@@ -55,6 +55,31 @@ class OpportunityListRankOrdinalTest {
         composeRule.onNode(hasText("#2") and hasText("SYM1.BA")).assertExists()
     }
 
+    @Test
+    fun the_placing_follows_visible_order_even_when_saved_ranks_have_gaps() {
+        composeRule.setContent {
+            DiscountScreenerTheme {
+                DashboardScreen(
+                    state = DashboardUiState(
+                        loading = false,
+                        startupPhase = DashboardStartupPhase.Ready,
+                        currentProfile = "merval",
+                        opportunityScoringModel = OpportunityScoringModel.AggressiveV3,
+                        opportunityRows = listOf(
+                            listRow("AMZN", score = 40, rank = 9),
+                            listRow("MSFT", score = 80, rank = 12),
+                        ),
+                    ),
+                    onAction = { },
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNode(hasText("#1") and hasText("AMZN")).assertExists()
+        composeRule.onNode(hasText("#2") and hasText("MSFT")).assertExists()
+    }
+
     /** Scrolls the list until [ordinal] is composed, then requires it on screen. */
     private fun assertOrdinalReached(ordinal: String) {
         composeRule.onNode(verticalList()).performScrollToNode(hasText(ordinal))
@@ -63,15 +88,9 @@ class OpportunityListRankOrdinalTest {
 
     private fun setOpportunitiesContent(rowCount: Int) {
         val rows = List(rowCount) { index ->
-            OpportunityListRow(
+            listRow(
                 symbol = if (index == 0) "TOP.BA" else "SYM$index.BA",
-                marketPriceCents = 10_000L,
-                intrinsicValueCents = 15_000L,
-                gapBps = 5_000,
-                confidence = ConfidenceBand.High,
-                isWatched = false,
-                compositeScore = 50 - index,
-                coverageCount = 3,
+                score = 50 - index,
             )
         }
         composeRule.setContent {
@@ -90,4 +109,16 @@ class OpportunityListRankOrdinalTest {
         }
         composeRule.waitForIdle()
     }
+
+    private fun listRow(symbol: String, score: Int, rank: Int? = null) = OpportunityListRow(
+        symbol = symbol,
+        marketPriceCents = 10_000L,
+        intrinsicValueCents = 15_000L,
+        gapBps = 5_000,
+        confidence = ConfidenceBand.High,
+        isWatched = false,
+        compositeScore = score,
+        coverageCount = 3,
+        scoreRank = rank,
+    )
 }

@@ -201,10 +201,7 @@ pub const IMPAIRMENT_COMPONENTS: DriverOperator = DriverOperator {
     operation: "aggregate_or_sum_of_components",
 };
 pub const RESTRUCTURING_CHARGES: DriverOperator = DriverOperator {
-    qnames: &[
-        "RestructuringCharges",
-        "RestructuringCosts",
-    ],
+    qnames: &["RestructuringCharges", "RestructuringCosts"],
     unit: "USD",
     period_shape: "duration",
     operation: "select_one_equivalent",

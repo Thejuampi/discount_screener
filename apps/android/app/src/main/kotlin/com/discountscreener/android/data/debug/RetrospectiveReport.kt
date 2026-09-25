@@ -78,5 +78,6 @@ object RetrospectiveReport {
         "  held=${report.heldCount} dropped: " +
             "no-entry-bar=${report.droppedNoEntryBar} " +
             "no-exit-bar=${report.droppedNoExitBar} " +
-            "unpriced-entry=${report.droppedUnpricedEntry}"
+            "unpriced-entry=${report.droppedUnpricedEntry} " +
+            "same-entry-bar=${report.droppedSameEntryBar}"
 }

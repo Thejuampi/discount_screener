@@ -583,6 +583,88 @@ class YahooFinanceClientTest {
     }
 
     @Test
+    fun payout_at_one_is_zero_retention() {
+        var financialData = buildJsonObject {
+            put("payoutRatio", buildJsonObject {
+                put("raw", JsonPrimitive(1.0))
+            })
+        }
+        assertEquals(0, resolveRetentionBps(financialData, JsonObject(emptyMap())))
+    }
+
+    @Test
+    fun payout_above_one_is_zero_retention() {
+        var financialData = buildJsonObject {
+            put("payoutRatio", buildJsonObject {
+                put("raw", JsonPrimitive(1.47))
+            })
+        }
+        assertEquals(0, resolveRetentionBps(financialData, JsonObject(emptyMap())))
+    }
+
+    @Test
+    fun quote_summary_404_recovers_from_the_quote_page() = runTest {
+        var html = """
+            <!doctype html><html><head><meta property="og:title" content="Bank of New York Mellon (BK) Stock Price, News, Quote &amp; History - Yahoo Finance"></head><body><script>
+            window.__TEST__ = "{\"financialData\":{\"currentPrice\":{\"raw\":91.11},\"targetMeanPrice\":{\"raw\":100.00},\"targetMedianPrice\":{\"raw\":99.00},\"targetLowPrice\":{\"raw\":80.00},\"targetHighPrice\":{\"raw\":120.00},\"numberOfAnalystOpinions\":{\"raw\":12},\"recommendationMean\":{\"raw\":2.10}},\"defaultKeyStatistics\":{\"trailingEps\":{\"raw\":4.20}},\"recommendationTrend\":{\"trend\":[{\"period\":\"0m\",\"strongBuy\":4,\"buy\":5,\"hold\":2,\"sell\":1,\"strongSell\":0}]}}";
+            </script></body></html>
+        """.trimIndent()
+        var interceptor = Interceptor { chain ->
+            var url = chain.request().url.toString()
+            var (code, body, type) = when {
+                url.contains("getcrumb") -> Triple(200, "testcrumb", "text/plain")
+                url.contains("quoteSummary") -> Triple(
+                    404,
+                    """{"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: BK"}}}""",
+                    "application/json",
+                )
+                url.contains("/quote/") -> Triple(200, html, "text/html")
+                else -> Triple(200, "<html></html>", "text/html")
+            }
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(code)
+                .message(if (code == 200) "OK" else "Not Found")
+                .body(body.toResponseBody(type.toMediaType()))
+                .build()
+        }
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        assertEquals(9_111L, client.fetchSymbol("BK").snapshot?.marketPriceCents)
+    }
+
+    @Test
+    fun quote_summary_server_error_does_not_scrape_the_quote_page() = runTest {
+        var html = """
+            <!doctype html><html><head><meta property="og:title" content="Bank of New York Mellon (BK) Stock Price, News, Quote &amp; History - Yahoo Finance"></head><body><script>
+            window.__TEST__ = "{\"financialData\":{\"currentPrice\":{\"raw\":91.11},\"targetMeanPrice\":{\"raw\":100.00},\"targetMedianPrice\":{\"raw\":99.00},\"targetLowPrice\":{\"raw\":80.00},\"targetHighPrice\":{\"raw\":120.00},\"numberOfAnalystOpinions\":{\"raw\":12},\"recommendationMean\":{\"raw\":2.10}},\"defaultKeyStatistics\":{\"trailingEps\":{\"raw\":4.20}},\"recommendationTrend\":{\"trend\":[{\"period\":\"0m\",\"strongBuy\":4,\"buy\":5,\"hold\":2,\"sell\":1,\"strongSell\":0}]}}";
+            </script></body></html>
+        """.trimIndent()
+        var interceptor = Interceptor { chain ->
+            var url = chain.request().url.toString()
+            var (code, body, type) = when {
+                url.contains("getcrumb") -> Triple(200, "testcrumb", "text/plain")
+                url.contains("quoteSummary") -> Triple(500, "upstream", "text/plain")
+                url.contains("/quote/") -> Triple(200, html, "text/html")
+                else -> Triple(404, "missing", "text/plain")
+            }
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(code)
+                .message(if (code == 200) "OK" else "Error")
+                .body(body.toResponseBody(type.toMediaType()))
+                .build()
+        }
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        assertNull(client.fetchSymbol("BK").snapshot)
+    }
+
+    @Test
     fun missing_payout_in_both_modules_yields_null_retention() {
         val empty = JsonObject(emptyMap())
         assertNull(resolveRetentionBps(empty, empty))
@@ -860,5 +942,30 @@ class YahooFinanceClientTest {
                 }
             }.buffer()
         }
+    }
+
+    @Test
+    fun fetch_symbol_reads_country_from_quote_summary() = runTest {
+        var body = javaClass.classLoader!!.getResource("yahoo/quoteSummary/AAPL.json")!!.readText()
+        var interceptor = Interceptor { chain ->
+            var url = chain.request().url.toString()
+            var (code, payload, type) = when {
+                url.contains("getcrumb") -> Triple(200, "testcrumb", "text/plain")
+                url.contains("quoteSummary") -> Triple(200, body, "application/json")
+                else -> Triple(200, "<html></html>", "text/html")
+            }
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(code)
+                .message("OK")
+                .body(payload.toResponseBody(type.toMediaType()))
+                .build()
+        }
+        var client = YahooFinanceClient(
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+
+        assertEquals("United States", client.fetchSymbol("AAPL").fundamentals?.country)
     }
 }

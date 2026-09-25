@@ -1,0 +1,9 @@
+# Android pre-earnings gate. Counts and Alpha Vantage budget only.
+# Cell, stale, hedge, and trail identities live in the engine. Do not put percents here.
+version: earnings-gate-policy/2
+min_sue_quarters: 16
+av_daily_limit: 25
+av_per_minute: 5
+av_cache_fresh_days: 7
+sue_match_days: 7
+min_revenue_trail_quarters: 4

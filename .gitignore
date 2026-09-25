@@ -24,10 +24,20 @@
 *.jks
 mutants.out*/
 .claude/
-.opencode/
+/.agents/
+/.codex/
+/.grok/
+/.opencode/
+/_bmad/
+/_bmad-output/
+/mcps/
+/plans/
+/classes.jar
+/emulator.png
+opencode.json
+.cursor/skills/
 .idea/
 apps/.agents/
-.agents/workspace/
 feed-errors.log
 help-output.txt
 help-output-direct.txt
@@ -53,6 +63,8 @@ Thumbs.db
 /apps/windows/dist/
 
 # ── Personal / sensitive data — NEVER commit ──
+alphavantage.key
+**/alphavantage.key
 schwab reports/
 *.sqlite
 *.sqlite-journal
@@ -69,3 +81,8 @@ worktrees/
 # Cargo build artifacts for the windows workspace and its members
 /apps/windows/src-tauri/target/
 /apps/windows/src-tauri/*/target/
+
+# JVM crash dumps left by test workers that run out of native memory
+hs_err_pid*.log
+replay_pid*.log
+*.stackdump

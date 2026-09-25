@@ -10,13 +10,11 @@ kotlin {
 }
 
 val valuationPolicyYaml = rootProject.projectDir.resolve("../../shared/contracts/valuation-policy.yaml")
-val earningsCheapnessPuml = rootProject.projectDir.resolve(
-    "../../_bmad-output/planning-artifacts/earnings-cheapness.puml",
-)
+val earningsGatePolicyYaml = rootProject.projectDir.resolve("../../shared/contracts/earnings-gate-policy.yaml")
 
 tasks.processResources {
     from(valuationPolicyYaml)
-    from(earningsCheapnessPuml)
+    from(earningsGatePolicyYaml)
 }
 
 dependencies {

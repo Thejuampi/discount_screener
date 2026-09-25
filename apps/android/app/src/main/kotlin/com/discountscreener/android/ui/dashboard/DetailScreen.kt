@@ -64,6 +64,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -80,6 +81,10 @@ import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.ChangeDirection
 import com.discountscreener.android.presentation.dashboard.DashboardAction
+import com.discountscreener.android.presentation.dashboard.DetailEarningsUi
+import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
+import com.discountscreener.android.presentation.dashboard.PositionsRow
+import com.discountscreener.android.presentation.dashboard.presentDetailEarnings
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSubtab
 import com.discountscreener.android.presentation.dashboard.EvRangeRailModel
@@ -122,6 +127,75 @@ import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
+const val DETAIL_EARNINGS_SECTION = "detailEarningsSection"
+const val DETAIL_EARNINGS_ABSENT = "detailEarningsAbsent"
+const val DETAIL_SNAPSHOT_LIST = "detailSnapshotList"
+
+@Composable
+internal fun DetailEarningsPanel(earnings: DetailEarningsUi) {
+    when (earnings) {
+        is DetailEarningsUi.Priced -> {
+            Column(modifier = Modifier.testTag(DETAIL_EARNINGS_SECTION)) {
+                earnings.events.forEach { row -> EarningsEventCard(row) }
+            }
+        }
+        is DetailEarningsUi.Scheduled -> EarningsStatusCard(
+            kicker = earnings.symbol,
+            title = "${earnings.closenessLabel} · ${earnings.reportDate}",
+            body = earnings.body,
+            tag = DETAIL_EARNINGS_SECTION,
+        )
+        is DetailEarningsUi.Quiet -> Column(modifier = Modifier.testTag(DETAIL_EARNINGS_SECTION)) {
+            EarningsStatusCard(
+                title = earnings.title,
+                body = earnings.body,
+                tag = DETAIL_EARNINGS_ABSENT,
+            )
+        }
+        DetailEarningsUi.Loading -> EarningsStatusCard(
+            title = "Reading the earnings calendar",
+            body = "The next report date comes from the shared earnings cache.",
+            tag = DETAIL_EARNINGS_SECTION,
+        )
+    }
+}
+
+@Composable
+private fun EarningsStatusCard(
+    title: String,
+    body: String,
+    tag: String,
+    kicker: String? = null,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(tag),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            kicker?.let { symbol ->
+                Text(
+                    text = symbol,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = body,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun DetailScreen(
@@ -144,6 +218,11 @@ fun DetailScreen(
     regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
     /** What the reader wrote about this symbol. Empty when nothing was written. */
     symbolNote: String = "",
+    earningsEvents: List<EarningsEventRowUi> = emptyList(),
+    earningsLoading: Boolean = false,
+    earningsCalendarEpoch: Long? = null,
+    earningsToday: java.time.LocalDate? = null,
+    positionRows: List<PositionsRow> = emptyList(),
     onAction: (DashboardAction) -> Unit,
 ) {
     val tickerSearchActive = tickerSearchExpanded ||
@@ -306,6 +385,15 @@ fun DetailScreen(
                     projectedDetail = routeProjectedDetail,
                     detailNotice = detailNotice,
                     symbolNote = symbolNote,
+                    positionRows = positionRows,
+                    earnings = presentDetailEarnings(
+                        symbol = route.symbol,
+                        events = earningsEvents.filter { it.symbol.equals(route.symbol, ignoreCase = true) },
+                        calendarEpoch = earningsCalendarEpoch,
+                        scoreEpoch = scoreRow?.nextEarningsEpoch,
+                        today = earningsToday ?: java.time.LocalDate.ofEpochDay(0),
+                        loading = earningsLoading,
+                    ),
                     onAction = onAction,
                 )
                 DetailSubtab.Score -> ScoreContent(
@@ -794,6 +882,8 @@ private fun SnapshotContent(
     projectedDetail: ProjectedDetailData?,
     detailNotice: DashboardNotice? = null,
     symbolNote: String = "",
+    positionRows: List<PositionsRow> = emptyList(),
+    earnings: DetailEarningsUi,
     onAction: (DashboardAction) -> Unit,
 ) {
     var replayCandles = replayBackingCandles ?: candles
@@ -830,7 +920,10 @@ private fun SnapshotContent(
     var volumeSizedCandles by rememberSaveable { mutableStateOf(false) }
     var timeAxisGutter = timeAxisTrailingGutter(volumeProfileModel != null)
 
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(
+        modifier = Modifier.testTag(DETAIL_SNAPSHOT_LIST),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         item {
             DetailScoreHeader(
                 route = route,
@@ -840,6 +933,16 @@ private fun SnapshotContent(
                 symbolNote = symbolNote,
                 onAction = onAction,
             )
+        }
+        item { DetailEarningsPanel(earnings) }
+
+        positionRows.forEach { row ->
+            item(key = "position:${row.symbol}:${row.inputIndex}") {
+                PositionFactsBlock(
+                    row = row,
+                    heading = "Position lot ${row.inputIndex + 1}",
+                )
+            }
         }
 
         item {
@@ -1372,92 +1475,60 @@ private fun ModelValuationSection(
     ui: ValuationJudgmentUi,
     projectedDetail: ProjectedDetailData?,
 ) {
-    Text("Valuation", fontWeight = FontWeight.Bold)
-    priceLine(detail, ui)?.let { line ->
+    valuationCardLines(detail, ui).forEach { line ->
         Text(
-            text = line,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.error,
-        )
-    }
-    ui.caveatLines.forEach { line ->
-        Text(
-            text = line,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-    modelReasonLines(ui).forEach { line ->
-        Text(
-            text = line,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-    var officialGapBps = ui.officialGapBps
-    if (officialGapBps != null) {
-        Text(
-            text = "Identity vs analyst $officialGapBps bps",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-    honestyPairLines(ui).forEach { line ->
-        var bent = line != ui.honestValueLine
-        Text(
-            text = line,
-            style = if (line == ui.nonHonestReason) {
-                MaterialTheme.typography.bodySmall
-            } else {
-                MaterialTheme.typography.titleSmall
-            },
-            fontWeight = if (bent) FontWeight.Normal else FontWeight.SemiBold,
-            color = if (bent) {
-                MaterialTheme.colorScheme.tertiary
-            } else {
-                MaterialTheme.colorScheme.onSurface
-            },
-        )
-    }
-    ui.nonHonestLines.forEach { line ->
-        Text(
-            text = line,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.tertiary,
-        )
-        Text(
-            text = "Price ${money(detail.marketPriceCents)}",
-            style = MaterialTheme.typography.labelMedium,
-        )
-        // With no primary the card would otherwise be a stance token alone, so this is where the
-        // reader gets both series. When a primary exists they already render above; repeating
-        // them here printed the same numbers three times on one screen.
-        judgmentReferenceLines(ui).forEach { line ->
-            Text(
-                text = line,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-    var ownModel = ownModelLines(ui)
-    if (ownModel.isNotEmpty()) {
-        ownModel.forEach { line ->
-            Text(
-                text = line,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Text(
-            text = ui.horizonPriceNote,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            text = line.text,
+            style = valuationLineStyle(line.role),
+            fontWeight = valuationLineWeight(line.role),
+            color = valuationLineColor(line.role),
         )
     }
     WaccAssumptionsSection(projectedDetail = projectedDetail)
     FcfDiagnosticsSection(projectedDetail = projectedDetail)
     AnalystConcentrationSection(detail = detail)
+}
+
+@Composable
+private fun valuationLineStyle(role: ValuationLineRole): TextStyle = when (role) {
+    ValuationLineRole.Title -> MaterialTheme.typography.bodyLarge
+    ValuationLineRole.Price -> MaterialTheme.typography.bodyMedium
+    ValuationLineRole.Caveat -> MaterialTheme.typography.bodySmall
+    ValuationLineRole.Reason -> MaterialTheme.typography.bodySmall
+    ValuationLineRole.Gap -> MaterialTheme.typography.labelMedium
+    ValuationLineRole.HonestAnchor -> MaterialTheme.typography.titleSmall
+    ValuationLineRole.BentAnchor -> MaterialTheme.typography.titleSmall
+    ValuationLineRole.BentReason -> MaterialTheme.typography.bodySmall
+    ValuationLineRole.KnobNote -> MaterialTheme.typography.bodySmall
+    ValuationLineRole.Series -> MaterialTheme.typography.labelSmall
+    ValuationLineRole.OwnModel -> MaterialTheme.typography.labelSmall
+    ValuationLineRole.OwnModelNote -> MaterialTheme.typography.labelSmall
+}
+
+/**
+ * The label styles carry `FontWeight.Medium` of their own, so a blanket `Normal` here would thin
+ * every gap, series and own-model line on the card.
+ */
+private fun valuationLineWeight(role: ValuationLineRole): FontWeight = when (role) {
+    ValuationLineRole.Title -> FontWeight.Bold
+    ValuationLineRole.HonestAnchor -> FontWeight.SemiBold
+    ValuationLineRole.Gap,
+    ValuationLineRole.Series,
+    ValuationLineRole.OwnModel,
+    ValuationLineRole.OwnModelNote,
+    -> FontWeight.Medium
+    else -> FontWeight.Normal
+}
+
+@Composable
+private fun valuationLineColor(role: ValuationLineRole): Color = when (role) {
+    ValuationLineRole.Price -> MaterialTheme.colorScheme.error
+    ValuationLineRole.HonestAnchor -> MaterialTheme.colorScheme.onSurface
+    ValuationLineRole.BentAnchor,
+    ValuationLineRole.BentReason,
+    ValuationLineRole.KnobNote,
+    -> MaterialTheme.colorScheme.tertiary
+    ValuationLineRole.Title -> MaterialTheme.colorScheme.onSurface
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
 @Composable
@@ -3656,14 +3727,6 @@ internal fun modelReasonLines(ui: ValuationJudgmentUi): List<String> =
     ui.reasonLines.filterNot { line ->
         line == "Primary is the analyst range." || line == "Primary is the identity model."
     }
-
-private fun priceLine(
-    detail: SymbolDetail,
-    ui: ValuationJudgmentUi,
-): String? {
-    var last = ui.lastPriceCents ?: detail.marketPriceCents.takeIf { it > 0L } ?: return null
-    return "${ui.lastPriceLabel} ${money(last)}"
-}
 
 /** Our own model. It shows small, under the anchor, and the score never reads it. */
 internal fun ownModelLines(ui: ValuationJudgmentUi): List<String> = buildList {

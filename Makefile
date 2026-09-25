@@ -5,6 +5,7 @@ REPO_ROOT := $(subst \,/,$(CURDIR))
 DESKTOP_DIR := $(REPO_ROOT)/apps/desktop
 ANDROID_DIR := $(REPO_ROOT)/apps/android
 WINDOWS_DIR := $(REPO_ROOT)/apps/windows
+FLUTTER_DIR := $(REPO_ROOT)/apps/flutter
 DIST_DIR := $(REPO_ROOT)/dist
 APK_EXPORT_DEBUG := $(DIST_DIR)/discount-screener-debug.apk
 
@@ -17,7 +18,8 @@ NPX := npx
         desktop-build desktop-test desktop-clean desktop-fmt desktop-check desktop-release desktop-smoke desktop-run \
         android-build android-test android-clean android-release android-run android-run-qa android-signing-bootstrap apk \
         windows-run windows-dev windows-stop windows-build windows-test run-windows \
-        contracts-test
+        flutter-test flutter-build-windows flutter-run-windows flutter-build-android flutter-run-android \
+        contracts-test repo-check
 
 run: desktop-run
 
@@ -104,8 +106,30 @@ windows-build:
 windows-test:
 	$(CARGO) test --manifest-path $(WINDOWS_DIR)/src-tauri/Cargo.toml
 
+# ── Flutter ──
+
+flutter-test:
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/validate-flutter.ps1"
+
+flutter-build-windows:
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/build-flutter-windows.ps1"
+
+flutter-run-windows:
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/build-flutter-windows.ps1" -Run
+
+flutter-build-android:
+	pushd "$(FLUTTER_DIR)" && flutter build apk --debug && popd
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; Copy-Item -Force '$(FLUTTER_DIR)/build/app/outputs/flutter-apk/app-debug.apk' '$(DIST_DIR)/discount-screener-flutter-debug.apk'"
+
+flutter-run-android:
+	pushd "$(FLUTTER_DIR)" && flutter run && popd
+
 # ── Contracts (cross-platform) ──
 
 contracts-test:
-	$(CARGO) test --manifest-path $(DESKTOP_DIR)/Cargo.toml contract_fixture
-	pushd "$(ANDROID_DIR)" && $(GRADLE) :core:test --tests com.discountscreener.core.contracts.ContractFixtureTest && popd
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/validate-contracts.ps1"
+
+# ── Repository structure ──
+
+repo-check:
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/check-repo-structure.ps1"

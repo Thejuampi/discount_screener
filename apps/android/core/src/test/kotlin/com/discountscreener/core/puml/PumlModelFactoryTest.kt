@@ -2,8 +2,6 @@ package com.discountscreener.core.puml
 
 import com.discountscreener.core.runtime.Model
 import com.discountscreener.core.runtime.ModelValue
-import java.nio.file.Files
-import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -115,18 +113,9 @@ class PumlModelFactoryTest {
         }
 
         fun frozenPumlText(): String {
-            var resource = PumlModelFactoryTest::class.java.getResourceAsStream("/earnings-cheapness.puml")
-            if (resource != null) {
-                return resource.bufferedReader().use { it.readText() }
-            }
-            var candidates = listOf(
-                Path.of("_bmad-output/planning-artifacts/earnings-cheapness.puml"),
-                Path.of("../../_bmad-output/planning-artifacts/earnings-cheapness.puml"),
-                Path.of("G:/dev/repos/discount_screener/_bmad-output/planning-artifacts/earnings-cheapness.puml"),
-            )
-            var path = candidates.firstOrNull { Files.isRegularFile(it) }
+            return PumlModelFactoryTest::class.java.getResourceAsStream("/earnings-cheapness.puml")
+                ?.bufferedReader()?.use { it.readText() }
                 ?: error("frozen earnings-cheapness.puml not found")
-            return Files.readString(path)
         }
     }
 }

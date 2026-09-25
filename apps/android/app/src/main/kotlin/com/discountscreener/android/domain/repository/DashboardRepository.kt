@@ -1,6 +1,8 @@
 package com.discountscreener.android.domain.repository
 
+import com.discountscreener.android.presentation.dashboard.EarningsGateUi
 import com.discountscreener.android.domain.model.DashboardSnapshot
+import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.DiscoveryConfig
 import com.discountscreener.android.domain.model.ScoringPreferences
 import com.discountscreener.android.domain.model.DiscoverySnapshot
@@ -13,6 +15,7 @@ import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.portfolio.ImportPlan
 import kotlinx.coroutines.flow.Flow
 
 interface DashboardRepository {
@@ -69,6 +72,23 @@ interface DashboardRepository {
      * matters. Nothing in the product reads this; it is the input to the offline correlation.
      */
     suspend fun scoreExportCsv(opportunityScoringModel: OpportunityScoringModel): String
+    suspend fun earningsCandidateRows(): List<OpportunityListRow>
+
+    suspend fun earningsEvents(): EarningsGateUi
+
+    suspend fun cachedEarningsCalendar(): Map<String, Long?>
+
+    suspend fun refreshEarningsCalendar(symbols: List<String>): Map<String, Long?>
+
+    suspend fun earningsLogBackup(): String
+
+    suspend fun restoreEarningsLog(text: String): Int
+
+    suspend fun planPortfolioCsv(text: String): ImportPlan
+
+    suspend fun confirmPortfolioPlan(plan: ImportPlan)
+
+    suspend fun saveAlphaVantageKey(key: String)
     suspend fun currentIndexEstimates(): ComputationResult<IndexEstimatesReport>
     /**
      * Records an estimates snapshot using [com.discountscreener.core.engine.EstimatesHistoryPolicy]

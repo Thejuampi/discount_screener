@@ -36,14 +36,19 @@ val hasCustomReleaseSigning = listOf(
 val allowDebugSignedRelease = providers.gradleProperty("allowDebugSignedRelease").orNull.toBoolean()
 
 // Date-based version, computed once from git state by scripts/version.ps1 (single source
-// of truth also used by the Windows build). Falls back if git/powershell is unavailable
+// of truth also used by the Windows build). Falls back if git/PowerShell is unavailable
 // so IDE syncs never hard-fail.
 val computedVersion: Pair<String, Int> = run {
     val fallback = "0.0.0-unknown" to 1
     try {
+        val powerShell = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+            "powershell"
+        } else {
+            "pwsh"
+        }
         val output = providers.exec {
             commandLine(
-                "powershell",
+                powerShell,
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
@@ -166,6 +171,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 
@@ -175,6 +181,7 @@ dependencies {
     testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.work:work-testing:2.9.1")
 
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

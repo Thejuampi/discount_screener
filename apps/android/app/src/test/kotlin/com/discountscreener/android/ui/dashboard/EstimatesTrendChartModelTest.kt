@@ -70,13 +70,14 @@ class EstimatesTrendChartModelTest {
     }
 
     @Test
-    fun hero_summary_verdict_undervalued_when_base_upside_at_least_5pct() {
+    fun hero_withholds_dcf_index_verdict_even_when_data_coverage_is_ready() {
         val hero = buildEstimatesHeroSummary(
             report(epoch = 1L, baseBps = 800, coverageStatus = DcfCoverageStatus.Ready, covered = 40, eligible = 40),
         )
 
-        assertEquals(EstimatesVerdict.Undervalued, hero.verdict)
-        assertEquals("Ready", hero.coverageLabel)
+        assertEquals(EstimatesVerdict.Unknown, hero.verdict)
+        assertNull(hero.baseUpsideBps)
+        assertEquals("Data ready", hero.coverageLabel)
         assertTrue(hero.coverageDetail.contains("40/40"))
     }
 
@@ -93,9 +94,27 @@ class EstimatesTrendChartModelTest {
             ),
         )
 
-        assertEquals(EstimatesVerdict.Fair, hero.verdict)
-        assertEquals("Provisional", hero.coverageLabel)
+        assertEquals(EstimatesVerdict.Unknown, hero.verdict)
+        assertEquals("Data provisional", hero.coverageLabel)
         assertTrue(hero.coverageDetail.contains("n/a"))
+    }
+
+    @Test
+    fun hero_does_not_show_zero_analyst_gap_without_covered_targets() {
+        val source = report(epoch = 1L, baseBps = 100)
+        val noTargets = source.copy(
+            scenarios = source.scenarios.map { scenario ->
+                if (scenario.scenario == EstimateScenario.AnalystLow ||
+                    scenario.scenario == EstimateScenario.AnalystHigh
+                ) scenario.copy(coverageCount = 0, impliedUpsideBps = 0) else scenario
+            },
+        )
+
+        val hero = buildEstimatesHeroSummary(noTargets)
+
+        assertNull(hero.analystLowBps)
+        assertNull(hero.analystHighBps)
+        assertNull(hero.analystCoverageCount)
     }
 
     @Test

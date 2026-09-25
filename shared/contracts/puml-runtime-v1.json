@@ -1,7 +1,7 @@
 {
   "contract": "puml-runtime-v1",
   "status": "active",
-  "architecture": "_bmad-output/planning-artifacts/puml-runtime-architecture.md",
+  "architecture": "docs/architecture/puml-runtime.md",
   "purpose": "Four-layer runtime for a diagram-backed model. The .puml is the live model. Host holds irreducible primitives only.",
   "layers": [
     {
@@ -109,7 +109,7 @@
     "codeModel": "implement Model"
   },
   "firstDocument": {
-    "puml": "_bmad-output/planning-artifacts/earnings-cheapness.puml",
+    "puml": "apps/android/core/src/main/resources/earnings-cheapness.puml",
     "title": "EarningsCheapness",
     "host": "com.discountscreener.core.puml.StandardPumlHost",
     "binding": "com.discountscreener.core.baratas.BaratasModels"

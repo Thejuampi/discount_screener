@@ -184,6 +184,7 @@ internal fun parseQuoteSummary(body: String, symbol: String): FundamentalSnapsho
         sectorName = assetProfile.string("sectorDisp") ?: assetProfile.string("sector"),
         industryKey = assetProfile.string("industryKey"),
         industryName = assetProfile.string("industryDisp") ?: assetProfile.string("industry"),
+        country = assetProfile.string("country"),
         marketCapDollars = price.rawDouble("marketCap")?.takeIf { it > 0.0 }?.toLong(),
         sharesOutstanding = statistics.rawDouble("sharesOutstanding")?.toLong(),
         trailingPeHundredths = statistics.rawDouble("trailingPE")?.times(100.0)?.roundToLong()?.toInt(),
@@ -263,7 +264,8 @@ private fun parseTimeseriesMetric(root: JsonObject, name: String): List<AnnualRe
 
 private fun resolveRetentionBps(financialData: JsonObject?, summaryDetail: JsonObject?): Int? {
     var payout = financialData.rawDouble("payoutRatio") ?: summaryDetail.rawDouble("payoutRatio")
-    if (payout == null || !payout.isFinite() || payout < 0.0 || payout > 1.0) return null
+    if (payout == null || !payout.isFinite() || payout < 0.0) return null
+    if (payout >= 1.0) return 0
     return ((1.0 - payout) * 10_000.0).roundToInt()
 }
 

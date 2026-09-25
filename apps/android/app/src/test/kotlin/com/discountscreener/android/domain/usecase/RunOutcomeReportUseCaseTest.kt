@@ -1,7 +1,12 @@
 package com.discountscreener.android.domain.usecase
 
 import com.discountscreener.android.domain.model.ScoreJournalRow
+import com.discountscreener.android.domain.model.ScoringEvaluationInputs
+import com.discountscreener.android.domain.model.ScoringEvaluationModelResult
+import com.discountscreener.android.domain.model.ScoringEvaluationScore
+import com.discountscreener.android.domain.model.ScoringEvaluationSnapshot
 import com.discountscreener.core.model.HistoricalCandle
+import com.discountscreener.core.model.OpportunityScoringModel
 import java.io.File
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -34,6 +39,50 @@ class RunOutcomeReportUseCaseTest {
         assertTrue("== AggressiveV3 ==" in report)
         assertTrue("[DIAGNOSTIC ONLY]" in report)
     }
+
+    @Test
+    fun the_atomic_source_reads_only_the_requested_profile() = runTest {
+        val snapshots = listOf(snapshot("qa", "AAPL"), snapshot("sp500", "MSFT"))
+        val useCase = RunOutcomeReportUseCase(
+            evaluationSnapshotSource = { profile ->
+                snapshots.filter { snapshot -> snapshot.profileName == profile }
+            },
+            candleSource = TwoBars,
+            streetDiagnosticSource = { emptyMap() },
+            exportDirectory = tempDirectory(),
+        )
+
+        val result = useCase("qa")
+
+        assertEquals(1, result.rowCount)
+        val report = File(result.path).readText()
+        assertTrue("AggressiveV5=1" in report)
+        assertTrue("MSFT" !in report)
+    }
+
+    private fun snapshot(profile: String, symbol: String) = ScoringEvaluationSnapshot.create(
+        capturedAtEpochSeconds = 1_700_000_000L,
+        profileName = profile,
+        policyVersion = "valuation-policy/1",
+        regimeScoringEnabled = true,
+        inputs = ScoringEvaluationInputs(),
+        modelResults = listOf(
+            ScoringEvaluationModelResult(
+                model = OpportunityScoringModel.AggressiveV5,
+                formulaVersion = "aggressive-v5/1",
+                rows = listOf(
+                    ScoringEvaluationScore(
+                        symbol = symbol,
+                        universeRank = 1,
+                        marketPriceCents = 10_000,
+                        compositeScore = 50,
+                        compositeScoreBase = 50,
+                        coverageCount = 3,
+                    ),
+                ),
+            ),
+        ),
+    )
 
     private fun row(symbol: String, model: String = "AggressiveV4") = ScoreJournalRow(
         symbol = symbol,

@@ -54,6 +54,8 @@ data class ForwardReturnReport(
     val droppedNoEntryBar: Int,
     val droppedNoExitBar: Int,
     val droppedUnpricedEntry: Int,
+    /** Later refreshes replace earlier scores that would enter on the same symbol bar. */
+    val droppedSameEntryBar: Int,
 ) {
     /**
      * The headline: the top tenth's centre less the bottom tenth's. Null unless both tenths reported
@@ -82,6 +84,9 @@ const val DECILE_COUNT = 10
  * Exit is [horizonBars] bars after the entry bar. Bars, not calendar days: the series decides what
  * a trading day is, and naming the parameter days would invite a caller to pass 30 for a month.
  *
+ * Repeated refreshes before one entry bar keep only the newest score. This prevents one trading
+ * day from gaining more weight because the user refreshed it more often.
+ *
  * Deciles are cut by rank over all held observations, ties broken by symbol and date so the split is
  * reproducible. **Heavily tied scores make the split meaningless rather than wrong** — if a model
  * gives most names the same score, its tenths differ only in the tiebreak, and any spread between
@@ -94,10 +99,11 @@ fun forwardReturnByDecile(
     horizonBars: Int,
 ): ForwardReturnReport {
     require(horizonBars > 0) { "a horizon of $horizonBars bars measures nothing" }
-    var held = mutableListOf<Held>()
+    val heldByEntry = linkedMapOf<Pair<String, Long>, Held>()
     var noEntryBar = 0
     var noExitBar = 0
     var unpricedEntry = 0
+    var sameEntryBar = 0
     var seriesCache = mutableMapOf<String, List<HistoricalCandle>>()
 
     scores.forEach { score ->
@@ -120,11 +126,23 @@ fun forwardReturnByDecile(
             return@forEach
         }
         var exitCents = bars[exitIndex].closeCents
-        held += Held(
+        val candidate = Held(
             score = score,
             forwardReturnBps = (exitCents - entryCents).toDouble() / entryCents.toDouble() * 10_000.0,
         )
+        val entryKey = score.symbol to bars[entryIndex].epochSeconds
+        val prior = heldByEntry[entryKey]
+        if (prior == null) {
+            heldByEntry[entryKey] = candidate
+        } else {
+            sameEntryBar++
+            if (score.scoredAtEpochSeconds > prior.score.scoredAtEpochSeconds) {
+                heldByEntry[entryKey] = candidate
+            }
+        }
     }
+
+    val held = heldByEntry.values.toList()
 
     return ForwardReturnReport(
         horizonBars = horizonBars,
@@ -133,6 +151,7 @@ fun forwardReturnByDecile(
         droppedNoEntryBar = noEntryBar,
         droppedNoExitBar = noExitBar,
         droppedUnpricedEntry = unpricedEntry,
+        droppedSameEntryBar = sameEntryBar,
     )
 }
 

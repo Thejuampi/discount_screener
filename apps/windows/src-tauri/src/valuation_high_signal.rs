@@ -787,6 +787,10 @@ fn durable_cohort_return_on_capital_capture() {
                     fund.return_on_equity_bps,
                     fund.debt_to_equity_hundredths,
                     crate::operating_valuation_runtime::return_on_capital_bps(&fund, None),
+                    fund.book_value_per_share_cents,
+                    fund.book_value_per_share_cents_with_deficit,
+                    fund.shares_outstanding,
+                    fund.total_debt_dollars,
                 )
             });
         eprintln!("ROIC_CAPTURE {symbol} {roic:?}");

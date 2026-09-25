@@ -26,6 +26,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         requestNotificationPermissionIfNeeded()
         appContainer.keepLoadsRunningInBackground()
+        EarningsCaptureWorker.schedule(applicationContext)
         setContent {
             DiscountScreenerApp(viewModel)
         }

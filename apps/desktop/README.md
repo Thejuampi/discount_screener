@@ -10,7 +10,7 @@ Market data, analyst targets, ratings, and derived signals may be delayed, incom
 
 Discount Screener Workstation is a Rust terminal application for monitoring profitable companies trading below free public fair-value estimates, using Yahoo Finance public quote data, analyst-target data, and historical chart data.
 
-Intrinsic valuation uses a **model family**: FCFF+WACC for operating companies and residual income for financial services (book + ROE path). Growth and discount rates are derived from recent drivers and rate policy inputs rather than eternal hard floors/caps. See root [`Agents.md`](../../Agents.md) and [`valuation-model-family-architecture.md`](../../_bmad-output/planning-artifacts/valuation-model-family-architecture.md).
+Intrinsic valuation uses FCFF for operating companies and residual income for financial services. See [the agent guide](AGENTS.md) and [the valuation architecture](../../docs/architecture/valuation-model-family.md).
 
 Current product shape:
 

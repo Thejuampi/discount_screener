@@ -1,0 +1,24 @@
+Source: lab/data/score-export-sp500-aggressivev5.csv
+Command: python lab/scoring-v5/snapshot.py
+
+[cohort]
+rows=497
+score_raised=399
+score_lowered=86
+score_unchanged=12
+median_score_delta=7
+median_absolute_rank_move=43
+rank_move_at_least_50=212
+rank_move_at_least_100=89
+maximum_rank_move=328
+
+[qualified]
+rows=71
+score_raised=67
+score_lowered=4
+score_unchanged=0
+median_score_delta=10
+median_absolute_rank_move=5
+rank_move_at_least_50=0
+rank_move_at_least_100=0
+maximum_rank_move=23

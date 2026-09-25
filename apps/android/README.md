@@ -11,7 +11,7 @@ This directory contains the native Android client for Discount Screener.
 
 - `app/` — composition root and Android entrypoints
 - `domain/` — repository contracts and use cases
-- `data/` — Yahoo client (JSON `quoteSummary` + chart/timeseries; cookie/crumb session), profile loading, Discovery universe seed loading, persistence, and repository implementation
+- `data/` — Yahoo client (JSON `quoteSummary` + chart/timeseries; cookie/crumb session), Alpha Vantage earnings SUE (key in `filesDir`, never git), profile loading, Discovery universe seed loading, persistence, and repository implementation
 - `presentation/` — `DashboardViewModel`, UI state, and actions
 - `ui/` — Compose screens, dialogs, and detail/chart components
 
@@ -21,22 +21,32 @@ This directory contains the native Android client for Discount Screener.
 - live candidate and opportunity reporting
 - symbol detail reporting with EMA/price/MACD charts, bull-bear crossover cues, valuation, consensus, evidence, alerts, chart range selection, and phone-native system back support to return to the dashboard
 - symbol detail chart replay with back/forward/live controls plus a right-side volume profile that bins visible replay-window volume by price and up/down candle direction
-- opportunities as the default landing surface with **Aggressive V2** scoring selected by default; Aggressive V4 (sector-relative multiples, agreement bonus, share-count change, narrower market feature set), Aggressive V3 (multi-multiple + RSI + conviction + beta haircut), Aggressive V1, and Legacy remain available on demand
+- Opportunities use **Aggressive V2** by default. V5, V4, V3, V1, and Legacy remain available.
 - restore-to-live movement badges plus analyst target revision cues on both tracked and opportunity rows, with a state-driven history detail experience that collapses flat analyst-target spans, summarizes the latest net move, and shows change-only evidence when the range is sparse
 - tracked and opportunity rows now explain whether a meaningful move came from price, analyst target changes, relative re-ranking, or a combined move, and they surface quiet trust states such as No baseline, No meaningful change, freshness, saved/live timing, and No analyst target when Yahoo coverage is incomplete
 - tracked and opportunity rows also surface a repository-computed `Act`, `Watch`, or `Avoid` triage chip when live data supports a direct decision, so the list can answer the first decision question before the user drills into detail
-- **Plans tab** (after Market): three hunts. **Dip** filters F, a signed ATR dip vs the 20-day high, RSI easing in 25–45, MACD histogram ≤ 0 and turning, and Street 12-month target ≥ 20%. Default universe is `opportunities`. A **Full profile** switch scans the current profile instead. **Cross** lists names whose 1Y MACD histogram is at the golden cross or at most `flipped_bars_max` closed daily bars after it (policy, start 3), still expanding, with F and Street 12-month target ≥ 20%. No ATR dip gate. The same Full profile switch applies. **Leftover** scans the **current profile** for Street leftover ≤ 5% plus a fading tape (RSI hot and rolling, or MACD shrinking, still near the 20-day high). DCF / residual income is a tag. The tab does not fetch extra Yahoo data and does not change V2/V3/V4 scores. Specs: `_bmad-output/implementation-artifacts/dip-board-spec-v1.md`, `_bmad-output/implementation-artifacts/cross-board-spec-v1.md`, `_bmad-output/implementation-artifacts/leftover-board-spec-v1.md`.
+- **Plans tab** (after Market): three hunts. **Dip** filters F, a signed ATR dip, RSI, MACD, and Street upside. **Cross** finds recent expanding golden crosses. **Leftover** finds small Street upside with a fading tape. DCF or residual income remains a tag. See the [Dip](../../docs/product/android-plans-dip.md), [Cross](../../docs/product/android-plans-cross.md), and [Leftover](../../docs/product/android-plans-leftover.md) rules.
 - local warm-start persistence for tracked symbols, watchlist, issues, and revision history (charts live in `pricing_candle`; Yahoo chart JSON is not stored in `raw_capture`)
 - operator surfaces for candidates, opportunities, watchlist, issues, and symbol detail
-- opportunities can switch in-place among Legacy, Aggressive, Aggressive V2, Aggressive V3, and Aggressive V4 ranking models from the opportunities tab
+- Opportunities can switch in-place among Legacy and all Aggressive models through V5.
 - Aggressive V3 keeps V2's continuous evidence math and adds blended valuation multiples (forward PE / EV/EBITDA / P/B), RSI regime + volume confirmation on chart summaries, analyst recommendation skew, DCF scenario-width uncertainty, and a beta risk haircut on the composite; Act/Avoid cutoffs are model-aware (±100 scale for V2/V3)
 - Aggressive V4 removes double-counted inputs from the market bucket (`quality`, `value`, `lowBeta`; keeps `trendAlign`, `extension`, `oversoldQuality` — arbitrations whose sign flips by regime), scores multiples relative to the sector (`§` marks a sector-benchmarked metric; absolute band is the fallback when the sector has fewer than 5 members), adds share-count change to fundamentals, and replaces the coverage bonus with an agreement bonus that pays for bucket consensus instead of bucket presence; Act/Avoid cutoffs use the ±100 scale. V4 is opt-in; `AggressiveV2` remains the default
+- Aggressive V5 keeps V4's weights. It fixes two refusal cases and remains opt-in.
+- Each completed refresh evaluates V1 through V5 after enrichment and the market read finish.
+- SQLite keeps one atomic evaluation snapshot per profile and UTC day.
+- The snapshot contains exact normalized inputs, ranks, scores, formula versions, and unavailable reasons.
+- Daily outcome prices persist independently from market-regime usability.
+- The System page shows snapshot and score-journal row counts.
+- The outcome report reads profile-scoped atomic snapshots and includes paired V2/V5 ablations.
 - startup splash during warm restore plus a one-time disclaimer acceptance gate before entering the app
 - Valuation is a **model family** (`DcfAnalysisEngine`): operating firms use FCFF+WACC; financial services use residual income (book + ROE fade, cost of equity). Do not treat OCF−CapEx as free cash flow for insurers/banks.
 - Discount rates and growth use dynamic market/policy inputs (risk-free, ERP, industry beta shrink, recent-window growth fade to \(g_{stable}\)). Hard `MIN_WACC` / price-multiple caps are not valuation truth; defaults are provisional when used. Production Android reads FRED DGS10 first, then Yahoo `^TNX` (1-day cache) and `erp-policy/1` (default school: Damodaran implied index ERP). Bootstrap 430/450 stays for tests and for a live miss.
 - WACC/CoE provenance remains transparent: missing market cap may fall back to price × shares; beta / debt / cash / cost of debt / tax sources are recorded; detail Valuation shows rate kind (`WACC` vs \(r_e\)), marks provisional inputs, and lists caveats (for example `tax=default`, `market cap=price×shares`). Industry beta shrink is intentional estimation, not provisional noise.
 - legacy warm-start DCF payloads without `waccInputs` still restore; live refresh recomputes with current fundamentals and model routing
-- Agent conventions: root `Agents.md`; design: `_bmad-output/planning-artifacts/valuation-model-family-architecture.md`; contracts: `shared/contracts/valuation-model-family.json`
+- **Earnings tab** (Android-only). See the [current behavior](../../docs/product/earnings-gate.md) and `shared/contracts/earnings-gate-policy.yaml`.
+- Book import reads SAF input on IO with a four MiB bound. The UI shows read state, cancellation, and provider errors. Positive lots use the supported quantity scale without a total cost-basis floor. Costs that round to zero cents do not emit lots. Warnings show counts and removed symbols before Confirm.
+- [Android Positions](../../docs/product/android-positions.md) shows stock exposure, research labels, and local position facts.
+- Agent conventions: [Android rules](AGENTS.md), [valuation design](../../docs/architecture/valuation-model-family.md), and `shared/contracts/valuation-model-family.json`.
 
 ## Prerequisites
 

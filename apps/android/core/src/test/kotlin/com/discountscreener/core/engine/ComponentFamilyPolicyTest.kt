@@ -36,6 +36,25 @@ class ComponentFamilyPolicyTest {
     }
 
     @Test
+    fun machinery_parent_hosts_a_captive() {
+        assertEquals(
+            true,
+            ComponentFamilyPolicy.parentHostsCaptive(
+                "Farm & Heavy Construction Machinery",
+                "Industrials",
+            ),
+        )
+    }
+
+    @Test
+    fun software_parent_does_not_host_a_captive() {
+        assertEquals(
+            false,
+            ComponentFamilyPolicy.parentHostsCaptive("Software - Application", "Technology"),
+        )
+    }
+
+    @Test
     fun non_us_lender_slice_is_ignored() {
         assertEquals(
             ComponentFactRole.Ignore,

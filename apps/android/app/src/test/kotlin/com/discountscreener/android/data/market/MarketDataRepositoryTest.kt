@@ -7,11 +7,18 @@ import com.discountscreener.core.model.HistoricalCandle
 import com.discountscreener.core.regime.CnnFearGreed
 import com.discountscreener.core.regime.MARKET_SERIES
 import com.discountscreener.core.regime.RegimeScoringPolicy
+import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
+import java.nio.file.Files
 import java.time.LocalDate
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -24,6 +31,7 @@ import org.junit.Test
  * traffic it generates and what it does when that traffic fails — not the arithmetic, which
  * `:core`'s own tests cover.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class MarketDataRepositoryTest {
     @Test
     fun a_cold_cache_has_no_reading_and_does_not_fetch_to_find_out() = runTest {
@@ -36,6 +44,23 @@ class MarketDataRepositoryTest {
     @Test
     fun a_refresh_produces_a_reading_confident_enough_to_score() = runTest {
         assertNotNull(RegimeScoringPolicy.fromRegime(repository().refreshIfStale(tickers())!!))
+    }
+
+    @Test
+    fun a_long_refresh_uses_one_capture_time_for_every_summary() = runTest {
+        var nowCalls = 0
+        val market = MarketDataRepository(
+            yahooClient = RecordingYahooClient(),
+            fearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
+            nowEpochSeconds = {
+                nowCalls += 1
+                if (nowCalls == 1) START_EPOCH else START_EPOCH + 86_400L
+            },
+        )
+
+        market.refreshIfStale(tickers())
+
+        assertTrue(market.cachedDailySummaries().values.all { summary -> summary.capturedAt == START_EPOCH })
     }
 
     /**
@@ -262,8 +287,8 @@ class MarketDataRepositoryTest {
 
     /**
      * Holding a year of daily bars for every tracked name until the last fetch lands is what
-     * filled two gigabytes on the emulator after the 501/501 spinner dropped. Persist each
-     * chunk and drop it.
+     * filled two gigabytes on the emulator after the 501/501 spinner dropped. Stage each chunk and
+     * drop its heap copy.
      */
     @Test
     fun a_universe_of_many_names_persists_bars_in_more_than_one_chunk() = runTest {
@@ -273,16 +298,322 @@ class MarketDataRepositoryTest {
         assertEquals(true, sink.callCount > 1)
     }
 
+    @Test
+    fun a_sp500_sized_universe_persists_all_symbols_through_the_market_reader() = runTest {
+        val stagingDirectory = Files.createTempDirectory("market-candle-sp500-test").toFile()
+        val symbols = (0 until 501).map { "SP$it" }
+        val sink = RecordingCandleSink()
+        val market = MarketDataRepository(
+            yahooClient = RecordingYahooClient(),
+            fearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
+            nowEpochSeconds = { START_EPOCH },
+            dailyCandleSink = sink,
+            candleStagingDirectory = stagingDirectory,
+        )
+        try {
+            market.refreshIfStale(symbols)
+
+            assertEquals(symbols.toSet(), sink.stored.keys)
+            assertTrue(sink.callCount >= 13)
+            assertEquals(0, stagingDirectory.listFiles().orEmpty().size)
+        } finally {
+            stagingDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun a_blocked_second_chunk_leaves_the_first_chunk_in_the_bounded_spool() = runTest {
+        val stagingDirectory = Files.createTempDirectory("market-candle-stage-test").toFile()
+        val secondChunkStarted = CompletableDeferred<Unit>()
+        val releaseSecondChunk = CompletableDeferred<Unit>()
+        val sink = RecordingCandleSink()
+        val yahoo = ChunkBlockingYahooClient(secondChunkStarted, releaseSecondChunk)
+        val market = MarketDataRepository(
+            yahooClient = yahoo,
+            fearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
+            nowEpochSeconds = { START_EPOCH },
+            dailyCandleSink = sink,
+            candleStagingDirectory = stagingDirectory,
+        )
+        val refresh = async { market.refreshIfStale((0 until 80).map { "SYM$it" }) }
+        try {
+            advanceUntilIdle()
+            secondChunkStarted.await()
+
+            assertTrue(
+                "the first chunk was not staged before the second chunk blocked",
+                stagedFiles(stagingDirectory).any { file -> file.length() > 0L },
+            )
+            assertEquals(0, sink.callCount)
+
+            releaseSecondChunk.complete(Unit)
+            advanceUntilIdle()
+            refresh.await()
+
+            assertTrue(sink.callCount > 1)
+            assertEquals(0, stagedFiles(stagingDirectory).size)
+        } finally {
+            releaseSecondChunk.complete(Unit)
+            refresh.cancel()
+            stagingDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun a_cancelled_refresh_removes_partial_candle_spool() = runTest {
+        val stagingDirectory = Files.createTempDirectory("market-candle-cancel-test").toFile()
+        val secondChunkStarted = CompletableDeferred<Unit>()
+        val releaseSecondChunk = CompletableDeferred<Unit>()
+        val market = MarketDataRepository(
+            yahooClient = ChunkBlockingYahooClient(secondChunkStarted, releaseSecondChunk),
+            fearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
+            nowEpochSeconds = { START_EPOCH },
+            dailyCandleSink = RecordingCandleSink(),
+            candleStagingDirectory = stagingDirectory,
+        )
+        val refresh = async { market.refreshIfStale((0 until 80).map { "SYM$it" }) }
+        try {
+            advanceUntilIdle()
+            secondChunkStarted.await()
+            assertTrue(stagedFiles(stagingDirectory).isNotEmpty())
+
+            refresh.cancelAndJoin()
+
+            assertEquals(0, stagingDirectory.listFiles().orEmpty().size)
+        } finally {
+            releaseSecondChunk.complete(Unit)
+            refresh.cancel()
+            stagingDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun a_spool_open_failure_does_not_stick_the_refresh_gate() = runTest {
+        val root = Files.createTempDirectory("market-candle-open-failure-test").toFile()
+        val blockedPath = File(root, "blocked")
+        blockedPath.writeText("not a directory")
+        val sink = RecordingCandleSink()
+        val market = repository(
+            sink = sink,
+            stagingDirectory = blockedPath,
+        )
+        try {
+            val firstFailure = runCatching { market.refreshIfStale(tickers()) }.exceptionOrNull()
+            assertTrue(firstFailure is IOException)
+
+            assertTrue(blockedPath.delete())
+            assertTrue(blockedPath.mkdirs())
+
+            assertNotNull(market.refreshIfStale(tickers()))
+            assertTrue(sink.callCount > 0)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun a_truncated_candle_spool_fails_the_read_without_partial_publication() = runTest {
+        val stagingDirectory = Files.createTempDirectory("market-candle-truncated-test").toFile()
+        val sentimentStarted = CompletableDeferred<Unit>()
+        val releaseSentiment = CompletableDeferred<Unit>()
+        val sink = RecordingCandleSink()
+        val market = repository(
+            fearGreed = BlockingFearGreedClient(sentimentStarted, releaseSentiment),
+            sink = sink,
+            stagingDirectory = stagingDirectory,
+        )
+        val refresh = async { runCatching { market.refreshIfStale(tickers()) } }
+        try {
+            advanceUntilIdle()
+            sentimentStarted.await()
+            val stage = stagedFiles(stagingDirectory).single()
+            stage.outputStream().use { output -> output.write(byteArrayOf(0, 0, 0, 1, 0)) }
+
+            releaseSentiment.complete(Unit)
+            advanceUntilIdle()
+            val result = refresh.await()
+
+            assertTrue(result.exceptionOrNull() is IOException)
+            assertNull(market.cachedRegime())
+            assertEquals(0, sink.callCount)
+        } finally {
+            releaseSentiment.complete(Unit)
+            refresh.cancel()
+            stagingDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun a_partial_candle_spool_header_fails_the_read_without_partial_publication() = runTest {
+        val stagingDirectory = Files.createTempDirectory("market-candle-header-test").toFile()
+        val sentimentStarted = CompletableDeferred<Unit>()
+        val releaseSentiment = CompletableDeferred<Unit>()
+        val sink = RecordingCandleSink()
+        val market = repository(
+            fearGreed = BlockingFearGreedClient(sentimentStarted, releaseSentiment),
+            sink = sink,
+            stagingDirectory = stagingDirectory,
+        )
+        val refresh = async { runCatching { market.refreshIfStale(tickers()) } }
+        try {
+            advanceUntilIdle()
+            sentimentStarted.await()
+            val stage = stagedFiles(stagingDirectory).single()
+            RandomAccessFile(stage, "rw").use { file ->
+                file.seek(file.length())
+                file.writeByte(0)
+            }
+
+            releaseSentiment.complete(Unit)
+            advanceUntilIdle()
+            val result = refresh.await()
+
+            assertTrue(result.exceptionOrNull() is IOException)
+            assertNull(market.cachedRegime())
+            assertEquals(0, sink.callCount)
+        } finally {
+            releaseSentiment.complete(Unit)
+            refresh.cancel()
+            stagingDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun a_second_repository_does_not_delete_an_active_repository_candle_spool() = runTest {
+        val stagingDirectory = Files.createTempDirectory("market-candle-concurrent-test").toFile()
+        val firstSinkStarted = CompletableDeferred<Unit>()
+        val releaseFirstSink = CompletableDeferred<Unit>()
+        val firstSink = BlockingCandleSink(firstSinkStarted, releaseFirstSink)
+        val first = MarketDataRepository(
+            yahooClient = RecordingYahooClient(),
+            fearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
+            nowEpochSeconds = { START_EPOCH },
+            dailyCandleSink = firstSink,
+            candleStagingDirectory = stagingDirectory,
+        )
+        val firstRefresh = async { first.refreshIfStale((0 until 80).map { "SYM$it" }) }
+        var secondRefresh: kotlinx.coroutines.Deferred<*>? = null
+        val secondSinkStarted = CompletableDeferred<Unit>()
+        val releaseSecondSink = CompletableDeferred<Unit>()
+        try {
+            advanceUntilIdle()
+            firstSinkStarted.await()
+
+            val second = MarketDataRepository(
+                yahooClient = RecordingYahooClient(),
+                fearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
+                dailyCandleSink = BlockingCandleSink(secondSinkStarted, releaseSecondSink),
+                candleStagingDirectory = stagingDirectory,
+            )
+            secondRefresh = async { second.refreshIfStale((0 until 80).map { "SYM$it" }) }
+            advanceUntilIdle()
+            secondSinkStarted.await()
+
+            val stageParents = stagedFiles(stagingDirectory)
+                .map { file -> file.parentFile?.absolutePath ?: error("stage has no parent") }
+                .toSet()
+            assertEquals(2, stageParents.size)
+
+            releaseSecondSink.complete(Unit)
+            releaseFirstSink.complete(Unit)
+            advanceUntilIdle()
+            secondRefresh.await()
+            firstRefresh.await()
+        } finally {
+            releaseSecondSink.complete(Unit)
+            releaseFirstSink.complete(Unit)
+            secondRefresh?.cancel()
+            firstRefresh.cancel()
+            stagingDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun a_failed_market_bundle_still_publishes_complete_universe_bars() = runTest {
+        val stagingDirectory = Files.createTempDirectory("market-candle-failure-test").toFile()
+        val sink = RecordingCandleSink()
+        val market = MarketDataRepository(
+            yahooClient = RecordingYahooClient(),
+            fearGreedClient = FailingFearGreedClient(),
+            nowEpochSeconds = { START_EPOCH },
+            dailyCandleSink = sink,
+            candleStagingDirectory = stagingDirectory,
+        )
+        try {
+            runCatching { market.refreshIfStale(tickers()) }
+
+            assertEquals(tickers().toSet(), sink.stored.keys)
+            assertEquals(0, stagingDirectory.listFiles().orEmpty().size)
+        } finally {
+            stagingDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun a_new_repository_removes_orphaned_candle_spools() {
+        val stagingDirectory = Files.createTempDirectory("market-candle-restart-test").toFile()
+        val orphanDirectory = File(stagingDirectory, "market-session-orphan")
+        try {
+            assertTrue(orphanDirectory.mkdirs())
+            File(orphanDirectory, "market-candle-orphan.stage").writeText("orphan")
+
+            MarketDataRepository(
+                yahooClient = RecordingYahooClient(),
+                fearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
+                dailyCandleSink = RecordingCandleSink(),
+                candleStagingDirectory = stagingDirectory,
+            )
+
+            assertEquals(0, stagedFiles(stagingDirectory).size)
+        } finally {
+            stagingDirectory.deleteRecursively()
+        }
+    }
+
     /**
-     * A round that failed hard enough to be unusable is a round whose bars are as likely partial,
-     * and a partial year written into the retrospective is worse than a missing day.
+     * A total data failure has no bars to store. This differs from a failed market policy with
+     * complete tracked-symbol histories, which still supplies valid outcome prices.
      */
     @Test
     fun a_reading_no_policy_can_score_stores_no_bars() = runTest {
         var sink = RecordingCandleSink()
-        repository(yahoo = FailingYahooClient(), sink = sink).refreshIfStale(tickers())
+        val stagingDirectory = Files.createTempDirectory("market-candle-unusable-test").toFile()
+        repository(
+            yahoo = FailingYahooClient(),
+            fearGreed = AbsentFearGreedClient(),
+            sink = sink,
+            stagingDirectory = stagingDirectory,
+        ).refreshIfStale(tickers())
 
         assertEquals(0, sink.callCount)
+        assertEquals(0, stagingDirectory.listFiles().orEmpty().size)
+        stagingDirectory.deleteRecursively()
+    }
+
+    /**
+     * Outcome prices do not depend on market-regime usability.
+     *
+     * The tracked symbols can return complete daily histories while the index series fail. Those
+     * histories still measure later returns, even though the fourth score bucket is unavailable.
+     */
+    @Test
+    fun complete_universe_bars_survive_an_unusable_market_reading() = runTest {
+        val sink = RecordingCandleSink()
+        val failedMarketSeries = (MARKET_SERIES.map { request -> request.symbol } + "SPY").toSet()
+        val stagingDirectory = Files.createTempDirectory("market-candle-outcome-test").toFile()
+        try {
+            repository(
+                yahoo = RecordingYahooClient(failFor = failedMarketSeries),
+                fearGreed = AbsentFearGreedClient(),
+                sink = sink,
+                stagingDirectory = stagingDirectory,
+            ).refreshIfStale(tickers())
+
+            assertEquals(tickers().toSet(), sink.stored.keys)
+            assertEquals(0, stagingDirectory.listFiles().orEmpty().size)
+        } finally {
+            stagingDirectory.deleteRecursively()
+        }
     }
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
@@ -292,14 +623,19 @@ class MarketDataRepositoryTest {
         fearGreed: CnnFearGreedClient = FixedFearGreedClient(55.0, "Neutral"),
         clock: MutableClock = MutableClock(START_EPOCH),
         sink: DailyCandleSink? = null,
+        stagingDirectory: File? = null,
     ) = MarketDataRepository(
         yahooClient = yahoo,
         fearGreedClient = fearGreed,
         nowEpochSeconds = { clock.epochSeconds },
         dailyCandleSink = sink,
+        candleStagingDirectory = stagingDirectory,
     )
 
     private fun tickers() = (0 until 90).map { "SYM$it" }
+
+    private fun stagedFiles(directory: File): List<File> =
+        directory.walkTopDown().filter { file -> file.isFile && file.extension == "stage" }.toList()
 
     private class MutableClock(var epochSeconds: Long)
 
@@ -374,6 +710,23 @@ class MarketDataRepositoryTest {
         }
     }
 
+    private class ChunkBlockingYahooClient(
+        private val secondChunkStarted: CompletableDeferred<Unit>,
+        private val releaseSecondChunk: CompletableDeferred<Unit>,
+    ) : RecordingYahooClient() {
+        override suspend fun fetchCandles(
+            symbol: String,
+            rangeToken: String,
+            interval: String,
+        ): List<HistoricalCandle> {
+            if (symbol == "SYM40") {
+                secondChunkStarted.complete(Unit)
+                releaseSecondChunk.await()
+            }
+            return super.fetchCandles(symbol, rangeToken, interval)
+        }
+    }
+
     private class FixedFearGreedClient(
         private val score: Double,
         private val rating: String,
@@ -383,6 +736,36 @@ class MarketDataRepositoryTest {
 
     private class AbsentFearGreedClient : CnnFearGreedClient(httpClient = offlineHttpClient()) {
         override suspend fun fetch(today: LocalDate): CnnFearGreed? = null
+    }
+
+    private class FailingFearGreedClient : CnnFearGreedClient(httpClient = offlineHttpClient()) {
+        override suspend fun fetch(today: LocalDate): CnnFearGreed? =
+            throw IOException("fixture: sentiment unavailable")
+    }
+
+    private class BlockingFearGreedClient(
+        private val started: CompletableDeferred<Unit>,
+        private val release: CompletableDeferred<Unit>,
+    ) : CnnFearGreedClient(httpClient = offlineHttpClient()) {
+        override suspend fun fetch(today: LocalDate): CnnFearGreed? {
+            started.complete(Unit)
+            release.await()
+            return CnnFearGreed(score = 55.0, rating = "Neutral", fetchedAtEpoch = START_EPOCH)
+        }
+    }
+
+    private class BlockingCandleSink(
+        private val started: CompletableDeferred<Unit>,
+        private val release: CompletableDeferred<Unit>,
+    ) : DailyCandleSink {
+        override suspend fun persistBacktestCandles(
+            candlesBySymbol: Map<String, List<HistoricalCandle>>,
+            capturedAtEpochSeconds: Long,
+        ): Int {
+            started.complete(Unit)
+            release.await()
+            return candlesBySymbol.size
+        }
     }
 
     private companion object {

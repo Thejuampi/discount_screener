@@ -98,6 +98,16 @@ enum class OpportunityScoringModel {
     AggressiveV5,
 }
 
+/** Stable formula identity stored with every outcome cohort. */
+fun OpportunityScoringModel.formulaVersion(): String = when (this) {
+    OpportunityScoringModel.Legacy -> "legacy-buffett/1"
+    OpportunityScoringModel.Aggressive -> "aggressive-v1/1"
+    OpportunityScoringModel.AggressiveV2 -> "aggressive-v2/1"
+    OpportunityScoringModel.AggressiveV3 -> "aggressive-v3/1"
+    OpportunityScoringModel.AggressiveV4 -> "aggressive-v4/1"
+    OpportunityScoringModel.AggressiveV5 -> "aggressive-v5/1"
+}
+
 /**
  * Whether this model has a fourth, market bucket at all.
  *
@@ -341,6 +351,7 @@ data class FundamentalSnapshot(
     val sectorName: String? = null,
     val industryKey: String? = null,
     val industryName: String? = null,
+    val country: String? = null,
     val marketCapDollars: Long? = null,
     val sharesOutstanding: Long? = null,
     val trailingPeHundredths: Int? = null,
@@ -367,6 +378,7 @@ data class FundamentalSnapshot(
         sectorName,
         industryKey,
         industryName,
+        country,
         marketCapDollars,
         sharesOutstanding,
         trailingPeHundredths,

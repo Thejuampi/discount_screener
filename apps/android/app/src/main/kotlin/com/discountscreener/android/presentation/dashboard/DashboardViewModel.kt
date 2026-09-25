@@ -27,12 +27,17 @@ import com.discountscreener.android.domain.usecase.AddDashboardSymbolsUseCase
 import com.discountscreener.android.domain.usecase.BootstrapDashboardUseCase
 import com.discountscreener.android.domain.usecase.CancelDiscoveryJobUseCase
 import com.discountscreener.android.domain.usecase.ClearAllDataUseCase
+import com.discountscreener.android.domain.usecase.EarningsLogBackupUseCase
 import com.discountscreener.android.domain.usecase.ExportScoresUseCase
+import com.discountscreener.android.domain.usecase.RestoreEarningsLogUseCase
+import com.discountscreener.android.domain.usecase.ImportPortfolioBookUseCase
+import com.discountscreener.android.domain.usecase.SaveAlphaVantageKeyUseCase
 import com.discountscreener.android.domain.usecase.RunOutcomeReportUseCase
 import com.discountscreener.android.domain.usecase.RunRetrospectiveUseCase
 import com.discountscreener.android.domain.usecase.ClearDiscoveryDataUseCase
 import com.discountscreener.android.domain.usecase.DashboardUseCases
 import com.discountscreener.android.domain.usecase.GetDashboardSnapshotUseCase
+import com.discountscreener.android.domain.usecase.GetEarningsEventsUseCase
 import com.discountscreener.android.domain.usecase.GetIndexEstimatesUseCase
 import com.discountscreener.android.domain.usecase.GetEstimatesHistoryUseCase
 import com.discountscreener.android.domain.usecase.LoadDiscoverySnapshotUseCase
@@ -75,12 +80,19 @@ import com.discountscreener.core.model.ProjectedProviderState
 import com.discountscreener.core.model.SymbolDetail
 import com.discountscreener.core.model.SymbolRevision
 import com.discountscreener.core.model.ViewFilter
+import com.discountscreener.core.portfolio.ImportPlan
+import com.discountscreener.core.portfolio.PortfolioLot
+import com.discountscreener.core.portfolio.nySessionDay
+import java.time.Instant
+import java.time.LocalDate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlin.system.measureTimeMillis
 
@@ -93,6 +105,8 @@ enum class DashboardTab {
     Discovery,
     System,
     Estimates,
+    Earnings,
+    Positions,
 }
 
 enum class PlanHunt {
@@ -182,6 +196,24 @@ sealed interface DashboardAction {
     /** Debug surface only — writes the score export and reports where it landed. */
     data object ExportScores : DashboardAction
 
+    /**
+     * Hand the earnings log out to a file the phone does not own.
+     *
+     * A release build is not debuggable and an uninstall takes the log with it, so a lost
+     * signing key would cost every option chain ever captured. Nothing else here is
+     * irreplaceable; those chains are never republished.
+     */
+    data object BackUpEarningsLog : DashboardAction
+
+    data class EarningsLogBackupWritten(val eventCount: Int) : DashboardAction
+    data object EarningsLogBackupDropped : DashboardAction
+    data class RestoreEarningsLog(val text: String) : DashboardAction
+    data class ImportBookCsv(val text: String) : DashboardAction
+    data object ConfirmImportBook : DashboardAction
+    data object CancelImportBook : DashboardAction
+    data class SaveAlphaVantageKey(val key: String) : DashboardAction
+    data object ClearAlphaVantageKey : DashboardAction
+
     data object RunRetrospective : DashboardAction
     data object RunOutcomeReport : DashboardAction
     data class PruneOldRevisions(val retentionDays: Int) : DashboardAction
@@ -214,6 +246,7 @@ data class DashboardUiState(
     val symbolNotes: Map<String, String> = emptyMap(),
     val candidateRows: List<CandidateRow> = emptyList(),
     val opportunityRows: List<OpportunityListRow> = emptyList(),
+    val opportunityUniverse: List<OpportunityListRow> = emptyList(),
     val opportunityScoringModel: OpportunityScoringModel = ScoringPreferences.DEFAULT_OPPORTUNITY_MODEL,
     /** The market dimension's runtime switch. Only V3 rows are affected by it. */
     val regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED,
@@ -232,6 +265,7 @@ data class DashboardUiState(
     val refreshCompletedSymbols: Int = 0,
     val refreshTargetSymbols: Int = 0,
     val statusMessage: String? = null,
+    val backgroundWorkMessage: String? = null,
     val systemStats: SystemStats? = null,
     val systemStatsLoading: Boolean = false,
     val systemStatusMessage: String? = null,
@@ -264,6 +298,15 @@ data class DashboardUiState(
     val leftoverBoard: PlanBoardUi = presentLeftoverBoard(null),
     val crossBoardOpps: PlanBoardUi = presentCrossBoard(null),
     val crossBoardProfile: PlanBoardUi = presentCrossBoard(null),
+    val earningsGate: EarningsGateUi = EarningsGateUi(),
+    val earningsGateLoading: Boolean = false,
+    val earningsLogBackup: String? = null,
+    val earningsGateNotice: String? = null,
+    val importBookPlan: ImportPlan? = null,
+    val importBookNotice: String? = null,
+    val positionsRows: List<PositionsRow> = emptyList(),
+    val portfolioLots: List<PortfolioLot> = emptyList(),
+    val earningsCalendar: Map<String, Long?> = emptyMap(),
 ) {
     val planBoard: PlanBoardUi
         get() = if (planDipUniverse == PlanDipUniverse.Opportunities) planBoardOpps else planBoardProfile
@@ -300,6 +343,11 @@ class DashboardViewModel(
     private val exportScores: ExportScoresUseCase,
     private val runRetrospective: RunRetrospectiveUseCase,
     private val runOutcomeReport: RunOutcomeReportUseCase,
+    private val getEarningsEvents: GetEarningsEventsUseCase,
+    private val backUpEarningsLog: EarningsLogBackupUseCase,
+    private val restoreEarningsLog: RestoreEarningsLogUseCase,
+    private val importPortfolioBook: ImportPortfolioBookUseCase,
+    private val saveAlphaVantageKey: SaveAlphaVantageKeyUseCase,
     private val getIndexEstimates: GetIndexEstimatesUseCase,
     private val saveEstimatesSnapshot: SaveEstimatesSnapshotUseCase,
     private val getEstimatesHistory: GetEstimatesHistoryUseCase,
@@ -312,12 +360,17 @@ class DashboardViewModel(
     private val clearDiscoveryData: ClearDiscoveryDataUseCase,
     private val observeDiscoveryProgress: ObserveDiscoveryProgressUseCase,
     private val ensureReplayBackingLoaded: EnsureReplayBackingLoadedUseCase,
+    private val nowEpochSeconds: () -> Long = { Instant.now().epochSecond },
 ) : ViewModel() {
     private val _state = MutableStateFlow(DashboardUiState())
     val state: StateFlow<DashboardUiState> = _state.asStateFlow()
 
+    fun sessionDay(): LocalDate = nySessionDay(nowEpochSeconds())
+
     private var started = false
     private var activeEstimatesJob: kotlinx.coroutines.Job? = null
+    private var activeEarningsJob: kotlinx.coroutines.Job? = null
+    private var earningsGateLoaded = false
     private var tickerSearchJob: Job? = null
     private var discoveryProgressJob: Job? = null
     private var selectProfileJob: Job? = null
@@ -368,6 +421,17 @@ class DashboardViewModel(
             is DashboardAction.SetRegimeScoringEnabled -> setRegimeScoringEnabled(action.enabled)
             DashboardAction.RefreshSystemStats -> refreshSystemStats()
             DashboardAction.ExportScores -> exportScoreCsv()
+            DashboardAction.BackUpEarningsLog -> prepareEarningsLogBackup()
+            is DashboardAction.EarningsLogBackupWritten -> finishEarningsLogBackup(action.eventCount)
+            DashboardAction.EarningsLogBackupDropped -> dropEarningsLogBackup()
+            is DashboardAction.RestoreEarningsLog -> restoreEarningsLogFrom(action.text)
+            is DashboardAction.ImportBookCsv -> planImportBook(action.text)
+            DashboardAction.ConfirmImportBook -> confirmImportBook()
+            DashboardAction.CancelImportBook -> cancelImportBook()
+            is DashboardAction.SaveAlphaVantageKey -> {
+                if (action.key.isNotBlank()) saveAlphaVantageKeyFrom(action.key)
+            }
+            is DashboardAction.ClearAlphaVantageKey -> saveAlphaVantageKeyFrom("")
             DashboardAction.RunRetrospective -> runRetrospectiveReport()
             DashboardAction.RunOutcomeReport -> runOutcomeReportAction()
             is DashboardAction.PruneOldRevisions -> pruneOldRevisions(action.retentionDays)
@@ -508,6 +572,207 @@ class DashboardViewModel(
         }
         if (tab == DashboardTab.Discovery) {
             loadDiscovery()
+        }
+        if (tab == DashboardTab.Earnings || tab == DashboardTab.Positions) {
+            loadEarningsGate()
+        }
+    }
+
+    private fun loadEarningsGate() {
+        activeEarningsJob?.cancel()
+        activeCalendarJob?.cancel()
+        earningsGateLoaded = true
+        _state.value = _state.value.copy(earningsGateLoading = true)
+        activeEarningsJob = viewModelScope.launch {
+            try {
+                var gate = getEarningsEvents()
+                var calendar = getEarningsEvents.cachedCalendar()
+                var current = _state.value
+                _state.value = current.copy(
+                    earningsGate = gate,
+                    earningsCalendar = calendar,
+                    positionsRows = projectLotRows(current, gate, calendar),
+                )
+                hydrateEarningsCalendar(current.portfolioLots.map { it.symbol } + listOfNotNull(current.detailRoute?.symbol))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                earningsGateLoaded = false
+                var current = _state.value
+                var empty = EarningsGateUi()
+                var calendar = runCatching { getEarningsEvents.cachedCalendar() }.getOrDefault(emptyMap())
+                _state.value = current.copy(
+                    earningsGate = empty,
+                    earningsCalendar = calendar,
+                    earningsGateNotice = "Earnings gate failed: ${error.message ?: "unknown error"}",
+                    positionsRows = projectLotRows(current, empty, calendar),
+                )
+            } finally {
+                _state.value = _state.value.copy(earningsGateLoading = false)
+            }
+        }
+    }
+
+    private var activeCalendarJob: Job? = null
+
+    private fun hydrateEarningsCalendar(symbols: List<String>) {
+        activeCalendarJob?.cancel()
+        var current = _state.value
+        var today = nySessionDay(nowEpochSeconds())
+        var wanted = symbols.map { it.trim().uppercase() }.filter { it.isNotEmpty() }.distinct()
+            .filter { needsCalendar(it, current, today) }
+        if (wanted.isEmpty()) return
+        activeCalendarJob = viewModelScope.launch {
+            wanted.chunked(12).forEach { chunk ->
+                currentCoroutineContext().ensureActive()
+                var asked = getEarningsEvents.refreshCalendar(chunk)
+                currentCoroutineContext().ensureActive()
+                var next = _state.value
+                var calendar = next.earningsCalendar + asked
+                _state.value = next.copy(
+                    earningsCalendar = calendar,
+                    positionsRows = projectLotRows(next, next.earningsGate, calendar),
+                )
+            }
+        }
+    }
+
+    private fun needsCalendar(symbol: String, current: DashboardUiState, today: LocalDate): Boolean {
+        var day = reportDatesForLots(current.earningsGate, current.earningsCalendar, today)[symbol]
+        if (day != null) return false
+        var scoreDay = scoredLots(current.opportunityUniverse, current.opportunityRows)
+            .firstOrNull { it.symbol.equals(symbol, ignoreCase = true) }
+            ?.nextEarningsEpoch
+            ?.let(::nySessionDay)
+        return scoreDay == null || scoreDay.isBefore(today)
+    }
+
+    private fun projectLotRows(
+        current: DashboardUiState,
+        gate: EarningsGateUi,
+        calendar: Map<String, Long?>,
+    ): List<PositionsRow> {
+        var today = sessionDay()
+        return projectPositions(
+            lots = current.portfolioLots,
+            scored = scoredLots(current.opportunityUniverse, current.opportunityRows),
+            upcomingReport = reportDatesForLots(gate, calendar, today),
+            today = today,
+            quotes = portfolioQuotesFromTrackedRows(current.trackedRows),
+        )
+    }
+
+    private fun prepareEarningsLogBackup() {
+        viewModelScope.launch {
+            var backup = try {
+                backUpEarningsLog()
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    earningsGateNotice = "Backup failed: ${error.message ?: "unknown error"}",
+                )
+                return@launch
+            }
+            _state.value = if (backup.eventCount == 0) {
+                _state.value.copy(earningsGateNotice = "No reports logged yet, so nothing to back up.")
+            } else {
+                _state.value.copy(earningsLogBackup = backup.text, earningsGateNotice = null)
+            }
+        }
+    }
+
+    private fun finishEarningsLogBackup(eventCount: Int) {
+        _state.value = _state.value.copy(
+            earningsLogBackup = null,
+            earningsGateNotice = "Backed up $eventCount report(s).",
+        )
+    }
+
+    private fun dropEarningsLogBackup() {
+        _state.value = _state.value.copy(earningsLogBackup = null)
+    }
+
+    /**
+     * A restore reports the reports it added, including none.
+     *
+     * Silence would read the same whether the file was the wrong one or the phone already
+     * held everything in it, and those call for opposite next moves.
+     */
+    private fun planImportBook(text: String) {
+        viewModelScope.launch {
+            var plan = try {
+                importPortfolioBook.plan(text)
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    importBookPlan = null,
+                    importBookNotice = error.message ?: "unreadable",
+                )
+                return@launch
+            }
+            _state.value = _state.value.copy(
+                importBookPlan = plan,
+                importBookNotice = if (plan is ImportPlan.Refuse) refuseReasonCode(plan.reason) else null,
+            )
+        }
+    }
+
+    private var importConfirmJob: Job? = null
+
+    private fun confirmImportBook() {
+        var plan = _state.value.importBookPlan ?: return
+        if (plan is ImportPlan.Refuse) return
+        importConfirmJob?.cancel()
+        importConfirmJob = viewModelScope.launch {
+            try {
+                importPortfolioBook.confirm(plan)
+                if (_state.value.importBookPlan !== plan) return@launch
+                render(
+                    getDashboardSnapshot(
+                        currentFilter(),
+                        _state.value.detailRoute?.symbol,
+                        _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                        _state.value.opportunityScoringModel,
+                    ),
+                )
+                _state.value = _state.value.copy(importBookPlan = null, importBookNotice = "Book updated.")
+                if (earningsGateLoaded) {
+                    loadEarningsGate()
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                _state.value = _state.value.copy(
+                    importBookNotice = error.message ?: "unreadable",
+                )
+            }
+        }
+    }
+
+    private fun cancelImportBook() {
+        importConfirmJob?.cancel()
+        _state.value = _state.value.copy(importBookPlan = null)
+    }
+
+    private fun restoreEarningsLogFrom(text: String) {
+        viewModelScope.launch {
+            var message = try {
+                "Restored ${restoreEarningsLog(text)} report(s) from the backup."
+            } catch (error: Throwable) {
+                "Restore failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(earningsGateNotice = message)
+            loadEarningsGate()
+        }
+    }
+
+    private fun saveAlphaVantageKeyFrom(key: String) {
+        viewModelScope.launch {
+            var message = try {
+                saveAlphaVantageKey(key)
+                if (key.isBlank()) "Alpha Vantage key cleared." else "Alpha Vantage key saved."
+            } catch (error: Throwable) {
+                "Alpha Vantage key failed: ${error.message ?: "unknown error"}"
+            }
+            _state.value = _state.value.copy(earningsGateNotice = message)
+            loadEarningsGate()
         }
     }
 
@@ -735,9 +1000,15 @@ class DashboardViewModel(
 
     private fun openDetail(symbol: String) {
         val state = _state.value
+        if (state.currentTab == DashboardTab.Positions &&
+            state.positionsRows.any { it.symbol == symbol && it.opportunity == null }
+        ) {
+            return
+        }
         val sourceTab = when (state.currentTab) {
             DashboardTab.Opportunities,
             DashboardTab.Plans,
+            DashboardTab.Positions,
             -> DetailSourceTab.Opportunities
             else -> DetailSourceTab.Tracked
         }
@@ -761,6 +1032,11 @@ class DashboardViewModel(
             ),
             symbol,
         )
+        if (!earningsGateLoaded) {
+            loadEarningsGate()
+        } else {
+            hydrateEarningsCalendar(listOf(symbol) + _state.value.portfolioLots.map { it.symbol })
+        }
         detailLoadJob?.cancel()
         detailLoadJob = viewModelScope.launch {
             try {
@@ -950,6 +1226,8 @@ class DashboardViewModel(
         previousSelect?.cancel()
         previousDetail?.cancel()
         previousRefresh?.cancel()
+        activeEarningsJob?.cancel()
+        activeCalendarJob?.cancel()
         selectProfileJob = viewModelScope.launch {
             previousSelect?.join()
             previousDetail?.join()
@@ -1081,7 +1359,7 @@ class DashboardViewModel(
 
     private fun visibleTrackedRows(state: DashboardUiState): List<TrackedSymbolRow> =
         if (state.currentTab == DashboardTab.Watch) {
-            state.trackedRows.filter { it.isWatched }
+            pinWatchedRows(state.trackedRows)
         } else {
             state.trackedRows
         }
@@ -1263,6 +1541,8 @@ class DashboardViewModel(
         var keepStaleDetail = currentRoute != null && currentState.detailData?.symbol == currentRoute.symbol
         var scoreRow = if (scoringMatches) snapshot.selectedScoreRow else currentState.selectedScoreRow
         var opportunityRows = if (scoringMatches) snapshot.opportunityRows else currentState.opportunityRows
+        var opportunityUniverse = if (scoringMatches) snapshot.opportunityUniverse else currentState.opportunityUniverse
+        var today = sessionDay()
         _state.value = currentState.copy(
             loading = snapshot.startupPhase == DashboardStartupPhase.Restoring,
             refreshing = snapshot.startupPhase == DashboardStartupPhase.SwitchingProfile ||
@@ -1274,6 +1554,7 @@ class DashboardViewModel(
             watchlistSymbols = snapshot.watchlistSymbols,
             candidateRows = snapshot.candidateRows,
             opportunityRows = opportunityRows,
+            opportunityUniverse = opportunityUniverse,
             selectedScoreRow = if (currentRoute != null && scoreRow?.symbol == currentRoute.symbol) {
                 scoreRow
             } else {
@@ -1350,6 +1631,7 @@ class DashboardViewModel(
             refreshCompletedSymbols = snapshot.refreshCompletedSymbols,
             refreshTargetSymbols = snapshot.refreshTargetSymbols,
             statusMessage = snapshot.statusMessage,
+            backgroundWorkMessage = snapshot.backgroundWorkMessage,
             providerState = snapshot.screenData.providerState,
             indexEstimates = snapshot.screenData.estimates.report,
             estimatesNotice = snapshot.estimatesNotice ?: currentState.estimatesNotice,
@@ -1359,6 +1641,18 @@ class DashboardViewModel(
             leftoverBoard = presentLeftoverBoard(snapshot.leftoverBoard),
             crossBoardOpps = presentCrossBoard(snapshot.crossBoard),
             crossBoardProfile = presentCrossBoard(snapshot.crossBoardProfile),
+            portfolioLots = snapshot.portfolioLots,
+            positionsRows = projectPositions(
+                lots = snapshot.portfolioLots,
+                scored = scoredLots(opportunityUniverse, opportunityRows),
+                upcomingReport = reportDatesForLots(
+                    _state.value.earningsGate,
+                    _state.value.earningsCalendar,
+                    today,
+                ),
+                today = today,
+                quotes = portfolioQuotesFromTrackedRows(snapshot.trackedRows),
+            ),
         )
         rememberDetailSession(_state.value)
     }
@@ -1409,6 +1703,11 @@ class DashboardViewModel(
                         exportScores = useCases.exportScores,
                         runRetrospective = useCases.runRetrospective,
                         runOutcomeReport = useCases.runOutcomeReport,
+                        getEarningsEvents = useCases.getEarningsEvents,
+                        backUpEarningsLog = useCases.backUpEarningsLog,
+                        restoreEarningsLog = useCases.restoreEarningsLog,
+                        importPortfolioBook = useCases.importPortfolioBook,
+                        saveAlphaVantageKey = useCases.saveAlphaVantageKey,
                         getIndexEstimates = useCases.getIndexEstimates,
                         saveEstimatesSnapshot = useCases.saveEstimatesSnapshot,
                         getEstimatesHistory = useCases.getEstimatesHistory,

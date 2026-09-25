@@ -1,7 +1,7 @@
 {
   "contract": "valuation-model-family",
   "version": "3",
-  "architecture": "_bmad-output/planning-artifacts/valuation-model-family-architecture.md",
+  "architecture": "docs/architecture/valuation-model-family.md",
   "notes": [
     "Golden cases for classifier, model selection, and executable policy/2 FCFF regressions.",
     "ACGL fundamentals sampled 2026-07-25 from public sources (Macrotrends/Yahoo/EDGAR/IR). T and AMZN inputs were sampled 2026-07-30 from Yahoo plus SEC companyfacts. Do not invent replacements without re-sampling."
@@ -11,8 +11,8 @@
     "deferredSurfaces": ["desktop"]
   },
   "fcffRobustEvidencePolicy": {
-    "modelPolicyVersion": "business-class-policy/36-ocf-prior-franchise",
-    "baseMargin": "owner_earnings_ocf_minus_maintenance_when_investment_wave_else_nonneg_annual_median",
+    "modelPolicyVersion": "business-class-policy/37-latest-positive-fcff",
+    "baseMargin": "owner_earnings_ocf_minus_maintenance_when_investment_wave_else_nonneg_annual_median_else_latest_positive",
     "scenarioMargins": "full_aligned_annual_including_negatives",
     "scenarioGrowth": "band_around_median_not_historical_iqr",
     "scenarioGrowthBandBps": 400,
@@ -302,7 +302,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/36-ocf-prior-franchise",
+        "modelPolicyVersion": "business-class-policy/37-latest-positive-fcff",
         "latestFcfDollars": 19440000000,
         "fcfRunRateDollars": 24652137600,
         "acceptance": [
@@ -312,7 +312,7 @@
           "rate_provenance_is_explicit"
         ]
       },
-      "evidence": "_bmad-output/planning-artifacts/research-dcf-vs-street-gap-T-2026-07-30.md"
+      "evidence": "docs/research/dcf-vs-street-gap-t-2026-07-30.md"
     },
     {
       "name": "amzn_capex_trough_does_not_invert_fcff_scenarios",
@@ -383,7 +383,7 @@
         "businessClass": "OperatingNonFinancial",
         "model": "FcffWacc",
         "discountRateKind": "Wacc",
-        "modelPolicyVersion": "business-class-policy/36-ocf-prior-franchise",
+        "modelPolicyVersion": "business-class-policy/37-latest-positive-fcff",
         "latestFcfDollars": 7695000000,
         "fcfRunRateDollars": null,
         "valuationDriver": "driver_based_fcff",
@@ -413,7 +413,7 @@
     "requiredForPolicyChanges": true,
     "fixture": "apps/windows/src-tauri/tests/fixtures/valuation/baseline_cohort_2026-07-30.json",
     "testModule": "valuation_baseline",
-    "policyDoc": "_bmad-output/implementation-artifacts/valuation-multi-name-baseline-policy.md",
+    "policyDoc": "docs/operations/valuation-baseline-policy.md",
     "rule": "Single-ticker green is insufficient; multi-name baseline suite must pass before merge-quality claims on valuation policy/engine changes."
   }
 }

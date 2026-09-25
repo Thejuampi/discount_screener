@@ -47,8 +47,11 @@ function New-RandomPassword([int]$Length = 24) {
     return $builder.ToString()
 }
 
+# java.util.Properties reads this file, so a backslash and a colon each take one
+# escape and no more. The replacement side of -replace is literal, so doubling it
+# here writes the escape twice and Gradle then hunts for a path that does not exist.
 function Convert-ToGradlePath([string]$Path) {
-    return (($Path -replace "\\", "\\\\") -replace ":", "\\:")
+    return (($Path -replace "\\", "\\") -replace ":", "\:")
 }
 
 function Set-Or-AddPropertyLine {
@@ -87,7 +90,15 @@ if ($ShowExample) {
 
 $resolvedKeystorePath = [System.IO.Path]::GetFullPath($KeystorePath)
 $storePasswordValue = if ($StorePassword) { $StorePassword } else { New-RandomPassword }
-$keyPasswordValue = if ($KeyPassword) { $KeyPassword } else { New-RandomPassword }
+
+# keytool writes PKCS12, which carries one password for the store and the key alike.
+# It says so and then ignores a second one, so a keystore built with two passwords
+# reads back only with the first, and the build dies on "final block not properly
+# padded" long after the run that caused it.
+$keyPasswordValue = $storePasswordValue
+if ($KeyPassword -and $KeyPassword -ne $storePasswordValue) {
+    Write-Warning "PKCS12 keeps one password. Ignoring -KeyPassword and using the store password for the key."
+}
 
 if ((Test-Path $resolvedKeystorePath) -and -not $Force) {
     throw "Keystore already exists at '$resolvedKeystorePath'. Use -Force only if you intentionally want to replace it."

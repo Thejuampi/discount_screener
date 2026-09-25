@@ -63,6 +63,7 @@ import com.discountscreener.core.model.ViewFilter
 import com.discountscreener.core.model.ValuationModel
 import com.discountscreener.core.regime.MarketRegime
 import com.discountscreener.core.model.getOrNull
+import com.discountscreener.core.engine.DcfAnalysisEngine
 import com.discountscreener.core.engine.ENGINE_VERSION
 import com.discountscreener.core.engine.MODEL_POLICY_VERSION
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -117,7 +118,7 @@ class DefaultDashboardRepositoryTest {
      */
     @Test
     fun the_score_journal_outlives_the_longest_measured_horizon() {
-        assertEquals(220L * 24L * 60L * 60L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
+        assertEquals(460L * 24L * 60L * 60L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
     }
 
     @Test
@@ -136,6 +137,37 @@ class DefaultDashboardRepositoryTest {
             assertTrue(snapshot.trackedSymbols.size in 1..DefaultDashboardRepository.QA_MAX_SYMBOLS)
             assertTrue(snapshot.trackedSymbols.size <= 20)
             assertFalse(snapshot.trackedSymbols.contains("MSTR"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun recovered_issue_history_does_not_reappear_as_active_system_error() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            store.replaceIssues(listOf(
+                com.discountscreener.android.data.persistence.PersistedIssueRecord(
+                    key = "T:enrichment:error:old",
+                    source = com.discountscreener.android.data.persistence.PersistenceIssueSource.Feed,
+                    severity = com.discountscreener.android.data.persistence.PersistenceIssueSeverity.Warning,
+                    title = "Enrichment failed",
+                    detail = "Recovered chart error",
+                    count = 3,
+                    firstSeenEvent = 1,
+                    lastSeenEvent = 3,
+                    active = false,
+                ),
+            ))
+            val repository = buildRepository(
+                store = store,
+                client = FakeYahooFinanceClient(),
+                defaultProfile = DefaultDashboardRepository.QA_PROFILE,
+            )
+
+            val snapshot = repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            assertTrue(snapshot.issues.none { it.key == "T:enrichment:error:old" })
         } finally {
             store.close()
         }
@@ -339,7 +371,7 @@ class DefaultDashboardRepositoryTest {
 
             assertEquals(
                 SourceFreeProjectionExpectation(
-                    providerCategory = ProjectedProviderCategory.SourceUnknown,
+                    providerCategory = ProjectedProviderCategory.Restored,
                     trustNote = "Source unknown",
                     confidence = ConfidenceBand.Low,
                     freshness = RowFreshness.Restored,
@@ -1221,7 +1253,7 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
-    fun cancelled_refresh_does_not_journal() = runTest(dispatcher) {
+    fun cancelled_refresh_does_not_capture_the_stale_profile() = runTest(dispatcher) {
         val store = CountingJournalStore(context, dispatcher)
         try {
             val client = FakeYahooFinanceClient()
@@ -1229,14 +1261,16 @@ class DefaultDashboardRepositoryTest {
             repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
             repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
             advanceUntilIdle()
-            val journalsAfterLivePass = store.journalWrites
-
             client.delayMs = 5_000
             repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
             dispatcher.scheduler.runCurrent()
+            val qaCapturesBeforeSwitch = store.snapshotProfiles.count { it == "qa" }
             repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
 
-            assertEquals(journalsAfterLivePass, store.journalWrites)
+            assertEquals(
+                qaCapturesBeforeSwitch,
+                store.snapshotProfiles.count { it == "qa" },
+            )
         } finally {
             store.close()
         }
@@ -1627,6 +1661,40 @@ class DefaultDashboardRepositoryTest {
     }
 
     @Test
+    fun empty_year_chart_is_retried_and_recovers() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var yearCalls = 0
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> {
+                    if (symbol == QA_EXCLUSIVE_LIVE_SYMBOL && range == ChartRange.Year) {
+                        yearCalls += 1
+                        if (yearCalls <= 2) return emptyList()
+                    }
+                    return super.fetchHistoricalCandles(symbol, range)
+                }
+            }
+            val repository = buildRepository(
+                store = store,
+                client = client,
+                defaultProfile = DefaultDashboardRepository.QA_PROFILE,
+            )
+
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val recovered = awaitSnapshot(repository, selectedSymbol = QA_EXCLUSIVE_LIVE_SYMBOL) { snapshot ->
+                snapshot.selectedCharts[ChartRange.Year].orEmpty().isNotEmpty() &&
+                    snapshot.issues.none { issue -> issue.key.startsWith("$QA_EXCLUSIVE_LIVE_SYMBOL:enrichment:") }
+            }
+
+            assertEquals(3, yearCalls)
+            assertTrue(recovered.selectedCharts[ChartRange.Year].orEmpty().isNotEmpty())
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun refresh_recomputes_cached_dcf() = runTest(dispatcher) {
         val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
         try {
@@ -2011,6 +2079,89 @@ class DefaultDashboardRepositoryTest {
             }
             assertEquals(ResolverState.Selected, recovered.resolverState)
             assertTrue(recovered.baseIntrinsicValueCents > 0L)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun reit_persists_classification_unavailable_reason() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    var fund = dcfFundamentals(symbol)
+                    if (symbol == "AAPL") {
+                        fund = fund.copy(
+                            sectorName = "Real Estate",
+                            industryName = "REIT - Specialty",
+                            sectorKey = "real-estate",
+                            industryKey = "reit-specialty",
+                        )
+                    }
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = fund,
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            val analysis = awaitDcfAnalysis(repository, "AAPL") { candidate ->
+                !candidate.valuationUnavailableReason.isNullOrBlank()
+            }
+            assertEquals(
+                DcfAnalysisEngine.classificationUnavailableReason(BusinessClass.NotEligible),
+                analysis.valuationUnavailableReason,
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun reit_does_not_fetch_timeseries() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var aaplTimeseriesFetches = 0
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    var fund = dcfFundamentals(symbol)
+                    if (symbol == "AAPL") {
+                        fund = fund.copy(
+                            sectorName = "Real Estate",
+                            industryName = "REIT - Specialty",
+                            sectorKey = "real-estate",
+                            industryKey = "reit-specialty",
+                        )
+                    }
+                    return super.fetchSymbol(symbol).copy(
+                        fundamentals = fund,
+                        coverage = ProviderCoverage(
+                            core = ProviderComponentState.Fresh,
+                            external = ProviderComponentState.Fresh,
+                            fundamentals = ProviderComponentState.Fresh,
+                        ),
+                    )
+                }
+
+                override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
+                    if (symbol == "AAPL") aaplTimeseriesFetches += 1
+                    return super.fetchFundamentalTimeseries(symbol)
+                }
+            }
+            val repository = buildRepository(store = store, client = client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.selectProfile("dow", ViewFilter(), ChartRange.Year, legacyModel)
+            awaitDcfAnalysis(repository, "AAPL") { candidate ->
+                candidate.businessClass == BusinessClass.NotEligible
+            }
+            assertEquals(0, aaplTimeseriesFetches)
         } finally {
             store.close()
         }
@@ -2874,6 +3025,63 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    /**
+     * Qualification keeps roughly one symbol in eight, on how cheap the name looks today. Which
+     * reports have to be logged has nothing to do with that: an option chain is never republished,
+     * so a name left out today has no implied move on file when it turns cheap next quarter.
+     */
+    @Test
+    fun the_earnings_capture_reads_a_symbol_the_product_list_left_out() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var repository = buildRepository(store = store, client = expensiveClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            awaitSnapshot(repository) { current ->
+                current.trackedRows.count { it.state == TrackedRowState.Live } >= 3
+            }
+
+            assertTrue(repository.earningsCandidateRows().isNotEmpty())
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun a_universe_nobody_would_buy_still_shows_an_empty_product_list() = runTest(dispatcher) {
+        var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            var repository = buildRepository(store = store, client = expensiveClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, OpportunityScoringModel.AggressiveV4)
+            awaitSnapshot(repository) { current ->
+                current.trackedRows.count { it.state == TrackedRowState.Live } >= 3
+            }
+
+            assertTrue(
+                repository.currentSnapshot(
+                    ViewFilter(),
+                    null,
+                    ChartRange.Year,
+                    OpportunityScoringModel.AggressiveV4,
+                ).opportunityRows.isEmpty(),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    private fun expensiveClient() = object : FakeYahooFinanceClient() {
+        override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+            var base = super.fetchSymbol(symbol)
+            var price = base.snapshot!!.marketPriceCents
+            return base.copy(
+                snapshot = base.snapshot!!.copy(intrinsicValueCents = price / 2),
+                externalSignal = base.externalSignal!!.copy(fairValueCents = price / 2),
+            )
+        }
+    }
+
     @Test
     fun ensure_detail_loaded_scores_an_unqualified_ad_hoc_ticker() = runTest(dispatcher) {
         var store = SQLiteStateStore(context, ioDispatcher = dispatcher)
@@ -3016,6 +3224,14 @@ class DefaultDashboardRepositoryTest {
         ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
     ) : SQLiteStateStore(context, ioDispatcher = ioDispatcher) {
         var journalWrites = 0
+        val snapshotProfiles = mutableListOf<String>()
+
+        override suspend fun appendScoringEvaluationSnapshot(
+            snapshot: com.discountscreener.android.domain.model.ScoringEvaluationSnapshot,
+        ) {
+            snapshotProfiles += snapshot.profileName
+            super.appendScoringEvaluationSnapshot(snapshot)
+        }
 
         override suspend fun appendScoreJournal(
             rows: List<com.discountscreener.android.domain.model.ScoreJournalRow>,

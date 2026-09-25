@@ -76,12 +76,45 @@ class DcfSourceCoordinatorTest {
         assertEquals(mapOf(DcfSource.YahooFinance to usableTimeseries()), resolution.fetched)
     }
 
-    private class CountingYahooFinanceClient : YahooFinanceClient(httpClient = offlineHttpClient()) {
+    @Test
+    fun resolve_copies_filed_sec_interest_onto_yahoo_when_sec_is_unusable() = runTest {
+        var yahoo = CountingYahooFinanceClient(usableTimeseries())
+        var sec = FundamentalTimeseries(
+            interestExpense = listOf(
+                AnnualReportedValue(
+                    asOfDate = "2023-12-31",
+                    value = -216.0,
+                    concept = "InterestIncomeExpenseNonoperatingNet",
+                    source = DcfSource.SecEdgar,
+                ),
+            ),
+        )
+        var coordinator = DcfSourceCoordinator(
+            yahooClient = yahoo,
+            secondaryTimeseriesProvider = FixedTimeseriesProvider(sec),
+        )
+        var seenInterest = mutableListOf<Double>()
+        coordinator.resolve("CBRE") { timeseries ->
+            if (timeseries.operatingCashFlow.isEmpty()) {
+                error("fcff unavailable: sec incomplete")
+            }
+            timeseries.interestExpense.lastOrNull()?.value?.let { seenInterest.add(it) }
+            if (timeseries.interestExpense.isEmpty()) {
+                error("fcff unavailable: no aligned market yield, spread, or SEC interest/debt periods")
+            }
+            analysis()
+        }
+        assertEquals(listOf(-216.0), seenInterest)
+    }
+
+    private class CountingYahooFinanceClient(
+        private val timeseries: FundamentalTimeseries = usableTimeseries(),
+    ) : YahooFinanceClient(httpClient = offlineHttpClient()) {
         var timeseriesFetchCount = 0
 
         override suspend fun fetchFundamentalTimeseries(symbol: String): FundamentalTimeseries {
             timeseriesFetchCount++
-            return usableTimeseries()
+            return timeseries
         }
     }
 

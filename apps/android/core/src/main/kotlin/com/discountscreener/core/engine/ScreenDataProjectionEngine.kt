@@ -11,7 +11,6 @@ import com.discountscreener.core.model.ExpectedValueRangeBand
 import com.discountscreener.core.model.IndexEstimatesReport
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProviderDecisionReasonCode
-import com.discountscreener.core.model.ProviderState
 import com.discountscreener.core.model.ProjectedAnalystTargetStatistic
 import com.discountscreener.core.model.ProjectedConfidence
 import com.discountscreener.core.model.ProjectedDashboardData
@@ -22,6 +21,7 @@ import com.discountscreener.core.model.ProjectedFairValueRole
 import com.discountscreener.core.model.ProjectedOpportunityDecisionFacts
 import com.discountscreener.core.model.ProjectedOpportunityRow
 import com.discountscreener.core.model.ProjectedProviderCategory
+import com.discountscreener.core.model.ProviderState
 import com.discountscreener.core.model.ProjectedProviderState
 import com.discountscreener.core.model.ProjectedProvenanceState
 import com.discountscreener.core.model.ProjectedRowDecision
@@ -906,10 +906,6 @@ class ScreenDataProjectionEngine {
     private fun providerCategory(request: ScreenDataProjectionRequest): ProjectedProviderCategory {
         var categories = mutableListOf<ProjectedProviderCategory>()
         categories.addAll(request.symbolStateBySymbol.values.map { state -> state.providerCategory })
-        categories.addAll(request.dcfBySymbol.values.map { analysis -> providerCategory(analysis) })
-        if (request.issues.any { issue -> issue.active }) {
-            categories.add(ProjectedProviderCategory.Unavailable)
-        }
         return if (categories.isEmpty() && request.trackedSymbols.isEmpty() && request.detailsBySymbol.isEmpty()) {
             ProjectedProviderCategory.Unavailable
         } else {
@@ -970,11 +966,6 @@ class ScreenDataProjectionEngine {
         var affected = mutableSetOf<String>()
         request.symbolStateBySymbol.forEach { entry ->
             if (entry.value.providerCategory != ProjectedProviderCategory.Live) {
-                affected.add(entry.key)
-            }
-        }
-        request.dcfBySymbol.forEach { entry ->
-            if (providerCategory(entry.value) != ProjectedProviderCategory.Live) {
                 affected.add(entry.key)
             }
         }

@@ -9,7 +9,7 @@
 //!
 //! | Driver | Source precedence | Notes |
 //! | --- | --- | --- |
-//! | **Payout → retention** | `financialData.payoutRatio` then `summaryDetail.payoutRatio` | Keep only finite values in `[0, 1]`; `retention = (1 − payout) × 10_000` bps. Empty Yahoo objects (`{}`) are treated as missing. |
+//! | **Payout → retention** | `financialData.payoutRatio` then `summaryDetail.payoutRatio` | Finite payout `≥ 0`. Payout `≥ 1` is retention 0. Else `retention = (1 − payout) × 10_000` bps. Empty Yahoo objects (`{}`) are missing. |
 //! | **Book / BVPS** | `defaultKeyStatistics.bookValue` (or `bookValuePerShare`), else `price / priceToBook` | Positive book only. Price is `financialData.currentPrice` → `price.regularMarketPrice` → cents fallback. |
 //! | **ROE** | `financialData.returnOnEquity` only | Reported ROE; no EPS/book synthesis. |
 //!
@@ -418,6 +418,12 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
             price,
             market_price_cents,
         ),
+        book_value_per_share_cents_with_deficit: resolve_book_value_per_share_cents_with_deficit(
+            statistics,
+            financial_data,
+            price,
+            market_price_cents,
+        ),
         retention_bps: resolve_retention_bps(financial_data, summary_detail),
     });
 
@@ -559,6 +565,34 @@ fn resolve_return_on_equity_bps(financial_data: Option<&Value>) -> Option<i32> {
 }
 
 /// BVPS: statistics bookValue/bookValuePerShare, else price / P/B.
+/// Reported book value per share with its sign kept.
+///
+/// [`resolve_book_value_per_share_cents`] drops a negative reading, because a
+/// deficit breaks every ratio built on equity alone. A deficit is still a real
+/// measurement, and invested capital adds debt back, so the return-on-capital
+/// lane needs the number the issuer actually reported. The price-over-book
+/// derivation is not repeated here: it cannot produce a negative reading, so it
+/// would only hide the deficit again.
+fn resolve_book_value_per_share_cents_with_deficit(
+    statistics: Option<&Value>,
+    financial_data: Option<&Value>,
+    price: Option<&Value>,
+    market_price_cents: Option<i64>,
+) -> Option<i64> {
+    statistics
+        .and_then(|s| raw_double(s, "bookValue").or_else(|| raw_double(s, "bookValuePerShare")))
+        .filter(|v| *v != 0.0)
+        .map(|v| (v * 100.0).round() as i64)
+        .or_else(|| {
+            resolve_book_value_per_share_cents(
+                statistics,
+                financial_data,
+                price,
+                market_price_cents,
+            )
+        })
+}
+
 fn resolve_book_value_per_share_cents(
     statistics: Option<&Value>,
     financial_data: Option<&Value>,
@@ -593,8 +627,14 @@ fn resolve_retention_bps(
     financial_data
         .and_then(|f| raw_double(f, "payoutRatio"))
         .or_else(|| summary_detail.and_then(|detail| raw_double(detail, "payoutRatio")))
-        .filter(|payout| payout.is_finite() && (0.0..=1.0).contains(payout))
-        .map(|payout| ((1.0 - payout) * 10_000.0).round() as i32)
+        .filter(|payout| payout.is_finite() && *payout >= 0.0)
+        .map(|payout| {
+            if payout >= 1.0 {
+                0
+            } else {
+                ((1.0 - payout) * 10_000.0).round() as i32
+            }
+        })
 }
 
 fn is_usable_name(name: &str, symbol: &str) -> bool {
@@ -701,6 +741,12 @@ mod tests {
         }
     }
 
+    /// The pinned value belongs to a policy version, and the version moves.
+    ///
+    /// 16 881 cents was the answer under `business-class-policy/16`. Residual income was reworked
+    /// at `0c897087` on the way to `/31`, which moved COF to 17 881 and left this test red for
+    /// twelve days. Re-pin with the policy that set the number, so the next move is visible in the
+    /// diff instead of arriving as a failure nobody dates.
     #[test]
     fn cof_reads_reported_payout_from_summary_detail_for_residual_income() {
         assert!(
@@ -723,7 +769,7 @@ mod tests {
             analysis.model,
             crate::dcf_model::ValuationModel::ResidualIncomeEquity
         );
-        assert_eq!(analysis.base_intrinsic_value_cents, 16_881);
+        assert_eq!(analysis.base_intrinsic_value_cents, 17_881);
         assert!(analysis
             .reason_codes
             .contains(&"retention_source=reported:8347bps".to_string()));
@@ -740,7 +786,7 @@ mod tests {
                 .dcf_analyses
                 .get("COF")
                 .map(|value| value.base_intrinsic_value_cents),
-            Some(16_881)
+            Some(17_881)
         );
 
         state.ingest_fundamentals(crate::engine::FundamentalSnapshot {
@@ -843,6 +889,26 @@ mod tests {
             .fundamentals
             .expect("fundamentals");
         assert_eq!(fund.retention_bps, Some(6_000)); // 1 - 0.40
+    }
+
+    #[test]
+    fn payout_at_one_is_zero_retention() {
+        let financial = serde_json::json!({ "payoutRatio": { "raw": 1.0 } });
+        let empty = serde_json::json!({});
+        assert_eq!(
+            resolve_retention_bps(Some(&financial), Some(&empty)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn payout_above_one_is_zero_retention() {
+        let financial = serde_json::json!({ "payoutRatio": { "raw": 1.47 } });
+        let empty = serde_json::json!({});
+        assert_eq!(
+            resolve_retention_bps(Some(&financial), Some(&empty)),
+            Some(0)
+        );
     }
 
     #[test]
