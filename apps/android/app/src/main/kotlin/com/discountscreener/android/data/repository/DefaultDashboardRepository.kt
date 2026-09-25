@@ -217,6 +217,7 @@ import kotlin.math.roundToLong
 private data class SymbolRefreshResult(
     val generation: Long,
     val symbol: String,
+    val ticket: Long,
     val providerResult: ProviderFetchResult? = null,
     val chartCandles: List<HistoricalCandle>? = null,
     val fallbackSnapshot: MarketSnapshot? = null,
@@ -266,33 +267,22 @@ private data class EnrichmentResult(
 private data class PersistenceDelta(
     val rawCaptures: List<RawCapture>,
     val revisions: List<SymbolRevisionInput>,
-    val issues: List<PersistedIssueRecord>,
+    val refreshSymbol: String? = null,
+    val refreshTicket: Long? = null,
 )
 
-/**
- * The deltas of a round since the last write, so a batch of rows costs one transaction.
- *
- * A write per symbol was the round: on the largest profile the persist took 5.3 s of a 7.7 s
- * round, at nine milliseconds a symbol, all of it in front of the next row. Captures and revisions
- * add up; the issue list is whole each time, so the last one is the one to write.
- */
+/** Deltas wait in one batch. Each keeps its ticket so a newer symbol write can replace it. */
 private class PendingDeltas {
-    private val rawCaptures = mutableListOf<RawCapture>()
-    private val revisions = mutableListOf<SymbolRevisionInput>()
-    private var issues: List<PersistedIssueRecord>? = null
+    private val deltas = mutableListOf<PersistenceDelta>()
 
     fun add(delta: PersistenceDelta) {
-        rawCaptures += delta.rawCaptures
-        revisions += delta.revisions
-        issues = delta.issues
+        deltas += delta
     }
 
-    /** Hands back everything added since the last take, or null when nothing was. */
-    fun take(): PersistenceDelta? {
-        var taken = issues?.let { PersistenceDelta(rawCaptures.toList(), revisions.toList(), it) }
-        rawCaptures.clear()
-        revisions.clear()
-        issues = null
+    /** Hands back everything added since the last take. */
+    fun take(): List<PersistenceDelta> {
+        val taken = deltas.toList()
+        deltas.clear()
         return taken
     }
 }
@@ -410,6 +400,8 @@ class DefaultDashboardRepository(
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val stateMutex = Mutex()
+    /** Orders only database writes. Provider requests run without this mutex. */
+    private val refreshPersistMutex = Mutex()
     private val adoptPersistMutex = Mutex()
     private val updates = MutableStateFlow(0L)
 
@@ -497,6 +489,8 @@ class DefaultDashboardRepository(
     private val staleSymbols = linkedSetOf<String>()
     private val placeholderSymbols = linkedSetOf<String>()
     private val refreshedSymbols = linkedSetOf<String>()
+    private var nextRefreshTicket = 0L
+    private val lastAppliedRefreshTicket = mutableMapOf<String, Long>()
 
     /**
      * Rows this refresh priced in the batch pass and otherwise left as the file had them, because
@@ -937,8 +931,10 @@ class DefaultDashboardRepository(
     ): DashboardSnapshot = withContext(InteractiveRequest) {
         val normalizedSymbol = symbol.trim().uppercase()
         loadCachedDetail(normalizedSymbol, filter, selectedRange, opportunityScoringModel)
-        val generation = stateMutex.withLock { activeProfileGeneration }
-        val fetched = fetchRefreshResult(normalizedSymbol, generation)
+        val (generation, ticket) = stateMutex.withLock {
+            activeProfileGeneration to ++nextRefreshTicket
+        }
+        val fetched = fetchRefreshResult(normalizedSymbol, generation, ticket)
         val chartAttempt = if (selectedRange == ChartRange.Year && !fetched.chartCandles.isNullOrEmpty()) {
             null
         } else {
@@ -958,10 +954,11 @@ class DefaultDashboardRepository(
             throw IOException("No fresh data for $normalizedSymbol. Saved data remains available.")
         }
         val delta = stateMutex.withLock {
-            if (generation != activeProfileGeneration) {
+            if (generation != activeProfileGeneration || ticket < (lastAppliedRefreshTicket[normalizedSymbol] ?: 0L)) {
                 null
             } else {
                 val applied = applyRefreshResultLocked(result, updateProfileProgress = false)
+                lastAppliedRefreshTicket[normalizedSymbol] = ticket
                 val extraCapture = if (selectedRange != ChartRange.Year && selectedCandles != null) {
                     val key = chartKey(normalizedSymbol, selectedRange)
                     val merged = mergeHistoricalCandles(
@@ -985,10 +982,12 @@ class DefaultDashboardRepository(
                 }
                 if (extraCapture != null) appendRevisionLocked(normalizedSymbol)
                 snapshotPersistenceDeltaLocked(applied.rawCaptures + listOfNotNull(extraCapture), normalizedSymbol)
+                    .copy(refreshSymbol = normalizedSymbol, refreshTicket = ticket)
             }
         }
         if (delta != null) {
-            persistDelta(delta, generation)
+            // The memory change and its cache write form one completed refresh, even after navigation.
+            withContext(NonCancellable) { persistDelta(delta) }
             emitUpdate()
         }
         if (stateMutex.withLock { generation == activeProfileGeneration && engine.detail(normalizedSymbol) != null }) {
@@ -1828,7 +1827,11 @@ class DefaultDashboardRepository(
         // the first quote result 8.1 s, so eight of those seconds bought nothing but prices. A row
         // whose own quote is not fresh needs a quoteSummary whatever the batch returns, so its
         // round starts now and the prices land beside it.
-        val pricing = async { timedStage("refresh.prices") { primeWarmPrices(symbols, generation) } }
+        val (warmOnFile, warmTickets) = stateMutex.withLock {
+            val warm = symbols.filter { symbol -> engine.detail(symbol) != null }.toSet()
+            warm to warm.associateWith { ++nextRefreshTicket }
+        }
+        val pricing = async { timedStage("refresh.prices") { primeWarmPrices(warmTickets, generation) } }
         val keeping = async {
             val priced = pricing.await()
             val kept = symbols.filter { symbol -> symbol in skip.quote && symbol in priced }
@@ -1854,7 +1857,6 @@ class DefaultDashboardRepository(
         }
         // A row with no state on file gets no batch price at all, so it has nothing to show until
         // its own quote lands. Those go first, as they did when this pass waited for the prices.
-        val warmOnFile = stateMutex.withLock { symbols.filter { symbol -> engine.detail(symbol) != null }.toSet() }
         val stale = symbols.filter { symbol -> symbol !in skip.quote }
         val staleQuote = stale.filter { symbol -> symbol !in warmOnFile } +
             stale.filter { symbol -> symbol in warmOnFile }
@@ -1943,21 +1945,31 @@ class DefaultDashboardRepository(
      *
      * Returns the symbols it priced.
      */
-    private suspend fun primeWarmPrices(symbols: List<String>, generation: Long): Set<String> {
-        val warm = stateMutex.withLock { symbols.filter { symbol -> engine.detail(symbol) != null } }
+    private suspend fun primeWarmPrices(ticketsBySymbol: Map<String, Long>, generation: Long): Set<String> {
+        val warm = ticketsBySymbol.keys.toList()
         if (warm.isEmpty()) return emptySet()
         val priced = HashSet<String>()
         val unwritten = PendingDeltas()
         warm.chunked(QUOTE_BATCH_SIZE)
             .asFlow()
             .flatMapMerge(concurrency = yahooClient.requestCeiling) { batch ->
-                flow { emit(yahooClient.fetchQuotes(batch)) }
+                flow {
+                    val tickets = batch.associateWith { ticketsBySymbol.getValue(it) }
+                    emit(tickets to yahooClient.fetchQuotes(batch))
+                }
             }
-            .collect { quotes ->
+            .collect { (tickets, quotes) ->
                 val refreshedAt = now()
                 val applied = stateMutex.withLock {
                     if (generation != activeProfileGeneration) return@collect
-                    quotes.values.mapNotNull { entry -> applyWarmPriceLocked(entry, refreshedAt) }
+                    quotes.values.mapNotNull { entry ->
+                        val ticket = tickets[entry.symbol] ?: return@mapNotNull null
+                        if (ticket < (lastAppliedRefreshTicket[entry.symbol] ?: 0L)) return@mapNotNull null
+                        applyWarmPriceLocked(entry, refreshedAt)?.copy(
+                            refreshSymbol = entry.symbol,
+                            refreshTicket = ticket,
+                        )?.also { lastAppliedRefreshTicket[entry.symbol] = ticket }
+                    }
                 }
                 applied.forEach(unwritten::add)
                 if (priced.isEmpty()) {
@@ -1965,7 +1977,7 @@ class DefaultDashboardRepository(
                 }
                 priced += quotes.keys
                 emitUpdate()
-                timedStage("refresh.persist") { persistPending(unwritten) }
+                timedStage("refresh.persist") { persistPending(unwritten, generation) }
             }
         logStageMillis("refresh.prices.done", millisSince(refreshRequestedNanos), " priced=${priced.size} of ${warm.size}")
         return priced
@@ -2051,10 +2063,16 @@ class DefaultDashboardRepository(
             // permit per request. A permit here covered a whole symbol, which is two or three
             // round trips, so the controller was steering by a number it never measured.
             .flatMapMerge(concurrency = yahooClient.requestCeiling) { symbol ->
-                flow { emit(timedStage("refresh.symbol") { fetchRefreshResult(symbol, generation) }) }
+                flow {
+                    val ticket = stateMutex.withLock { ++nextRefreshTicket }
+                    emit(timedStage("refresh.symbol") { fetchRefreshResult(symbol, generation, ticket) })
+                }
             }
             .collect { result ->
-                val isActiveGeneration = stateMutex.withLock { result.generation == activeProfileGeneration }
+                val isActiveGeneration = stateMutex.withLock {
+                    result.generation == activeProfileGeneration &&
+                        result.ticket >= (lastAppliedRefreshTicket[result.symbol] ?: 0L)
+                }
                 if (!isActiveGeneration) {
                     return@collect
                 }
@@ -2065,17 +2083,24 @@ class DefaultDashboardRepository(
                 if (result.chartCandles != null) {
                     charted += result.symbol
                 }
-                unwritten.add(
-                    timedStage("refresh.apply") {
-                        stateMutex.withLock {
+                val delta = timedStage("refresh.apply") {
+                    stateMutex.withLock {
+                        if (result.generation != activeProfileGeneration ||
+                            result.ticket < (lastAppliedRefreshTicket[result.symbol] ?: 0L)
+                        ) {
+                            null
+                        } else {
                             applyRefreshResultLocked(
                                 result = result,
                                 suppressTransientRateLimits = !recordTerminalIssues,
                                 recordTerminalFailure = recordTerminalIssues || !needsRecovery,
-                            )
+                            ).copy(refreshSymbol = result.symbol, refreshTicket = result.ticket).also {
+                                lastAppliedRefreshTicket[result.symbol] = result.ticket
+                            }
                         }
-                    },
-                )
+                    }
+                } ?: return@collect
+                unwritten.add(delta)
                 applied += 1
                 if (!refreshFirstSymbolLogged) {
                     refreshFirstSymbolLogged = true
@@ -2088,13 +2113,13 @@ class DefaultDashboardRepository(
                     emitUpdate()
                 }
                 if (applied % PERSIST_BATCH == 0) {
-                    timedStage("refresh.persist") { persistPending(unwritten) }
+                    timedStage("refresh.persist") { persistPending(unwritten, generation) }
                 }
             }
         if (applied > 1 && applied % EMIT_UPDATE_BATCH != 0) {
             emitUpdate()
         }
-        timedStage("refresh.persist") { persistPending(unwritten) }
+        timedStage("refresh.persist") { persistPending(unwritten, generation) }
         logStageMillis("refresh.round", millisSince(roundStartedNanos), " symbols=$applied")
     }
 
@@ -2107,13 +2132,14 @@ class DefaultDashboardRepository(
         return !hasSnapshot && !hasName && !hasChart
     }
 
-    private suspend fun fetchRefreshResult(symbol: String, generation: Long): SymbolRefreshResult {
+    private suspend fun fetchRefreshResult(symbol: String, generation: Long, ticket: Long): SymbolRefreshResult {
         val refreshedAt = now()
         val providerResult = runCatching { yahooClient.fetchSymbol(symbol) }.getOrElse { error ->
             if (error is CancellationException) throw error
             return SymbolRefreshResult(
                 generation = generation,
                 symbol = symbol,
+                ticket = ticket,
                 chartError = error,
                 retryable = isRetryable(error),
                 refreshedAtEpochSeconds = refreshedAt,
@@ -2158,6 +2184,7 @@ class DefaultDashboardRepository(
         return SymbolRefreshResult(
             generation = generation,
             symbol = symbol,
+            ticket = ticket,
             providerResult = providerResult,
             chartCandles = chartCandles,
             fallbackSnapshot = dcfFallback?.snapshot,
@@ -2190,6 +2217,7 @@ class DefaultDashboardRepository(
             null
         }
         val effectiveSnapshot = providerResult?.snapshot ?: fallbackSnapshot ?: result.fallbackSnapshot
+        val quoteFresh = effectiveSnapshot != null
         val effectiveFundamentals = result.residualOutcome?.fundamentals
             ?: providerResult?.fundamentals
             ?: result.fallbackFundamentals
@@ -2295,8 +2323,18 @@ class DefaultDashboardRepository(
                 result.chartError
             },
             suppressQuoteHtml404 = fallbackSnapshot != null || result.fallbackSnapshot != null,
-            suppressCoreMissing = result.fallbackSnapshot != null || recovered,
+            suppressCoreMissing = quoteFresh,
         )
+        if (!quoteFresh && engine.detail(result.symbol) != null &&
+            issues["${result.symbol}:provider:core"] == null
+        ) {
+            recordIssueLocked(
+                key = "${result.symbol}:provider:core",
+                severity = PersistenceIssueSeverity.Warning,
+                title = "Quote unavailable",
+                detail = "No fresh quote for ${result.symbol}. Saved price remains in use.",
+            )
+        }
         if (recordTerminalFailure && !recovered && engine.detail(result.symbol) == null) {
             recordIssueLocked(
                 key = "${result.symbol}:provider:terminal",
@@ -2305,7 +2343,7 @@ class DefaultDashboardRepository(
                 detail = "No market data after retries for ${result.symbol}. Will use cache when available.",
             )
         }
-        if (recovered) {
+        if (quoteFresh) {
             // Success clears prior terminal noise for this symbol.
             issues.keys.filter { key ->
                 key.startsWith("${result.symbol}:provider:") ||
@@ -2316,12 +2354,12 @@ class DefaultDashboardRepository(
             }
         }
 
+        if (quoteFresh) {
+            refreshedSymbols += result.symbol
+        }
         if (updateProfileProgress) {
             if (refreshAttemptedSymbols.add(result.symbol)) {
                 refreshCompletedSymbols += 1
-            }
-            if (recovered) {
-                refreshedSymbols += result.symbol
             }
             applyTransitionLocked(
                 reduceProfileTransition(
@@ -2335,10 +2373,12 @@ class DefaultDashboardRepository(
         }
 
         if (engine.detail(result.symbol) != null) {
-            staleSymbols.remove(result.symbol)
-            placeholderSymbols.remove(result.symbol)
-            keptSymbols.remove(result.symbol)
-            freshnessTimestampBySymbol[result.symbol] = result.refreshedAtEpochSeconds
+            if (quoteFresh) {
+                staleSymbols.remove(result.symbol)
+                placeholderSymbols.remove(result.symbol)
+                keptSymbols.remove(result.symbol)
+                freshnessTimestampBySymbol[result.symbol] = result.refreshedAtEpochSeconds
+            }
             appendRevisionLocked(result.symbol)
             lastUpdatedAtEpochSeconds = result.refreshedAtEpochSeconds
         }
@@ -3925,7 +3965,6 @@ class DefaultDashboardRepository(
         return PersistenceDelta(
             rawCaptures = rawCaptures,
             revisions = listOfNotNull(revision),
-            issues = issues.values.toList(),
         )
     }
 
@@ -3973,23 +4012,39 @@ class DefaultDashboardRepository(
      * being issued, and the refresh runs at the speed the disk can absorb rather than the speed the
      * network can produce. Slower by the cost of the writes, and bounded.
      */
-    private suspend fun persistDelta(delta: PersistenceDelta, generation: Long? = null) {
-        if (generation != null && stateMutex.withLock { generation != activeProfileGeneration }) {
-            return
-        }
-        if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
-            stateStore.persistBatch(delta.rawCaptures, delta.revisions)
-        }
-        var issueFingerprint = delta.issues.hashCode()
-        if (issueFingerprint != lastPersistedIssueFingerprint) {
-            stateStore.replaceIssues(delta.issues)
-            lastPersistedIssueFingerprint = issueFingerprint
+    private suspend fun persistDelta(delta: PersistenceDelta, generation: Long? = null) =
+        persistDeltas(listOf(delta), generation)
+
+    private suspend fun persistDeltas(deltas: List<PersistenceDelta>, generation: Long? = null) {
+        if (deltas.isEmpty()) return
+        refreshPersistMutex.withLock {
+            // A newer applied refresh owns the symbol. The check and write share one writer.
+            val (current, currentIssues) = stateMutex.withLock {
+                if (generation != null && generation != activeProfileGeneration) {
+                    emptyList<PersistenceDelta>() to emptyList<PersistedIssueRecord>()
+                } else {
+                    deltas.filter { delta ->
+                        delta.refreshSymbol == null || delta.refreshTicket == lastAppliedRefreshTicket[delta.refreshSymbol]
+                    } to issues.values.toList()
+                }
+            }
+            if (current.isEmpty()) return@withLock
+            val captures = current.flatMap(PersistenceDelta::rawCaptures)
+            val revisions = current.flatMap(PersistenceDelta::revisions)
+            if (captures.isNotEmpty() || revisions.isNotEmpty()) {
+                stateStore.persistBatch(captures, revisions)
+            }
+            val issueFingerprint = currentIssues.hashCode()
+            if (issueFingerprint != lastPersistedIssueFingerprint) {
+                stateStore.replaceIssues(currentIssues)
+                lastPersistedIssueFingerprint = issueFingerprint
+            }
         }
     }
 
     /** Writes what a round has gathered since its last write, in one transaction. */
-    private suspend fun persistPending(pending: PendingDeltas) {
-        pending.take()?.let { delta -> persistDelta(delta) }
+    private suspend fun persistPending(pending: PendingDeltas, generation: Long? = null) {
+        persistDeltas(pending.take(), generation)
     }
 
 

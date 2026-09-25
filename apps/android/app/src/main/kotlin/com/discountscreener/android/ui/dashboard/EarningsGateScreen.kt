@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
+import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
@@ -24,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -275,6 +277,7 @@ const val EARNINGS_GATE_IMPORT = "earningsGateImport"
 
 @Composable
 internal fun EarningsEventCard(row: EarningsEventRowUi) {
+    var showOptions by rememberSaveable(row.symbol, row.reportDate) { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(12.dp),
@@ -304,27 +307,73 @@ internal fun EarningsEventCard(row: EarningsEventRowUi) {
                     style = MaterialTheme.typography.labelMedium,
                 )
             }
-            Text(
-                text = row.headline,
-                style = MaterialTheme.typography.bodyMedium,
-                color = riskColor(row.risk),
-                fontWeight = FontWeight.SemiBold,
-            )
-            GateLine("Priced move", row.impliedMove)
-            GateLine("Event move", row.eventMove)
-            GateLine("Own history", row.ownHistory)
-            GateLine("Risk ratio", row.riskRatio)
-            GateLine("Price vs fair value", row.priceToFair)
-            GateLine("Action", "${row.action} · ${row.positionSize}")
-            GateLine("Hedge", row.hedge)
-            GateLine("Hedge cost", row.hedgeCost)
-            row.reportedOn?.let { GateLine("Reported", it) }
-            row.reaction?.let { GateLine("Reaction", it) }
-            row.surprise?.let { GateLine("Surprise", it) }
-            row.sueFit?.let { GateLine("SUE fit", it) }
-            row.revenueTrail?.let { GateLine("Revenue trail", it) }
-            if (row.justification.isNotBlank()) {
-                Text(text = row.justification, style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                if (showOptions) {
+                    OutlinedButton(onClick = { showOptions = false }, modifier = Modifier.weight(1f)) { Text("Simple") }
+                    Button(onClick = { showOptions = true }, modifier = Modifier.weight(1f)) { Text("Options") }
+                } else {
+                    Button(onClick = { showOptions = false }, modifier = Modifier.weight(1f)) { Text("Simple") }
+                    OutlinedButton(onClick = { showOptions = true }, modifier = Modifier.weight(1f)) { Text("Options") }
+                }
+            }
+            if (showOptions) {
+                Text(text = "This is a saved example, not a live order.", style = MaterialTheme.typography.bodySmall)
+                Text(text = row.optionExplanation, style = MaterialTheme.typography.bodySmall)
+                row.optionWarning?.let {
+                    Text(text = it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                Text(
+                    text = row.headline,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = riskColor(row.risk),
+                    fontWeight = FontWeight.SemiBold,
+                )
+                GateLine("Priced move", row.impliedMove)
+                GateLine("Event move", row.eventMove)
+                GateLine("Own history", row.ownHistory)
+                GateLine("Risk ratio", row.riskRatio)
+                GateLine("Price vs fair value", row.priceToFair)
+                GateLine("Model stance", "${row.action} · ${row.positionSize}")
+                GateLine("Hedge", row.hedge)
+                GateLine("Hedge cost", row.hedgeCost)
+                GateLine("Expiry", row.optionExpiry)
+                Text(
+                    text = "Contract count, live price, and fees are not saved.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                row.reportedOn?.let { GateLine("Reported", it) }
+                row.reaction?.let { GateLine("Reaction", it) }
+                row.surprise?.let { GateLine("Surprise", it) }
+                row.sueFit?.let { GateLine("SUE fit", it) }
+                row.revenueTrail?.let { GateLine("Revenue trail", it) }
+                if (row.justification.isNotBlank()) {
+                    Text(text = row.justification, style = MaterialTheme.typography.bodySmall)
+                }
+            } else {
+                Text(
+                    text = row.simpleRisk.headline,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = riskColor(row.risk),
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(text = row.simpleRisk.reportMove, style = MaterialTheme.typography.bodyMedium)
+                Text(text = row.simpleRisk.pastMove, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = "These figures describe possible movement. They do not predict direction.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                row.simpleRisk.outcome?.let { Text(text = it, style = MaterialTheme.typography.bodyMedium) }
+                if (row.simpleRisk.paths.isNotEmpty()) {
+                    Text("Ways without options", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "These are choices to compare. The app does not select one.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    row.simpleRisk.paths.forEach { path ->
+                        Text(path.title, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
+                        Text(path.tradeoff, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
         }
     }

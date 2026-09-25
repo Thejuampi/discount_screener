@@ -3,6 +3,8 @@ package com.discountscreener.android.presentation.dashboard
 import com.discountscreener.core.earnings.DecisionCell
 import com.discountscreener.core.earnings.EarningsEventRecord
 import com.discountscreener.core.earnings.EventRisk
+import com.discountscreener.core.earnings.EventAction
+import com.discountscreener.core.earnings.HedgeKind
 import com.discountscreener.core.earnings.PostReport
 import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ReportTiming
@@ -170,6 +172,84 @@ class EarningsGatePresentationTest {
     @Test
     fun a_high_risk_report_is_marked_as_high_risk() {
         assertEquals(EventRisk.High, present(listOf(record(day = 3))).upcoming.single().risk)
+    }
+
+    @Test
+    fun simple_risk_explains_a_high_event_move_and_its_source() {
+        val simple = present(listOf(record(day = 3))).upcoming.single().simpleRisk
+
+        assertEquals("Saved prices suggest a larger move than past reports showed.", simple.headline)
+        assertEquals("Saved options prices suggest about 7.01% around this report. Direction is unknown.", simple.reportMove)
+        assertEquals("Past reports moved about 4.00% beyond the broad market.", simple.pastMove)
+    }
+
+    @Test
+    fun simple_risk_names_a_report_move_near_past_moves() {
+        val simple = present(listOf(record(day = 3, ratio = 5_000))).upcoming.single().simpleRisk
+
+        assertEquals("Saved prices suggest a move near or below past reports.", simple.headline)
+    }
+
+    @Test
+    fun simple_risk_explains_missing_event_data_without_a_number() {
+        val unavailable = record(day = 3, event = null).copy(
+            pre = record(day = 3, event = null).pre.copy(medianAbsoluteAbnormalReturnBps = null),
+        )
+        val simple = present(listOf(unavailable)).upcoming.single().simpleRisk
+
+        assertEquals("There is not enough reliable data to compare this report with past reports.", simple.headline)
+        assertEquals("No reliable report move is saved.", simple.reportMove)
+        assertEquals("No usable past report moves are saved.", simple.pastMove)
+    }
+
+    @Test
+    fun simple_risk_lists_share_choices_for_a_held_ticker() {
+        val paths = present(listOf(record(day = 3)), held = setOf("LVS")).upcoming.single().simpleRisk.paths
+
+        assertEquals(listOf("Keep current shares", "Hold fewer shares", "Wait before adding"), paths.map { it.title })
+    }
+
+    @Test
+    fun simple_risk_lists_buying_choices_for_an_unheld_ticker() {
+        val paths = present(listOf(record(day = 3))).upcoming.single().simpleRisk.paths
+
+        assertEquals(listOf("Wait before buying", "Buy before the report"), paths.map { it.title })
+    }
+
+    @Test
+    fun option_example_names_its_saved_expiry_and_protection_limit() {
+        val saved = record(day = 3).let { it.copy(pre = it.pre.copy(expiryEpochDay = TODAY.plusDays(5).toEpochDay())) }
+        val row = present(listOf(saved)).upcoming.single()
+
+        assertEquals("2026-08-28", row.optionExpiry)
+        assertTrue(row.optionExplanation.contains("\$44.00 put"))
+        assertTrue(row.optionExplanation.contains("\$42.00 put"))
+        assertTrue(row.optionExplanation.contains("Protection stops growing"))
+    }
+
+    @Test
+    fun option_example_marks_an_expiry_that_was_not_saved() {
+        assertEquals("Not saved", present(listOf(record(day = 3))).upcoming.single().optionExpiry)
+    }
+
+    @Test
+    fun simple_risk_describes_a_settled_report_without_future_choices() {
+        val simple = present(listOf(record(day = -3, abnormalReturnBps = 412))).settled.single().simpleRisk
+
+        assertTrue(simple.paths.isEmpty())
+        assertEquals("Before this report, saved prices suggested a larger move than earlier reports showed.", simple.headline)
+        assertTrue(simple.reportMove.startsWith("Before this report"))
+        assertEquals("After this report, the stock moved +4.12% beyond the broad market.", simple.outcome)
+    }
+
+    @Test
+    fun an_inconsistent_saved_action_and_put_example_gets_a_warning() {
+        val saved = record(day = 3).let { it.copy(decision = it.decision!!.copy(action = EventAction.Hold, hedge = HedgeKind.PutSpread)) }
+
+        assertEquals(
+            "Saved action and put example disagree. No trade steps are available.",
+            present(listOf(saved)).upcoming.single().optionWarning,
+        )
     }
 
     @Test

@@ -1,13 +1,27 @@
 $ErrorActionPreference = "Stop"
 
+function Invoke-AndroidGradle {
+    param([string[]]$GradleArgs)
+
+    & ./gradlew @GradleArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Gradle failed: $($GradleArgs -join ' ')"
+    }
+}
+
 Push-Location "$PSScriptRoot/../apps/android"
 try {
-    ./gradlew :core:test
+    Invoke-AndroidGradle -GradleArgs @(':core:test')
 
     $localProperties = Join-Path (Get-Location) "local.properties"
     $hasSdk = [bool]$env:ANDROID_HOME -or [bool]$env:ANDROID_SDK_ROOT -or (Test-Path $localProperties)
     if ($hasSdk) {
-        ./gradlew :app:testDebugUnitTest :app:assembleDebug
+        # The app suite exceeds the three-minute Gradle kill switch as one task.
+        # Each filter runs in its own bounded task and keeps that hang guard useful.
+        Invoke-AndroidGradle -GradleArgs @(':app:testDebugUnitTest', '--tests', 'com.discountscreener.android.data.*', '--tests', 'com.discountscreener.android.presentation.*', '--rerun')
+        Invoke-AndroidGradle -GradleArgs @(':app:testDebugUnitTest', '--tests', 'com.discountscreener.android.ui.*', '--rerun')
+        Invoke-AndroidGradle -GradleArgs @(':app:testDebugUnitTest', '--tests', 'com.discountscreener.android.app.*', '--tests', 'com.discountscreener.android.domain.*', '--tests', 'com.discountscreener.android.performance.*', '--tests', 'com.discountscreener.android.StuckTestWatchdogTest', '--rerun')
+        Invoke-AndroidGradle -GradleArgs @(':app:assembleDebug')
     } else {
         Write-Host "Android SDK not configured. Skipping :app:testDebugUnitTest and :app:assembleDebug."
     }
