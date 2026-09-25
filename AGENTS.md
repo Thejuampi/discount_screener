@@ -136,6 +136,7 @@ Read the scoped guide before work in an application:
 ## Workspace Safety
 
 - Preserve unrelated user changes.
+- Give Juan Android debug APKs from `make apk` with the versioned `dist/discount-screener-debug-<version>.apk` name.
 - Do not clear Android app data.
 - Do not uninstall the Android app to change certificates.
 - Use the `qa` universe for agent or manual live QA.
