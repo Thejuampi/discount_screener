@@ -332,6 +332,10 @@ open class SQLiteStateStore(
         )
     }
 
+    suspend fun loadCachedSymbolState(symbol: String): PersistedSymbolState? = withContext(ioDispatcher) {
+        loadSymbolLatest(readableDatabase, listOf(symbol)).singleOrNull()
+    }
+
     suspend fun resetWarmStartState() = withContext(ioDispatcher) {
         val db = writableDatabase
         db.beginTransaction()

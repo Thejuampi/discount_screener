@@ -542,6 +542,65 @@ class DashboardViewModelTest {
     }
 
     @Test
+    fun opening_a_ticker_reads_cached_detail_without_a_provider_load() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(detailData = detail("AAPL"))
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        assertEquals("AAPL", viewModel.state.value.detailData?.symbol)
+        assertNull(repository.lastOpenedSymbol)
+        assertTrue(repository.calendarRefreshCalls.isEmpty())
+    }
+
+    @Test
+    fun opening_a_ticker_without_cache_keeps_the_route_and_names_the_missing_cache() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository()
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        assertEquals("AAPL", viewModel.state.value.detailRoute?.symbol)
+        assertEquals("No cached detail", viewModel.state.value.detailNotice?.title)
+        assertNull(repository.lastOpenedSymbol)
+    }
+
+    @Test
+    fun refresh_detail_loads_only_the_open_ticker_and_repaints_its_cached_value() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(detailData = detail("AAPL"))
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.RefreshDetail)
+        advanceUntilIdle()
+
+        assertEquals(listOf("AAPL"), repository.refreshedDetailSymbols)
+        assertEquals(12_000L, viewModel.state.value.detailData?.marketPriceCents)
+        assertFalse(viewModel.state.value.detailRefreshing)
+    }
+
+    @Test
+    fun failed_detail_refresh_keeps_the_cached_value_and_reports_the_error() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            detailData = detail("AAPL"),
+            detailRefreshError = IllegalStateException("provider offline"),
+        )
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.RefreshDetail)
+        advanceUntilIdle()
+
+        assertEquals(10_000L, viewModel.state.value.detailData?.marketPriceCents)
+        assertEquals("Refresh failed", viewModel.state.value.detailNotice?.title)
+        assertFalse(viewModel.state.value.detailRefreshing)
+    }
+
+    @Test
     fun scored_positions_detail_walks_opportunities() = runTest(dispatcher) {
         var repository = RecordingDashboardRepository(opportunityRows = listOf(listRow("AMZN")))
         var viewModel = testViewModel(repository)
@@ -1064,7 +1123,7 @@ class DashboardViewModelTest {
         viewModel.dispatch(DashboardAction.SubmitTickerSearch)
         advanceUntilIdle()
 
-        assertEquals("MELI", repository.lastOpenedSymbol)
+        assertNull(repository.lastOpenedSymbol)
         assertEquals("MELI", viewModel.state.value.detailRoute?.symbol)
     }
 
@@ -1167,7 +1226,7 @@ class DashboardViewModelTest {
         viewModel.dispatch(DashboardAction.SelectTickerSuggestion("SHOP"))
         advanceUntilIdle()
 
-        assertEquals("SHOP", repository.lastOpenedSymbol)
+        assertNull(repository.lastOpenedSymbol)
         assertEquals("SHOP", viewModel.state.value.detailRoute?.symbol)
         assertEquals(listOf("SHOP"), viewModel.state.value.detailRoute?.sourceSymbols)
     }
@@ -1982,6 +2041,7 @@ class DashboardViewModelTest {
         private val fetchedScoreRows: Map<String, OpportunityListRow> = emptyMap(),
         private val selectProfileDelayMs: Long = 0,
         private val detailLoadError: Throwable? = null,
+        private val detailRefreshError: Throwable? = null,
     ) : DashboardRepository {
         val symbolNotes = mutableMapOf<String, String>()
         var saveSnapshotCallCount = 0
@@ -1997,6 +2057,7 @@ class DashboardViewModelTest {
         var lastTickerSuggestionQuery: String? = null
         var searchTickersCallCount = 0
         var lastOpenedSymbol: String? = null
+        val refreshedDetailSymbols = mutableListOf<String>()
         var addSymbolsCallCount = 0
         var loadDiscoveryCallCount = 0
         var recreateDiscoveryCallCount = 0
@@ -2200,6 +2261,27 @@ class DashboardViewModelTest {
             return emptySnapshot(opportunityScoringModel).copy(
                 selectedScoreRow = fetchedScoreRows[symbol],
             )
+        }
+
+        override suspend fun loadCachedDetail(
+            symbol: String,
+            filter: ViewFilter,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot = currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel).copy(
+            selectedScoreRow = fetchedScoreRows[symbol],
+        )
+
+        override suspend fun refreshDetail(
+            symbol: String,
+            filter: ViewFilter,
+            selectedRange: ChartRange,
+            opportunityScoringModel: OpportunityScoringModel,
+        ): DashboardSnapshot {
+            refreshedDetailSymbols += symbol
+            detailRefreshError?.let { throw it }
+            detailData = detailData?.copy(marketPriceCents = 12_000L)
+            return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
         }
 
         override suspend fun searchTickers(

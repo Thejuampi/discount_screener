@@ -207,6 +207,7 @@ fun DetailScreen(
     alerts: List<String>,
     quantLens: QuantLensUiState? = null,
     detailNotice: DashboardNotice? = null,
+    detailRefreshing: Boolean = false,
     tickerSearchQuery: String = "",
     tickerSearchSuggestions: List<TickerSearchSuggestion> = emptyList(),
     tickerSearchExpanded: Boolean = false,
@@ -330,6 +331,14 @@ fun DetailScreen(
             onExpandedChange = { onAction(DashboardAction.SetTickerSearchExpanded(it)) },
             onSubmit = { onAction(DashboardAction.SubmitTickerSearch) },
             onSelect = { onAction(DashboardAction.SelectTickerSuggestion(it)) },
+            trailingAction = {
+                TextButton(
+                    onClick = { onAction(DashboardAction.RefreshDetail) },
+                    enabled = !detailRefreshing,
+                ) {
+                    Text(if (detailRefreshing) "Loading" else if (matchingDetail == null) "Load" else "Refresh")
+                }
+            },
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
         )
 

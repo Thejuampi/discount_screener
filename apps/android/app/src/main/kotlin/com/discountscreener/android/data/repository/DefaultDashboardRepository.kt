@@ -899,6 +899,105 @@ class DefaultDashboardRepository(
             .onFailure { error -> logger.error(TAG, "earnings capture failed", error) }
     }
 
+    override suspend fun loadCachedDetail(
+        symbol: String,
+        filter: ViewFilter,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+    ): DashboardSnapshot {
+        val normalizedSymbol = symbol.trim().uppercase()
+        if (stateMutex.withLock { engine.detail(normalizedSymbol) == null }) {
+            val saved = stateStore.loadCachedSymbolState(normalizedSymbol)
+            if (saved != null) {
+                stateMutex.withLock {
+                    if (engine.detail(normalizedSymbol) == null) {
+                        saved.snapshot?.let(engine::ingestSnapshot)
+                        saved.externalSignal?.let(engine::ingestExternal)
+                        saved.fundamentals?.let(engine::ingestFundamentals)
+                        saved.dcfAnalysis?.let { putDcfAnalysisLocked(normalizedSymbol, it, saved.fundamentals) }
+                        if (saved.chartSummaries.isNotEmpty()) {
+                            chartSummaries.getOrPut(normalizedSymbol) { linkedMapOf() }
+                                .putAll(saved.chartSummaries.associateBy { it.range })
+                        }
+                        staleSymbols += normalizedSymbol
+                    }
+                }
+            }
+        }
+        ensureRevisionHistoryLoaded(normalizedSymbol)
+        hydratePricingHistoryForDetail(normalizedSymbol)
+        return currentSnapshot(filter, normalizedSymbol, selectedRange, opportunityScoringModel)
+    }
+
+    override suspend fun refreshDetail(
+        symbol: String,
+        filter: ViewFilter,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+    ): DashboardSnapshot = withContext(InteractiveRequest) {
+        val normalizedSymbol = symbol.trim().uppercase()
+        loadCachedDetail(normalizedSymbol, filter, selectedRange, opportunityScoringModel)
+        val generation = stateMutex.withLock { activeProfileGeneration }
+        val fetched = fetchRefreshResult(normalizedSymbol, generation)
+        val chartAttempt = if (selectedRange == ChartRange.Year && !fetched.chartCandles.isNullOrEmpty()) {
+            null
+        } else {
+            runCatching { yahooClient.fetchHistoricalCandles(normalizedSymbol, selectedRange) }
+        }
+        chartAttempt?.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+        val selectedCandles = chartAttempt?.getOrNull()?.takeIf { it.isNotEmpty() }
+        val result = if (selectedRange == ChartRange.Year && selectedCandles != null) {
+            fetched.copy(chartCandles = selectedCandles, chartError = null)
+        } else {
+            fetched
+        }
+        val hasFreshData = result.providerResult?.let {
+            it.snapshot != null || it.externalSignal != null || it.fundamentals != null
+        } == true || result.fallbackSnapshot != null || !result.chartCandles.isNullOrEmpty() || selectedCandles != null
+        if (!hasFreshData) {
+            throw IOException("No fresh data for $normalizedSymbol. Saved data remains available.")
+        }
+        val delta = stateMutex.withLock {
+            if (generation != activeProfileGeneration) {
+                null
+            } else {
+                val applied = applyRefreshResultLocked(result, updateProfileProgress = false)
+                val extraCapture = if (selectedRange != ChartRange.Year && selectedCandles != null) {
+                    val key = chartKey(normalizedSymbol, selectedRange)
+                    val merged = mergeHistoricalCandles(
+                        symbol = normalizedSymbol,
+                        range = selectedRange,
+                        persistedCandles = chartCache[key].orEmpty(),
+                        incomingCandles = selectedCandles,
+                    )
+                    chartCache[key] = merged
+                    chartSummaries.getOrPut(normalizedSymbol) { linkedMapOf() }[selectedRange] =
+                        ChartAnalysis.buildSummary(selectedRange, merged, result.refreshedAtEpochSeconds)
+                    RawCapture(
+                        symbol = normalizedSymbol,
+                        captureKind = CaptureKind.ChartCandles,
+                        scopeKey = selectedRange.name,
+                        capturedAt = result.refreshedAtEpochSeconds,
+                        payload = RawCapturePayload.Chart(selectedRange, selectedCandles),
+                    )
+                } else {
+                    null
+                }
+                if (extraCapture != null) appendRevisionLocked(normalizedSymbol)
+                snapshotPersistenceDeltaLocked(applied.rawCaptures + listOfNotNull(extraCapture), normalizedSymbol)
+            }
+        }
+        if (delta != null) {
+            persistDelta(delta, generation)
+            emitUpdate()
+        }
+        if (stateMutex.withLock { generation == activeProfileGeneration && engine.detail(normalizedSymbol) != null }) {
+            loadDetail(normalizedSymbol, filter, selectedRange, opportunityScoringModel)
+        } else {
+            currentSnapshot(filter, normalizedSymbol, selectedRange, opportunityScoringModel)
+        }
+    }
+
     override suspend fun ensureDetailLoaded(
         symbol: String,
         filter: ViewFilter,
@@ -2077,6 +2176,7 @@ class DefaultDashboardRepository(
         result: SymbolRefreshResult,
         suppressTransientRateLimits: Boolean = false,
         recordTerminalFailure: Boolean = true,
+        updateProfileProgress: Boolean = true,
     ): PersistenceDelta {
         val rawCaptures = mutableListOf<RawCapture>()
         val providerResult = result.providerResult
@@ -2216,21 +2316,23 @@ class DefaultDashboardRepository(
             }
         }
 
-        if (refreshAttemptedSymbols.add(result.symbol)) {
-            refreshCompletedSymbols += 1
-        }
-        if (recovered) {
-            refreshedSymbols += result.symbol
-        }
-        applyTransitionLocked(
-            reduceProfileTransition(
-                ProfileTransitionEvent.RefreshProgress(
-                    profile = currentProfile,
-                    completedSymbols = refreshCompletedSymbols,
-                    totalSymbols = refreshTargetSymbols,
+        if (updateProfileProgress) {
+            if (refreshAttemptedSymbols.add(result.symbol)) {
+                refreshCompletedSymbols += 1
+            }
+            if (recovered) {
+                refreshedSymbols += result.symbol
+            }
+            applyTransitionLocked(
+                reduceProfileTransition(
+                    ProfileTransitionEvent.RefreshProgress(
+                        profile = currentProfile,
+                        completedSymbols = refreshCompletedSymbols,
+                        totalSymbols = refreshTargetSymbols,
+                    ),
                 ),
-            ),
-        )
+            )
+        }
 
         if (engine.detail(result.symbol) != null) {
             staleSymbols.remove(result.symbol)

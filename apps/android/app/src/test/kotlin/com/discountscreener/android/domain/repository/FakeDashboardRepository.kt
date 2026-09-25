@@ -63,6 +63,20 @@ open class FakeDashboardRepository : DashboardRepository {
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot = emptySnapshot(opportunityScoringModel)
 
+    override suspend fun loadCachedDetail(
+        symbol: String,
+        filter: ViewFilter,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+    ): DashboardSnapshot = currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+
+    override suspend fun refreshDetail(
+        symbol: String,
+        filter: ViewFilter,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+    ): DashboardSnapshot = currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+
     override suspend fun addSymbols(
         rawInput: String,
         filter: ViewFilter,

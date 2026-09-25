@@ -93,6 +93,9 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 ### Ticker Detail
 
 - The system can open a selected ticker detail from list surfaces.
+- Android opens ticker detail from saved data. Opening a ticker does not request provider data.
+- Android shows Load when no saved detail exists. Load refreshes that ticker's cache and reloads its view.
+- Android shows Refresh when saved detail exists. Refresh requests new data for that ticker and keeps saved data on failure.
 - The system shows current market price, fair value context, discount/upside, qualification, confidence, and external signal status.
 - The system shows historical candles and chart-derived indicators for supported ranges.
 - The system shows technical context including EMA and MACD where enough data exists.
