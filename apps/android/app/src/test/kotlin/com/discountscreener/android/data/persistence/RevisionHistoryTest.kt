@@ -50,6 +50,25 @@ class RevisionHistoryTest {
         }
     }
 
+    @Test
+    fun repeated_state_inside_one_batch_files_one_revision() = runTest {
+        val store = SQLiteStateStore(context)
+        try {
+            store.persistBatch(
+                emptyList(),
+                listOf(
+                    revision(priceCents = 10_000, evaluatedAt = 100, updateCount = 1),
+                    revision(priceCents = 10_000, evaluatedAt = 500, updateCount = 2),
+                ),
+            )
+
+            assertEquals(1, store.loadRevisionHistory(SYMBOL).size)
+            assertEquals(2, store.loadWarmStart().symbolStates.single().updateCount)
+        } finally {
+            store.close()
+        }
+    }
+
     /** The history still keeps every change; only the repeats are dropped. */
     @Test
     fun a_revision_that_moved_is_filed_beside_the_one_before_it() = runTest {
@@ -63,6 +82,28 @@ class RevisionHistoryTest {
                 listOf(10_000L, 11_000L),
                 store.loadRevisionHistory(SYMBOL).map { it.payload.snapshot?.marketPriceCents },
             )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun history_keeps_240_changes_and_drops_the_oldest_on_change_241() = runTest {
+        val store = SQLiteStateStore(context)
+        try {
+            store.persistBatch(emptyList(), (1..239).map { index ->
+                revision(priceCents = index.toLong(), evaluatedAt = index.toLong())
+            })
+            assertEquals(239, store.loadRevisionHistory(SYMBOL).size)
+
+            store.persistBatch(emptyList(), listOf(revision(priceCents = 240, evaluatedAt = 240)))
+            assertEquals(240, store.loadRevisionHistory(SYMBOL).size)
+
+            store.persistBatch(emptyList(), listOf(revision(priceCents = 241, evaluatedAt = 241)))
+            val retained = store.loadRevisionHistory(SYMBOL)
+            assertEquals(240, retained.size)
+            assertEquals(2L, retained.first().evaluatedAt)
+            assertEquals(241L, retained.last().evaluatedAt)
         } finally {
             store.close()
         }

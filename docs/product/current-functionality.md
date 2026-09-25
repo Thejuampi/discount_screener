@@ -55,6 +55,7 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - Opportunities as the default landing surface.
 - Opportunity ordinals follow visible list order, including filtered and pinned rows.
 - Background enrichment shows its pass and progress after the quote refresh reaches its total. System hides the feed counter when refresh ends.
+- Android list refresh publishes its first new row immediately. Later progress updates arrive in bounded groups.
 - System provider status reflects feed data. Detail keeps legacy DCF source warnings with each value.
 - Empty year charts enter bounded retry rounds.
 - System shows active errors only. Recovered errors stay in stored history.

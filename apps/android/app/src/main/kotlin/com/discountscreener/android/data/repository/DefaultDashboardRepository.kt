@@ -2106,9 +2106,9 @@ class DefaultDashboardRepository(
                     refreshFirstSymbolLogged = true
                     logStageMillis("refresh.first-symbol", millisSince(refreshRequestedNanos))
                 }
-                // The first row is published on its own. A batch of eight is right for the middle
-                // of a round and wrong at its start: it holds the first result until seven more
-                // land, and over a network that is seconds of a screen that shows nothing new.
+                // The first row is published on its own. Later updates cover a persistence-sized
+                // batch so a fast provider cannot make the screen rebuild the full list after
+                // every few results. The final partial batch is published below.
                 if (applied == 1 || applied % EMIT_UPDATE_BATCH == 0) {
                     emitUpdate()
                 }
@@ -5608,7 +5608,7 @@ class DefaultDashboardRepository(
 
         private const val MAX_RETRY_ROUNDS = 3
         private const val MAX_REVISION_HISTORY = 240
-        private const val EMIT_UPDATE_BATCH = 8
+        private const val EMIT_UPDATE_BATCH = 32
 
         /**
          * How many applied symbols a round gathers before it writes.
