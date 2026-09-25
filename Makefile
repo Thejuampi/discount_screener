@@ -7,7 +7,6 @@ ANDROID_DIR := $(REPO_ROOT)/apps/android
 WINDOWS_DIR := $(REPO_ROOT)/apps/windows
 FLUTTER_DIR := $(REPO_ROOT)/apps/flutter
 DIST_DIR := $(REPO_ROOT)/dist
-APK_EXPORT_DEBUG := $(DIST_DIR)/discount-screener-debug.apk
 
 CARGO := cargo
 # Absolute, not bare: cmd.exe resolves a bare `gradlew.bat` from the working directory, sh does not.
@@ -86,7 +85,7 @@ android-signing-bootstrap:
 
 apk:
 	pushd "$(ANDROID_DIR)" && $(GRADLE) :app:assembleDebug && popd
-	powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; Copy-Item -Force '$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk' '$(APK_EXPORT_DEBUG)'; Write-Host 'Installable APK: $(APK_EXPORT_DEBUG)'"
+	powershell -NoProfile -ExecutionPolicy Bypass -File "$(REPO_ROOT)/scripts/export-android-apk.ps1" -SourceApk "$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk" -DistDir "$(DIST_DIR)" -Kind debug
 
 # ── Windows (Tauri / Vantage) ──
 # Dev launcher: Vite + Rust backend. Requires Node/npm and a working Tauri toolchain.

@@ -66,7 +66,7 @@ The repository no longer vendors an SDK under `apps/android`. Set `ANDROID_HOME`
 
 When the Android SDK is not available, `:core:test` remains the portable verification path for the reporting engine.
 
-Use `make apk` from the repository root to export an **installable debug APK** to `dist/discount-screener-debug.apk`.
+Use `make apk` from the repository root to export an **installable debug APK** to `dist/discount-screener-debug-<version>.apk`. The version matches `versionName` from `scripts/version.ps1`.
 
 Use `make android-release` to export a **release (not debug) APK** to `dist/discount-screener-release-<version>.apk`. The `<version>` token is the same git stamp as `versionName` (`scripts/version.ps1`). That target is the release build type. It is not a signing ceremony. Android still stamps a key so the file can install; with no keystore that stamp is the debug key.
 
