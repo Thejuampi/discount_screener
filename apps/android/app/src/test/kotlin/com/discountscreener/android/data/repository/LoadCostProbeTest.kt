@@ -99,7 +99,8 @@ class LoadCostProbeTest {
         var http = CountingYahooHttp(latencyMillis = 0L)
         var sec = CountingSecProvider(latencyMillis = 0L)
         var store = SQLiteStateStore(context, databaseFileName = PROBE_DB_NAME)
-        var repository = repository(store, YahooFinanceClient(httpClient = http.client), sec, LARGE_PROFILE)
+        var logger = StageRecordingLogger()
+        var repository = repository(store, YahooFinanceClient(httpClient = http.client), sec, LARGE_PROFILE, logger)
         var collector: Job? = null
         try {
             var started = System.currentTimeMillis()
@@ -128,6 +129,9 @@ class LoadCostProbeTest {
                     appendLine("Time until every symbol was quoted: $listReady ms")
                     appendLine("Time to the whole load: $whole ms")
                     appendLine("Still in flight: $inFlight")
+                    logger.stageSamples().forEach { (stage, values) ->
+                        appendLine("Stage $stage: ${values.size} calls, ${values.sum()} ms total, ${values.maxOrNull()} ms max")
+                    }
                 },
             )
 
@@ -138,6 +142,10 @@ class LoadCostProbeTest {
                     quoted >= catalogSize &&
                     !inFlight &&
                     whole <= TWENTY_SECONDS_MILLIS,
+            )
+            assertTrue(
+                "a full load rebuilt the whole list too often: ${logger.stageSamples()["snapshot.build"].orEmpty().size}",
+                logger.stageSamples()["snapshot.build"].orEmpty().size <= 80,
             )
         } finally {
             collector?.cancel()
@@ -200,6 +208,7 @@ class LoadCostProbeTest {
         client: YahooFinanceClient,
         sec: FundamentalTimeseriesProvider,
         profile: String = PROBE_PROFILE,
+        logger: StageRecordingLogger? = null,
     ) = DefaultDashboardRepository(
         stateStore = store,
         profileCatalog = ProfileCatalog(context.assets),
@@ -208,6 +217,7 @@ class LoadCostProbeTest {
         secondaryTimeseriesProvider = sec,
         nowProvider = { 1_700_000_000L },
         defaultProfile = profile,
+        logger = logger ?: StageRecordingLogger(),
     )
 
     private fun deleteFiles() {

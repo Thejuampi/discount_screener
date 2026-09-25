@@ -549,14 +549,40 @@ open class SQLiteStateStore(
         }
 
         val db = writableDatabase
+        var chartUpsert: SQLiteStatement? = null
         db.beginTransaction()
         try {
+            if (rawCaptures.any { it.captureKind == CaptureKind.ChartCandles }) {
+                chartUpsert = compileCandleUpsert(db)
+            }
             var latestTimestamp: Long? = null
-            val lastWritten = lastRevisionBySymbol(db, revisions.map { it.symbol })
+            val lastWritten = lastRevisionBySymbol(db, revisions.map { it.symbol }).toMutableMap()
+            val revisionCounts = revisionCountsBySymbol(db, revisions.map { it.symbol }).toMutableMap()
+            // Read existing charts once per range. A list refresh writes many symbols in one
+            // transaction, so a SELECT for each chart made the write path an N+1 query loop.
+            val chartRows = rawCaptures.mapNotNull { capture ->
+                (capture.payload as? RawCapturePayload.Chart)
+                    ?.takeIf { capture.captureKind == CaptureKind.ChartCandles }
+                    ?.let { payload -> capture to payload.range }
+            }
+            val existingCharts = chartRows.groupBy({ it.second }, { it.first })
+                .flatMap { (range, captures) ->
+                    captures.map { it.symbol }.distinct().chunked(SQL_IN_CHUNK).flatMap { symbols ->
+                        loadPricingCandleCache(db, rangeFilter = range, symbolsFilter = symbols)
+                    }
+                }
+                .associate { (it.symbol to it.range) to it.candles }
+                .toMutableMap()
 
             rawCaptures.forEach { capture ->
                 if (capture.captureKind == CaptureKind.ChartCandles) {
-                    persistPricingCandles(db, capture)
+                    val range = (capture.payload as? RawCapturePayload.Chart)?.range
+                    if (range != null) {
+                        val key = capture.symbol to range
+                        existingCharts[key] = persistPricingCandles(
+                            db, capture, existingCharts[key].orEmpty(), chartUpsert,
+                        )
+                    }
                     latestTimestamp = maxOf(latestTimestamp ?: 0L, capture.capturedAt)
                     return@forEach
                 }
@@ -608,7 +634,14 @@ open class SQLiteStateStore(
                             put("external_json", externalJson)
                             put("fundamentals_json", fundamentalsJson)
                         },
-                    ).also { trimRevisionHistory(db, revision.symbol) }
+                    ).also { insertedId ->
+                        lastWritten[revision.symbol] = LastRevision(insertedId, payloadJson)
+                        val count = (revisionCounts[revision.symbol] ?: 0) + 1
+                        if (count > MAX_REVISION_HISTORY) {
+                            trimRevisionHistory(db, revision.symbol)
+                        }
+                        revisionCounts[revision.symbol] = minOf(count, MAX_REVISION_HISTORY)
+                    }
                 }
 
                 db.insertWithOnConflict(
@@ -638,7 +671,11 @@ open class SQLiteStateStore(
             )
             db.setTransactionSuccessful()
         } finally {
-            db.endTransaction()
+            try {
+                chartUpsert?.close()
+            } finally {
+                db.endTransaction()
+            }
         }
     }
 
@@ -803,6 +840,22 @@ open class SQLiteStateStore(
         }
     }
 
+    /** One grouped read lets the write path skip a history trim below the retention limit. */
+    private fun revisionCountsBySymbol(db: SQLiteDatabase, symbols: List<String>): Map<String, Int> {
+        if (symbols.isEmpty()) return emptyMap()
+        return symbols.distinct().chunked(SQL_IN_CHUNK).flatMap { chunk ->
+            val placeholders = chunk.joinToString(",") { "?" }
+            db.rawQuery(
+                "SELECT symbol, COUNT(*) FROM symbol_revision WHERE symbol IN ($placeholders) GROUP BY symbol",
+                chunk.toTypedArray(),
+            ).useRows { cursor ->
+                buildList {
+                    while (cursor.moveToNext()) add(cursor.getString(0) to cursor.getInt(1))
+                }
+            }
+        }.toMap()
+    }
+
     private fun trimRevisionHistory(db: SQLiteDatabase, symbol: String) {
         db.execSQL(
             """
@@ -823,11 +876,13 @@ open class SQLiteStateStore(
     }
 
     private fun dropUnreferencedRawCaptures(db: SQLiteDatabase, symbols: Set<String>) {
-        symbols.forEach { symbol ->
+        symbols.chunked(SQL_IN_CHUNK / 2).forEach { chunk ->
+            val placeholders = chunk.joinToString(",") { "?" }
             db.delete(
                 "raw_capture",
-                "symbol = ? AND id NOT IN (SELECT capture_id FROM raw_latest WHERE symbol = ?)",
-                arrayOf(symbol, symbol),
+                "symbol IN ($placeholders) AND id NOT IN " +
+                    "(SELECT capture_id FROM raw_latest WHERE symbol IN ($placeholders))",
+                (chunk + chunk).toTypedArray(),
             )
         }
     }
@@ -1643,19 +1698,22 @@ open class SQLiteStateStore(
      * through one compiled statement; rows the merge dropped are deleted by key. The newest candle
      * is always written, so the range's `captured_at` says when it was last fetched.
      */
-    private fun persistPricingCandles(db: SQLiteDatabase, capture: RawCapture) {
-        if (capture.captureKind != CaptureKind.ChartCandles) return
-        val payload = capture.payload as? RawCapturePayload.Chart ?: return
-        val existingCandles = loadPricingCandleCache(db, capture.symbol, payload.range)
-            .firstOrNull()
-            ?.candles
-            .orEmpty()
+    private fun persistPricingCandles(
+        db: SQLiteDatabase,
+        capture: RawCapture,
+        existingCandles: List<HistoricalCandle>? = null,
+        sharedUpsert: SQLiteStatement? = null,
+    ): List<HistoricalCandle> {
+        if (capture.captureKind != CaptureKind.ChartCandles) return emptyList()
+        val payload = capture.payload as? RawCapturePayload.Chart ?: return emptyList()
+        val existing = existingCandles ?: loadPricingCandleCache(db, capture.symbol, payload.range)
+            .firstOrNull()?.candles.orEmpty()
         val mergedCandles = PricingHistoryMerge.merge(
-            existing = existingCandles.map { candle -> PricingCandle(capture.symbol, payload.range, candle) },
+            existing = existing.map { candle -> PricingCandle(capture.symbol, payload.range, candle) },
             incoming = payload.candles.map { candle -> PricingCandle(capture.symbol, payload.range, candle) },
         ).map { candle -> candle.candle }
 
-        var existingByEpoch = existingCandles.associateBy { candle -> candle.epochSeconds }
+        var existingByEpoch = existing.associateBy { candle -> candle.epochSeconds }
         var mergedEpochs = mergedCandles.mapTo(HashSet()) { candle -> candle.epochSeconds }
         var newest = mergedCandles.lastOrNull()
         var toWrite = mergedCandles.filter { candle ->
@@ -1675,13 +1733,19 @@ open class SQLiteStateStore(
                 }
             }
         }
-        if (toWrite.isEmpty()) return
-        compileCandleUpsert(db).use { upsert ->
+        if (toWrite.isEmpty()) return mergedCandles
+        val writeRows: (SQLiteStatement) -> Unit = { upsert ->
             toWrite.forEach { candle ->
                 bindCandle(upsert, capture.symbol, payload.range.name, capture.capturedAt, candle)
                 upsert.executeInsert()
             }
         }
+        if (sharedUpsert == null) {
+            compileCandleUpsert(db).use(writeRows)
+        } else {
+            writeRows(sharedUpsert)
+        }
+        return mergedCandles
     }
 
     private fun compileCandleUpsert(db: SQLiteDatabase): SQLiteStatement = db.compileStatement(
