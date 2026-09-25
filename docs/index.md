@@ -19,6 +19,7 @@ Use this page to find the current source for each concern.
 - [DCF source consistency](architecture/dcf-source-consistency.md)
 - [Cross-platform parity](architecture/cross-platform-parity.md)
 - [Shared contracts](../shared/contracts/README.md)
+- [PUML runtime](architecture/puml-runtime.md)
 - [Scoring evaluation snapshots](architecture/scoring-evaluation-snapshots.md)
 
 ## Operations

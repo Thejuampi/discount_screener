@@ -73,6 +73,8 @@ This directory holds language-neutral fixtures, golden cases, and behavior notes
   Windows Advisor and Android Import book (`advisor-csv-import/3`). Kinds (holdings snapshot vs trades window vs trades ledger), detect order, Chase/J.P. Morgan parse rules, warn-then-confirm, merge-without-double-count examples. Android persists ten-thousandths and refuses ledger apply (`ledger_apply_unsupported`). Parse/merge goldens live only in this file.
 - `persistence-semantics.md`:
   storage behavior that must stay aligned even though Rust and Kotlin use different persistence formats
+- `puml-runtime-v1.json`:
+  four-layer runtime for diagram-backed models (`Model` → `PumlModel` → factory + engine). The `.puml` is the live model and holds its own functions. Load includes the Kotlin primitive lib. Architecture: [PUML runtime](../../docs/architecture/puml-runtime.md)
 
 ## Scope
 
