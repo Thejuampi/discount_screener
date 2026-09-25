@@ -28,6 +28,7 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - Drill into a ticker to inspect valuation, consensus, price history, technical indicators, and evidence.
 - Preserve local context across sessions through warm-start persistence.
 - On Android, judge pre-earnings event risk without mixing it into DCF.
+- Android explains earnings risk in Simple mode first. Options mode keeps the saved technical evidence.
 
 ## Current Product Surfaces
 
@@ -96,6 +97,9 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - Android opens ticker detail from saved data. Opening a ticker does not request provider data.
 - Android shows Load when no saved detail exists. Load refreshes that ticker's cache and reloads its view.
 - Android shows Refresh when saved detail exists. Refresh requests new data for that ticker and keeps saved data on failure.
+- A completed ticker refresh writes its cache before the app shows the new quote. Navigation does not stop this write.
+- Newer ticker quotes take priority over older profile responses and pending profile cache writes.
+- If only other data arrives, Android keeps the saved quote marked as cached and shows the provider issue.
 - The system shows current market price, fair value context, discount/upside, qualification, confidence, and external signal status.
 - The system shows historical candles and chart-derived indicators for supported ranges.
 - The system shows technical context including EMA and MACD where enough data exists.

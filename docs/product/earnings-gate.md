@@ -63,6 +63,14 @@ Detail always shows an earnings card first.
 - A dated event without a model uses the same card frame.
 - A dated event never uses `No report on the calendar`.
 - Missing or stale inputs remain visible.
+- The card opens in Simple mode on Earnings and ticker Detail.
+- Simple mode explains the saved report move, past moves, and neutral choices without options.
+- A held ticker shows ways to keep shares, hold fewer shares, or wait before adding.
+- An unheld ticker shows the tradeoffs of waiting or buying before the report.
+- A settled report shows its recorded outcome instead of future choices.
+- Options mode keeps the model data, put example, saved expiry, and source limits.
+- A saved option example is not a live order. It lacks contract count, live price, and fees.
+- Options mode flags saved action and put fields that disagree.
 
 Dates come from these sources:
 

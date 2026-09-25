@@ -67,6 +67,7 @@ import com.discountscreener.core.engine.DcfAnalysisEngine
 import com.discountscreener.core.engine.ENGINE_VERSION
 import com.discountscreener.core.engine.MODEL_POLICY_VERSION
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -2708,6 +2709,205 @@ class DefaultDashboardRepositoryTest {
             assertNotEquals(before.selectedDetail?.marketPriceCents, after.selectedDetail?.marketPriceCents)
             assertEquals(after.selectedDetail?.marketPriceCents, store.loadCachedSymbolState("SHOP")?.snapshot?.marketPriceCents)
             assertEquals(before.refreshCompletedSymbols, after.refreshCompletedSymbols)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun ticker_refresh_marks_a_tracked_quote_live() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            seedWarmState(store)
+            val repository = buildRepository(store, FakeYahooFinanceClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val after = repository.refreshDetail("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(TrackedRowState.Live, after.trackedRows.first { it.symbol == "AAPL" }.state)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun older_ticker_response_does_not_replace_a_newer_quote() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val firstStarted = CompletableDeferred<Unit>()
+            val releaseFirst = CompletableDeferred<Unit>()
+            val client = object : FakeYahooFinanceClient() {
+                var calls = 0
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    calls += 1
+                    val call = calls
+                    if (call == 1) {
+                        firstStarted.complete(Unit)
+                        releaseFirst.await()
+                    }
+                    val answer = super.fetchSymbol(symbol)
+                    return answer.copy(snapshot = answer.snapshot?.copy(marketPriceCents = if (call == 1) 11_000 else 22_000))
+                }
+            }
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val older = launch { repository.refreshDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel) }
+            firstStarted.await()
+            val newer = launch { repository.refreshDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel) }
+            newer.join()
+            releaseFirst.complete(Unit)
+            older.join()
+
+            assertEquals(22_000L, store.loadCachedSymbolState("SHOP")?.snapshot?.marketPriceCents)
+            assertEquals(22_000L, repository.loadCachedDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel).selectedDetail?.marketPriceCents)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun older_profile_response_does_not_replace_manual_ticker_refresh() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val firstStarted = CompletableDeferred<Unit>()
+            val releaseFirst = CompletableDeferred<Unit>()
+            val client = object : FakeYahooFinanceClient() {
+                var aaplCalls = 0
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    if (symbol != "AAPL") return super.fetchSymbol(symbol)
+                    aaplCalls += 1
+                    val call = aaplCalls
+                    if (call == 1) {
+                        firstStarted.complete(Unit)
+                        releaseFirst.await()
+                    }
+                    val answer = super.fetchSymbol(symbol)
+                    return answer.copy(snapshot = answer.snapshot?.copy(marketPriceCents = if (call == 1) 11_000 else 22_000))
+                }
+            }
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel, force = true)
+            firstStarted.await()
+
+            repository.refreshDetail("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+            releaseFirst.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(22_000L, store.loadCachedSymbolState("AAPL")?.snapshot?.marketPriceCents)
+            assertEquals(22_000L, repository.loadCachedDetail("AAPL", ViewFilter(), ChartRange.Year, legacyModel).selectedDetail?.marketPriceCents)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun pending_profile_batch_does_not_overwrite_manual_ticker_cache() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val msftStarted = CompletableDeferred<Unit>()
+            val releaseMsft = CompletableDeferred<Unit>()
+            val client = object : FakeYahooFinanceClient() {
+                var aaplCalls = 0
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult {
+                    if (symbol == "MSFT") {
+                        msftStarted.complete(Unit)
+                        releaseMsft.await()
+                    }
+                    val answer = super.fetchSymbol(symbol)
+                    if (symbol != "AAPL") return answer
+                    aaplCalls += 1
+                    return answer.copy(snapshot = answer.snapshot?.copy(marketPriceCents = if (aaplCalls == 1) 11_000 else 22_000))
+                }
+            }
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel, force = true)
+            msftStarted.await()
+            awaitSnapshot(repository) { snapshot ->
+                snapshot.trackedRows.first { it.symbol == "AAPL" }.state == TrackedRowState.Live
+            }
+
+            repository.refreshDetail("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+            releaseMsft.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(22_000L, store.loadCachedSymbolState("AAPL")?.snapshot?.marketPriceCents)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun cancelled_ticker_refresh_finishes_its_cache_write() = runTest(dispatcher) {
+        val enteredWrite = CompletableDeferred<Unit>()
+        val releaseWrite = CompletableDeferred<Unit>()
+        val store = object : SQLiteStateStore(context, ioDispatcher = dispatcher) {
+            override suspend fun persistBatch(rawCaptures: List<RawCapture>, revisions: List<SymbolRevisionInput>) {
+                enteredWrite.complete(Unit)
+                releaseWrite.await()
+                super.persistBatch(rawCaptures, revisions)
+            }
+        }
+        try {
+            val repository = buildRepository(store, FakeYahooFinanceClient())
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val refresh = launch { repository.refreshDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel) }
+            enteredWrite.await()
+            refresh.cancel()
+            releaseWrite.complete(Unit)
+            refresh.join()
+
+            assertEquals(10_314L, store.loadCachedSymbolState("SHOP")?.snapshot?.marketPriceCents)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun partial_ticker_refresh_keeps_the_saved_quote_stale() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            seedWarmState(store)
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult =
+                    super.fetchSymbol(symbol).copy(snapshot = null)
+
+                override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> =
+                    throw java.io.IOException("chart unavailable")
+            }
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val after = repository.refreshDetail("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(10_000L, after.selectedDetail?.marketPriceCents)
+            assertEquals(TrackedRowState.Cached, after.trackedRows.first { it.symbol == "AAPL" }.state)
+            assertTrue(after.issues.any { it.detail.contains("chart unavailable") })
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun partial_ticker_refresh_reports_a_missing_quote_without_provider_diagnostics() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            seedWarmState(store)
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult =
+                    super.fetchSymbol(symbol).copy(snapshot = null, diagnostics = emptyList())
+
+                override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> =
+                    emptyList()
+            }
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val after = repository.refreshDetail("AAPL", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(TrackedRowState.Cached, after.trackedRows.first { it.symbol == "AAPL" }.state)
+            assertTrue(after.issues.any { it.detail.contains("No fresh quote") })
         } finally {
             store.close()
         }

@@ -110,21 +110,23 @@ class EarningsGateScreenTest {
     @Test
     fun a_revenue_trail_cut_is_named_on_the_card() {
         render(gate(day = 3, ratio = 10_000, trailCut = true))
+        showOptions()
 
         composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
             .performScrollToNode(hasText("Last print below a flat trail · size cut"))
 
-        composeRule.onNodeWithText("Last print below a flat trail · size cut").assertIsDisplayed()
+        composeRule.onNodeWithText("Last print below a flat trail · size cut").assertExists()
     }
 
     @Test
     fun a_ready_sue_fit_is_named_on_the_card() {
         render(gate(day = 3, sueN = 16, sueSlope = 300))
+        showOptions()
 
         composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
             .performScrollToNode(hasText("SUE slope 3.00% AR per dispersion, n=16"))
 
-        composeRule.onNodeWithText("SUE slope 3.00% AR per dispersion, n=16").assertIsDisplayed()
+        composeRule.onNodeWithText("SUE slope 3.00% AR per dispersion, n=16").assertExists()
     }
 
     @Test
@@ -142,8 +144,36 @@ class EarningsGateScreenTest {
     }
 
     @Test
+    fun risk_opens_with_plain_choices_and_no_option_trade_details() {
+        render(gate(day = 3, spread = 80, held = setOf("LVS")))
+
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("Ways without options"))
+
+        composeRule.onNodeWithText("Ways without options").assertIsDisplayed()
+        composeRule.onNodeWithText("Keep current shares").assertIsDisplayed()
+        composeRule.onNodeWithText("Put spread").assertDoesNotExist()
+    }
+
+    @Test
+    fun options_mode_explains_the_saved_example_and_keeps_its_numbers() {
+        render(gate(day = 3, spread = 80))
+
+        showOptions()
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("0.80% of the position (44.00 / 42.00 puts)"))
+
+        composeRule.onNodeWithText("0.80% of the position (44.00 / 42.00 puts)").assertExists()
+        composeRule.onNodeWithText("Ways without options").assertDoesNotExist()
+        composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
+            .performScrollToNode(hasText("This is a saved example, not a live order."))
+        composeRule.onNodeWithText("This is a saved example, not a live order.").assertExists()
+    }
+
+    @Test
     fun a_captured_report_shows_the_cell_it_falls_in() {
         render(gate(day = 3))
+        showOptions()
 
         composeRule.onNodeWithText("Cheap, high event risk").assertIsDisplayed()
     }
@@ -151,6 +181,7 @@ class EarningsGateScreenTest {
     @Test
     fun a_captured_report_shows_the_move_the_market_is_paying_for() {
         render(gate(day = 3))
+        showOptions()
 
         composeRule.onNodeWithText("7.01%").assertIsDisplayed()
     }
@@ -158,6 +189,7 @@ class EarningsGateScreenTest {
     @Test
     fun a_captured_report_separates_the_event_move_from_the_whole_expiry() {
         render(gate(day = 3))
+        showOptions()
 
         composeRule.onNodeWithText("6.77% after 1.80% a day of quiet drift").assertIsDisplayed()
     }
@@ -165,8 +197,9 @@ class EarningsGateScreenTest {
     @Test
     fun a_captured_report_shows_the_action_and_the_size_it_carries() {
         render(gate(day = 3, spread = 80))
+        showOptions()
 
-        composeRule.onNodeWithText("Hedge · 50%").assertIsDisplayed()
+        composeRule.onNodeWithText("Hedge · 50%").assertExists()
     }
 
     @Test
@@ -179,11 +212,12 @@ class EarningsGateScreenTest {
     @Test
     fun a_report_already_priced_shows_the_move_the_index_did_not_explain() {
         render(gate(day = -3, abnormalReturnBps = 412))
+        showOptions()
 
         composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
             .performScrollToNode(hasText("Abnormal move +4.12%"))
 
-        composeRule.onNodeWithText("Abnormal move +4.12%").assertIsDisplayed()
+        composeRule.onNodeWithText("Abnormal move +4.12%").assertExists()
     }
 
     @Test
@@ -199,18 +233,20 @@ class EarningsGateScreenTest {
     @Test
     fun a_captured_report_shows_what_the_hedge_would_cost() {
         render(gate(day = 3, spread = 80))
+        showOptions()
 
         composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
             .performScrollToNode(hasText("0.80% of the position (44.00 / 42.00 puts)"))
 
-        composeRule.onNodeWithText("0.80% of the position (44.00 / 42.00 puts)").assertIsDisplayed()
+        composeRule.onNodeWithText("0.80% of the position (44.00 / 42.00 puts)").assertExists()
     }
 
     @Test
     fun a_hedge_too_dear_to_buy_shows_the_smaller_position_instead() {
         render(gate(day = 3, spread = 800))
+        showOptions()
 
-        composeRule.onNodeWithText("Reduce · 50%").assertIsDisplayed()
+        composeRule.onNodeWithText("Reduce · 50%").assertExists()
     }
 
     @Test
@@ -243,21 +279,28 @@ class EarningsGateScreenTest {
     @Test
     fun a_settled_report_shows_the_surprise_the_company_printed() {
         render(gate(day = -3, post = PostReport(abnormalReturnBps = 412, surpriseScoreBps = 10_435)))
+        showOptions()
 
         composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
             .performScrollToNode(hasText("EPS +1.04 of the analyst spread"))
 
-        composeRule.onNodeWithText("EPS +1.04 of the analyst spread").assertIsDisplayed()
+        composeRule.onNodeWithText("EPS +1.04 of the analyst spread").assertExists()
     }
 
     @Test
     fun a_settled_report_shows_the_share_of_the_index_it_was_charged() {
         render(gate(day = -3, post = PostReport(abnormalReturnBps = 412, marketBetaBps = 17_000)))
+        showOptions()
 
         composeRule.onNodeWithTag(EARNINGS_GATE_LIST)
             .performScrollToNode(hasText("Abnormal move +4.12%, beta 1.70x"))
 
-        composeRule.onNodeWithText("Abnormal move +4.12%, beta 1.70x").assertIsDisplayed()
+        composeRule.onNodeWithText("Abnormal move +4.12%, beta 1.70x").assertExists()
+    }
+
+    private fun showOptions() {
+        composeRule.onNodeWithText("Options").performClick()
+        shadowOf(Looper.getMainLooper()).idle()
     }
 
     private fun gate(

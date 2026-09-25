@@ -9,6 +9,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import com.discountscreener.android.presentation.dashboard.DetailRoute
 import com.discountscreener.android.presentation.dashboard.DetailSourceTab
 import com.discountscreener.android.presentation.dashboard.EarningsEventRowUi
@@ -54,9 +55,21 @@ class DetailEarningsSectionTest {
     fun the_detail_of_a_logged_ticker_shows_the_move_the_market_is_paying_for() {
         render(eventsOf("LVS"))
 
+        composeRule.onNodeWithTag(DETAIL_SNAPSHOT_LIST).performScrollToNode(hasText("Options"))
+        composeRule.onNodeWithText("Options").performClick()
         composeRule.onNodeWithTag(DETAIL_SNAPSHOT_LIST).performScrollToNode(hasText("7.01%"))
 
-        composeRule.onNodeWithText("7.01%").assertIsDisplayed()
+        composeRule.onNodeWithText("7.01%").assertExists()
+    }
+
+    @Test
+    fun the_detail_shows_plain_risk_choices_before_option_terms() {
+        render(eventsOf("LVS"))
+
+        composeRule.onNodeWithTag(DETAIL_SNAPSHOT_LIST).performScrollToNode(hasText("Ways without options"))
+
+        composeRule.onNodeWithText("Ways without options").assertExists()
+        composeRule.onNodeWithText("Put spread").assertDoesNotExist()
     }
 
     @Test

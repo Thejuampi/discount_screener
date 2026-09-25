@@ -4,12 +4,15 @@ import com.discountscreener.android.ui.dashboard.formatPct
 import com.discountscreener.core.earnings.DecisionCell
 import com.discountscreener.core.earnings.EarningsEventRecord
 import com.discountscreener.core.earnings.EventDecision
+import com.discountscreener.core.earnings.EventAction
 import com.discountscreener.core.earnings.EventRisk
+import com.discountscreener.core.earnings.HedgeKind
 import com.discountscreener.core.earnings.PostReport
 import com.discountscreener.core.earnings.PreReport
 import com.discountscreener.core.earnings.ratioText
 import com.discountscreener.core.earnings.ReportTiming
 import com.discountscreener.core.earnings.eventRiskOf
+import com.discountscreener.core.earnings.isQuoteStale
 import com.discountscreener.core.earnings.priceToFairBps
 import com.discountscreener.core.portfolio.isHeld
 import com.discountscreener.core.portfolio.pinHeldFirst
@@ -50,6 +53,20 @@ data class EarningsEventRowUi(
     val revenueTrail: String? = null,
     val held: Boolean = false,
     val reportEpochDay: Long? = null,
+    val simpleRisk: EarningsSimpleRiskUi,
+    val optionExpiry: String,
+    val optionExplanation: String,
+    val optionWarning: String?,
+)
+
+data class EarningsRiskPathUi(val title: String, val tradeoff: String)
+
+data class EarningsSimpleRiskUi(
+    val headline: String,
+    val reportMove: String,
+    val pastMove: String,
+    val paths: List<EarningsRiskPathUi>,
+    val outcome: String?,
 )
 
 fun EarningsGateUi.matching(query: String): EarningsGateUi {
@@ -81,8 +98,8 @@ fun presentEarningsGate(
     var settled = events.filter { it.pre.reportEpochDay < today.toEpochDay() }
         .sortedByDescending { it.pre.reportEpochDay }
     return EarningsGateUi(
-        upcoming = pinHeldFirst(upcoming.map { rowOf(it, heldSet) }, heldSet) { it.symbol },
-        settled = pinHeldFirst(settled.map { rowOf(it, heldSet) }, heldSet) { it.symbol },
+        upcoming = pinHeldFirst(upcoming.map { rowOf(it, heldSet, upcoming = true) }, heldSet) { it.symbol },
+        settled = pinHeldFirst(settled.map { rowOf(it, heldSet, upcoming = false) }, heldSet) { it.symbol },
         damagedLines = damagedLines,
         lastCapture = lastCaptureText(lastCaptureEpochSeconds, nowEpochSeconds),
         alphaVantageKeyPresent = alphaVantageKeyPresent,
@@ -107,7 +124,7 @@ private fun lastCaptureText(lastCaptureEpochSeconds: Long?, nowEpochSeconds: Lon
     }
 }
 
-private fun rowOf(record: EarningsEventRecord, held: Set<String>): EarningsEventRowUi {
+private fun rowOf(record: EarningsEventRecord, held: Set<String>, upcoming: Boolean): EarningsEventRowUi {
     var pre = record.pre
     var decision = record.decision
     return EarningsEventRowUi(
@@ -138,7 +155,78 @@ private fun rowOf(record: EarningsEventRecord, held: Set<String>): EarningsEvent
         revenueTrail = revenueTrailText(pre, decision),
         held = isHeld(pre.symbol, held),
         reportEpochDay = pre.reportEpochDay,
+        simpleRisk = simpleRiskOf(pre, decision, record.post, upcoming, isHeld(pre.symbol, held)),
+        optionExpiry = pre.expiryEpochDay?.let { LocalDate.ofEpochDay(it).toString() } ?: "Not saved",
+        optionExplanation = optionExplanation(pre, decision?.hedge),
+        optionWarning = decision?.takeIf {
+            (it.action == EventAction.Hedge) != (it.hedge != HedgeKind.None)
+        }?.let { "Saved action and put example disagree. No trade steps are available." },
     )
+}
+
+private fun simpleRiskOf(
+    pre: PreReport,
+    decision: EventDecision?,
+    post: PostReport?,
+    upcoming: Boolean,
+    held: Boolean,
+): EarningsSimpleRiskUi {
+    val risk = if (decision?.cell == DecisionCell.Undecided) EventRisk.Unknown else eventRiskOf(pre.riskRatioBps)
+    val headline = when {
+        risk == EventRisk.High && upcoming -> "Saved prices suggest a larger move than past reports showed."
+        risk == EventRisk.High -> "Before this report, saved prices suggested a larger move than earlier reports showed."
+        risk != EventRisk.Unknown && upcoming -> "Saved prices suggest a move near or below past reports."
+        risk != EventRisk.Unknown -> "Before this report, saved prices suggested a move near or below earlier reports."
+        upcoming -> "There is not enough reliable data to compare this report with past reports."
+        else -> "There was not enough reliable data to compare this report with earlier reports."
+    }
+    val reportMove = pre.eventImpliedMoveBps?.takeUnless { isQuoteStale(pre) }?.let {
+        if (upcoming) {
+            "Saved options prices suggest about ${formatPct(it)} around this report. Direction is unknown."
+        } else {
+            "Before this report, saved options prices suggested about ${formatPct(it)}. Direction was unknown."
+        }
+    } ?: "No reliable report move is saved."
+    val pastMove = pre.medianAbsoluteAbnormalReturnBps?.let {
+        "Past reports moved about ${formatPct(it)} beyond the broad market."
+    } ?: "No usable past report moves are saved."
+    val paths = if (!upcoming) {
+        emptyList()
+    } else if (held) {
+        listOf(
+            EarningsRiskPathUi("Keep current shares", "The full position stays exposed to a move in either direction."),
+            EarningsRiskPathUi("Hold fewer shares", "A smaller position changes less when this stock moves, up or down."),
+            EarningsRiskPathUi("Wait before adding", "You can see the report first, but the price may move before you buy."),
+        )
+    } else {
+        listOf(
+            EarningsRiskPathUi("Wait before buying", "You can see the report first, but the price may move before you buy."),
+            EarningsRiskPathUi("Buy before the report", "You take the full price move in either direction."),
+        )
+    }
+    val abnormalReturnBps = post?.abnormalReturnBps
+    val outcome = when {
+        upcoming -> null
+        abnormalReturnBps != null ->
+            "After this report, the stock moved ${formatSignedPct(abnormalReturnBps)} beyond the broad market."
+        else -> "No report outcome is saved yet."
+    }
+    return EarningsSimpleRiskUi(headline, reportMove, pastMove, paths, outcome)
+}
+
+private fun optionExplanation(pre: PreReport, hedge: HedgeKind?): String = when (hedge) {
+    HedgeKind.PutSpread -> {
+        val high = pre.hedgeLongStrikeCents
+        val low = pre.hedgeShortStrikeCents
+        if (high != null && low != null) {
+            "A bought \$${centsText(high)} put and a sold \$${centsText(low)} put form this saved spread. " +
+                "Protection stops growing below \$${centsText(low)}."
+        } else {
+            "A put spread uses two puts. Protection stops growing below the lower strike."
+        }
+    }
+    HedgeKind.ProtectivePut -> "A put costs a premium and can limit some losses until expiry."
+    HedgeKind.None, null -> "The model has no option example for this report."
 }
 
 private fun revenueTrailText(pre: PreReport, decision: EventDecision?): String? {
