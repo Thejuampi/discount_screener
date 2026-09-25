@@ -160,6 +160,7 @@ data class DetailRoute(
 sealed interface DashboardAction {
     data object Start : DashboardAction
     data object Refresh : DashboardAction
+    data object RefreshDetail : DashboardAction
     data class SelectTab(val tab: DashboardTab) : DashboardAction
     data class SelectPlanHunt(val hunt: PlanHunt) : DashboardAction
     data class SelectPlanDipUniverse(val universe: PlanDipUniverse) : DashboardAction
@@ -230,6 +231,7 @@ sealed interface DashboardAction {
 data class DashboardUiState(
     val loading: Boolean = true,
     val refreshing: Boolean = false,
+    val detailRefreshing: Boolean = false,
     val currentTab: DashboardTab = DashboardTab.Opportunities,
     val availableProfiles: List<String> = emptyList(),
     val currentProfile: String = "qa",
@@ -375,6 +377,7 @@ class DashboardViewModel(
     private var discoveryProgressJob: Job? = null
     private var selectProfileJob: Job? = null
     private var detailLoadJob: Job? = null
+    private var detailRefreshJob: Job? = null
     private var refreshJob: Job? = null
     private val detailSessions = linkedMapOf<String, CachedDetailSession>()
 
@@ -382,6 +385,7 @@ class DashboardViewModel(
         when (action) {
             DashboardAction.Start -> start()
             DashboardAction.Refresh -> refresh(force = true)
+            DashboardAction.RefreshDetail -> refreshDetail()
             is DashboardAction.SelectTab -> selectTab(action.tab)
             is DashboardAction.SelectPlanHunt -> _state.value = _state.value.copy(planHunt = action.hunt)
             is DashboardAction.SelectPlanDipUniverse -> selectPlanDipUniverse(action.universe)
@@ -578,7 +582,7 @@ class DashboardViewModel(
         }
     }
 
-    private fun loadEarningsGate() {
+    private fun loadEarningsGate(refreshCalendar: Boolean = true) {
         activeEarningsJob?.cancel()
         activeCalendarJob?.cancel()
         earningsGateLoaded = true
@@ -593,7 +597,9 @@ class DashboardViewModel(
                     earningsCalendar = calendar,
                     positionsRows = projectLotRows(current, gate, calendar),
                 )
-                hydrateEarningsCalendar(current.portfolioLots.map { it.symbol } + listOfNotNull(current.detailRoute?.symbol))
+                if (refreshCalendar) {
+                    hydrateEarningsCalendar(current.portfolioLots.map { it.symbol } + listOfNotNull(current.detailRoute?.symbol))
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -999,6 +1005,7 @@ class DashboardViewModel(
     }
 
     private fun openDetail(symbol: String) {
+        detailRefreshJob?.cancel()
         val state = _state.value
         if (state.currentTab == DashboardTab.Positions &&
             state.positionsRows.any { it.symbol == symbol && it.opportunity == null }
@@ -1023,6 +1030,7 @@ class DashboardViewModel(
                 state.copy(
                     detailRoute = detailRoute,
                     detailNotice = null,
+                    detailRefreshing = false,
                     tickerSearchQuery = "",
                     tickerSearchExpanded = false,
                     tickerSearchSuggestions = emptyList(),
@@ -1032,42 +1040,16 @@ class DashboardViewModel(
             ),
             symbol,
         )
-        if (!earningsGateLoaded) {
-            loadEarningsGate()
-        } else {
-            hydrateEarningsCalendar(listOf(symbol) + _state.value.portfolioLots.map { it.symbol })
-        }
-        detailLoadJob?.cancel()
-        detailLoadJob = viewModelScope.launch {
-            try {
-                renderDetailOnFile(symbol)
-                val snapshot = selectDashboardSymbol(
-                    symbol,
-                    currentFilter(),
-                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                    _state.value.opportunityScoringModel,
-                )
-                render(snapshot)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _state.value = _state.value.copy(
-                    detailRoute = null,
-                    tickerSearchExpanded = false,
-                    tickerSearchSuggestions = emptyList(),
-                    tickerSearchNotice = DashboardNotice(
-                        title = "Ticker unavailable",
-                        message = error.message ?: "The ticker could not be opened.",
-                        severity = DashboardNoticeSeverity.Warning,
-                    ),
-                )
-            }
-        }
+        if (!earningsGateLoaded) loadEarningsGate(refreshCalendar = false)
+        loadDetailData(symbol)
     }
 
     private fun backFromDetail() {
+        detailLoadJob?.cancel()
+        detailRefreshJob?.cancel()
         rememberDetailSession(_state.value)
         _state.value = _state.value.copy(
+            detailRefreshing = false,
             detailRoute = null,
             selectedScoreRow = null,
             detailData = null,
@@ -1090,11 +1072,14 @@ class DashboardViewModel(
         if (currentIndex < 0) return
         val newIndex = (currentIndex + direction).coerceIn(0, symbols.lastIndex)
         val newSymbol = symbols[newIndex]
+        if (newSymbol == route.symbol) return
+        detailRefreshJob?.cancel()
         _state.value = applyCachedDetailSession(
             clearMismatchedDetail(
                 _state.value.copy(
                     detailRoute = route.copy(symbol = newSymbol, replayOffset = 0),
                     detailNotice = null,
+                    detailRefreshing = false,
                     tickerSearchQuery = newSymbol,
                 ),
                 newSymbol,
@@ -1207,8 +1192,10 @@ class DashboardViewModel(
 
     private fun selectProfile(profile: String) {
         detailSessions.clear()
+        detailRefreshJob?.cancel()
         _state.value = _state.value.copy(
             detailRoute = null,
+            detailRefreshing = false,
             detailData = null,
             projectedDetailData = null,
             detailCharts = emptyMap(),
@@ -1248,34 +1235,10 @@ class DashboardViewModel(
             DetailSourceTab.Tracked -> visibleTrackedRows(state).map { it.symbol }
         }
 
-    /**
-     * Draws the symbol from what is already on file, before anything is fetched for it.
-     *
-     * [selectDashboardSymbol] reaches the provider, and a provider that is refusing calls holds
-     * every one of them: measured on a device on 2026-08-20, one refused call every eight seconds
-     * for eight minutes without a break, and the detail screen stayed empty for all of it. What
-     * the app filed for this symbol is on disk and costs no network, so the screen is drawn from
-     * that first and drawn again when the fetch lands. A symbol with nothing on file draws nothing
-     * and loses nothing, which is the screen this replaces.
-     */
-    private suspend fun renderDetailOnFile(symbol: String) {
-        var route = _state.value.detailRoute ?: return
-        if (route.symbol != symbol) return
-        render(
-            getDashboardSnapshot(
-                currentFilter(),
-                symbol,
-                route.chartRange,
-                _state.value.opportunityScoringModel,
-            ),
-        )
-    }
-
     private fun loadDetailData(symbol: String) {
         detailLoadJob?.cancel()
         detailLoadJob = viewModelScope.launch {
             try {
-                renderDetailOnFile(symbol)
                 val snapshot = selectDashboardSymbol(
                     symbol,
                     currentFilter(),
@@ -1283,6 +1246,18 @@ class DashboardViewModel(
                     _state.value.opportunityScoringModel,
                 )
                 render(snapshot)
+                if (_state.value.detailRoute?.symbol == symbol &&
+                    _state.value.detailData == null &&
+                    _state.value.projectedDetailData == null
+                ) {
+                    _state.value = _state.value.copy(
+                        detailNotice = DashboardNotice(
+                            title = "No cached detail",
+                            message = "No saved data for $symbol. Tap Load to fetch it.",
+                            severity = DashboardNoticeSeverity.Info,
+                        ),
+                    )
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -1293,6 +1268,56 @@ class DashboardViewModel(
                         severity = DashboardNoticeSeverity.Warning,
                     ),
                 )
+            }
+        }
+    }
+
+    private fun refreshDetail() {
+        val route = _state.value.detailRoute ?: return
+        if (_state.value.detailRefreshing) return
+        detailLoadJob?.cancel()
+        _state.value = _state.value.copy(detailRefreshing = true, detailNotice = null)
+        detailRefreshJob = viewModelScope.launch {
+            try {
+                selectDashboardSymbol.refresh(
+                    route.symbol,
+                    currentFilter(),
+                    route.chartRange,
+                    _state.value.opportunityScoringModel,
+                )
+                if (_state.value.detailRoute?.symbol == route.symbol) {
+                    render(selectDashboardSymbol(
+                        route.symbol,
+                        currentFilter(),
+                        _state.value.detailRoute?.chartRange ?: route.chartRange,
+                        _state.value.opportunityScoringModel,
+                    ))
+                    hydrateEarningsCalendar(listOf(route.symbol))
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (_state.value.detailRoute?.symbol == route.symbol) {
+                    runCatching {
+                        selectDashboardSymbol(
+                            route.symbol,
+                            currentFilter(),
+                            _state.value.detailRoute?.chartRange ?: route.chartRange,
+                            _state.value.opportunityScoringModel,
+                        )
+                    }.getOrNull()?.let(::render)
+                    _state.value = _state.value.copy(
+                        detailNotice = DashboardNotice(
+                            title = "Refresh failed",
+                            message = error.message ?: "The ticker could not be refreshed.",
+                            severity = DashboardNoticeSeverity.Warning,
+                        ),
+                    )
+                }
+            } finally {
+                if (_state.value.detailRoute?.symbol == route.symbol) {
+                    _state.value = _state.value.copy(detailRefreshing = false)
+                }
             }
         }
     }

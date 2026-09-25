@@ -2669,6 +2669,113 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    @Test
+    fun cached_detail_restores_an_ad_hoc_symbol_without_provider_calls() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            store.persistBatch(
+                rawCaptures = listOf(chartCapture("SHOP", 11_000)),
+                revisions = listOf(revision("SHOP", 10_000, 15_000, 3_333)),
+            )
+            val client = FakeYahooFinanceClient()
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val snapshot = repository.loadCachedDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals("SHOP", snapshot.selectedDetail?.symbol)
+            assertEquals(10_000L, snapshot.selectedDetail?.marketPriceCents)
+            assertTrue(snapshot.selectedCharts[ChartRange.Year].orEmpty().isNotEmpty())
+            assertEquals(0, client.fetchSymbolCount)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun ticker_refresh_writes_its_quote_to_cache_without_refreshing_the_profile() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            store.persistBatch(emptyList(), listOf(revision("SHOP", 10_000, 15_000, 3_333)))
+            val client = FakeYahooFinanceClient()
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            val before = repository.loadCachedDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel)
+
+            val after = repository.refreshDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals(listOf("SHOP"), client.fetchedSymbols)
+            assertNotEquals(before.selectedDetail?.marketPriceCents, after.selectedDetail?.marketPriceCents)
+            assertEquals(after.selectedDetail?.marketPriceCents, store.loadCachedSymbolState("SHOP")?.snapshot?.marketPriceCents)
+            assertEquals(before.refreshCompletedSymbols, after.refreshCompletedSymbols)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun failed_ticker_refresh_preserves_the_saved_quote() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            store.persistBatch(emptyList(), listOf(revision("SHOP", 10_000, 15_000, 3_333)))
+            val client = object : FakeYahooFinanceClient() {
+                override suspend fun fetchSymbol(symbol: String): ProviderFetchResult =
+                    throw java.io.IOException("quote unavailable")
+
+                override suspend fun fetchHistoricalCandles(symbol: String, range: ChartRange): List<HistoricalCandle> =
+                    throw java.io.IOException("chart unavailable")
+            }
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            try {
+                repository.refreshDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel)
+                fail("Expected a failed ticker refresh")
+            } catch (_: java.io.IOException) {
+                assertEquals(10_000L, repository.loadCachedDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel).selectedDetail?.marketPriceCents)
+                assertEquals(10_000L, store.loadCachedSymbolState("SHOP")?.snapshot?.marketPriceCents)
+            }
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun ticker_refresh_saves_the_selected_chart_range() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            store.persistBatch(emptyList(), listOf(revision("SHOP", 10_000, 15_000, 3_333)))
+            val client = FakeYahooFinanceClient()
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val snapshot = repository.refreshDetail("SHOP", ViewFilter(), ChartRange.Month, legacyModel)
+
+            assertTrue(snapshot.selectedCharts[ChartRange.Month].orEmpty().isNotEmpty())
+            assertTrue(store.loadPricingHistory("SHOP").any { it.range == ChartRange.Month })
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun load_button_creates_cache_for_a_ticker_with_no_saved_detail() = runTest(dispatcher) {
+        val store = SQLiteStateStore(context, ioDispatcher = dispatcher)
+        try {
+            val client = FakeYahooFinanceClient()
+            val repository = buildRepository(store, client)
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+
+            val snapshot = repository.refreshDetail("SHOP", ViewFilter(), ChartRange.Year, legacyModel)
+
+            assertEquals("SHOP", snapshot.selectedDetail?.symbol)
+            assertEquals(listOf("SHOP"), client.fetchedSymbols)
+            assertEquals(snapshot.selectedDetail?.marketPriceCents, store.loadCachedSymbolState("SHOP")?.snapshot?.marketPriceCents)
+        } finally {
+            store.close()
+        }
+    }
+
     /**
      * Pass zero of a refresh prices every restored row from the batch endpoint before the
      * per-symbol pass starts. The row shows today's price and still reads as cached, because its

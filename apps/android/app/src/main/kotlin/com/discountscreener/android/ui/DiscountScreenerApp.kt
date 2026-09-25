@@ -43,6 +43,7 @@ internal fun DashboardRouteContent(
             alerts = state.detailAlerts.map { "${it.kind} #${it.sequence}" },
             quantLens = state.detailQuantLens,
             detailNotice = state.detailNotice,
+            detailRefreshing = state.detailRefreshing,
             tickerSearchQuery = state.tickerSearchQuery,
             tickerSearchSuggestions = state.tickerSearchSuggestions,
             tickerSearchExpanded = state.tickerSearchExpanded,

@@ -40,6 +40,7 @@ internal fun TickerSearchBar(
     onSubmit: () -> Unit,
     onSelect: (String) -> Unit,
     onFocusChanged: ((Boolean) -> Unit)? = null,
+    trailingAction: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -69,6 +70,7 @@ internal fun TickerSearchBar(
             Button(onClick = onSubmit) {
                 Text("Open")
             }
+            trailingAction?.invoke()
         }
         if (expanded && suggestions.isNotEmpty()) {
             Card(

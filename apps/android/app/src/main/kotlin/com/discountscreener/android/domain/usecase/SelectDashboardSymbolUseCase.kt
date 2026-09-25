@@ -12,5 +12,12 @@ class SelectDashboardSymbolUseCase(private val repository: DashboardRepository) 
         filter: ViewFilter,
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
-    ): DashboardSnapshot = repository.ensureDetailLoaded(symbol, filter, selectedRange, opportunityScoringModel)
+    ): DashboardSnapshot = repository.loadCachedDetail(symbol, filter, selectedRange, opportunityScoringModel)
+
+    suspend fun refresh(
+        symbol: String,
+        filter: ViewFilter,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+    ): DashboardSnapshot = repository.refreshDetail(symbol, filter, selectedRange, opportunityScoringModel)
 }
