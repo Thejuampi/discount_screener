@@ -31,6 +31,7 @@ Read the [Dip](android-plans-dip.md), [Cross](android-plans-cross.md), and [Left
 
 ## Valuation Engine
 
+- Resolve [the Android valuation integrity audit](https://github.com/Thejuampi/discount_screener/issues/61) before merging its worktree.
 - Fix maintenance CapEx for CHTR-class network businesses without ticker rules.
 - Keep the multi-name baseline green during that change.
 - Recheck CHTR EPS against FCFF after the maintenance-CapEx fix.

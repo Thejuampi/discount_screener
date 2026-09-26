@@ -4,6 +4,8 @@ This folder contains historical plans, reviews, handovers, and generated artifac
 
 Archived files explain past decisions. They do not define current behavior.
 
+Read the [2026-09-26 unmerged change review](unmerged-change-review-2026-09-26.md) for the branch disposition and recovery records.
+
 Use these current sources first:
 
 1. `shared/contracts`
