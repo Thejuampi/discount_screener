@@ -184,6 +184,7 @@ import com.discountscreener.core.regime.regimeFitTerms
 import com.discountscreener.core.model.SymbolRangeKey
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.job
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -203,6 +204,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -252,6 +254,7 @@ private data class PendingScoringEvaluation(
 private data class EnrichmentResult(
     val generation: Long,
     val symbol: String,
+    val ticket: Long,
     val chartCaptures: List<Pair<ChartRange, List<HistoricalCandle>>>,
     /** The timeseries the DCF was chosen from, for the cache. */
     val timeseries: FundamentalTimeseries?,
@@ -269,6 +272,18 @@ private data class PersistenceDelta(
     val revisions: List<SymbolRevisionInput>,
     val refreshSymbol: String? = null,
     val refreshTicket: Long? = null,
+    val detailSymbol: String? = null,
+    val detailBaseRefreshTickets: List<Long?> = emptyList(),
+    val chartTickets: Map<String, Long> = emptyMap(),
+    val detailDcfTicket: Long? = null,
+)
+
+private data class DetailDcfRequest(
+    val ticket: Long,
+    val baseRefreshTicket: Long?,
+    val fundamentals: FundamentalSnapshot,
+    val marketPriceCents: Long?,
+    val companyName: String?,
 )
 
 /** Deltas wait in one batch. Each keeps its ticket so a newer symbol write can replace it. */
@@ -389,6 +404,8 @@ class DefaultDashboardRepository(
      * Production leaves this null.
      */
     private val afterRefreshPassRegistered: (suspend () -> Unit)? = null,
+    /** Test probe between Add's database write and refresh start. Production leaves this null. */
+    private val beforeAddRefreshStart: (suspend () -> Unit)? = null,
     /**
      * Offered every screen input, so it can be replayed off the device.
      *
@@ -423,6 +440,9 @@ class DefaultDashboardRepository(
     private val liveDcfResolvedSymbols = ConcurrentHashMap.newKeySet<String>()
     private val revisionHistoryHydrated = ConcurrentHashMap.newKeySet<String>()
     private val pricingHistoryHydrated = ConcurrentHashMap.newKeySet<String>()
+    /** These maps and their completion signals are owned by [stateMutex]. */
+    private val revisionHistoryLoads = mutableMapOf<String, CompletableDeferred<Unit>>()
+    private val pricingHistoryLoads = mutableMapOf<String, CompletableDeferred<Unit>>()
     private val screenDataProjectionEngine = ScreenDataProjectionEngine()
     private val discoveryCoordinator = DiscoveryCoordinator(
         stateStore = stateStore,
@@ -479,7 +499,7 @@ class DefaultDashboardRepository(
             evicted = stale.isNotEmpty()
         }
         if (evicted) {
-            updates.value += 1L
+            updates.update { it + 1L }
         }
     }
     private val timeseriesCache = linkedMapOf<String, FundamentalTimeseries>()
@@ -491,6 +511,8 @@ class DefaultDashboardRepository(
     private val refreshedSymbols = linkedSetOf<String>()
     private var nextRefreshTicket = 0L
     private val lastAppliedRefreshTicket = mutableMapOf<String, Long>()
+    private val lastAppliedChartTicket = mutableMapOf<String, Long>()
+    private val lastAppliedDetailDcfTicket = mutableMapOf<String, Long>()
 
     /**
      * Rows this refresh priced in the batch pass and otherwise left as the file had them, because
@@ -524,6 +546,8 @@ class DefaultDashboardRepository(
     private var statusMessage: String? = null
     private var backgroundWorkMessage: String? = null
     private var restored = false
+    /** A failed database read blocks refresh writes until a later read succeeds. */
+    private var warmStartReadFailed = false
     private var activeProfileGeneration = 0L
     private var activeProfileSwitchJob: Job? = null
     private var activeRefreshJob: Job? = null
@@ -587,8 +611,8 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
-        if (!restored) {
-            loadUniverse(defaultProfile)
+        if (!restored || stateMutex.withLock { warmStartReadFailed }) {
+            loadUniverse(stateMutex.withLock { currentProfile })
             restored = true
         }
         return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
@@ -743,7 +767,7 @@ class DefaultDashboardRepository(
                 }
             }
             if (published) {
-                updates.value = updates.value + 1
+                updates.update { it + 1L }
             }
             return
         }
@@ -788,7 +812,7 @@ class DefaultDashboardRepository(
                         }
                     }
                     if (shouldPublish) {
-                        updates.value = updates.value + 1
+                        updates.update { it + 1L }
                     }
                 } finally {
                     stateMutex.withLock {
@@ -808,6 +832,12 @@ class DefaultDashboardRepository(
         opportunityScoringModel: OpportunityScoringModel,
         force: Boolean,
     ): DashboardSnapshot {
+        if (stateMutex.withLock { warmStartReadFailed }) {
+            loadUniverse(stateMutex.withLock { currentProfile })
+            if (stateMutex.withLock { warmStartReadFailed }) {
+                return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+            }
+        }
         reclaimPersistenceSpaceIfNeeded()
         startRefreshForCurrentProfile(
             stateMutex.withLock { trackedSymbols.toList() },
@@ -899,12 +929,23 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
+        val generation = stateMutex.withLock { activeProfileGeneration }
+        return loadCachedDetailForGeneration(symbol, filter, selectedRange, opportunityScoringModel, generation)
+    }
+
+    private suspend fun loadCachedDetailForGeneration(
+        symbol: String,
+        filter: ViewFilter,
+        selectedRange: ChartRange,
+        opportunityScoringModel: OpportunityScoringModel,
+        generation: Long,
+    ): DashboardSnapshot {
         val normalizedSymbol = symbol.trim().uppercase()
-        if (stateMutex.withLock { engine.detail(normalizedSymbol) == null }) {
+        if (stateMutex.withLock { generation == activeProfileGeneration && engine.detail(normalizedSymbol) == null }) {
             val saved = stateStore.loadCachedSymbolState(normalizedSymbol)
             if (saved != null) {
                 stateMutex.withLock {
-                    if (engine.detail(normalizedSymbol) == null) {
+                    if (generation == activeProfileGeneration && engine.detail(normalizedSymbol) == null) {
                         saved.snapshot?.let(engine::ingestSnapshot)
                         saved.externalSignal?.let(engine::ingestExternal)
                         saved.fundamentals?.let(engine::ingestFundamentals)
@@ -918,8 +959,8 @@ class DefaultDashboardRepository(
                 }
             }
         }
-        ensureRevisionHistoryLoaded(normalizedSymbol)
-        hydratePricingHistoryForDetail(normalizedSymbol)
+        ensureRevisionHistoryLoaded(normalizedSymbol, generation)
+        hydratePricingHistoryForDetail(normalizedSymbol, generation)
         return currentSnapshot(filter, normalizedSymbol, selectedRange, opportunityScoringModel)
     }
 
@@ -930,9 +971,15 @@ class DefaultDashboardRepository(
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot = withContext(InteractiveRequest) {
         val normalizedSymbol = symbol.trim().uppercase()
-        loadCachedDetail(normalizedSymbol, filter, selectedRange, opportunityScoringModel)
+        if (stateMutex.withLock { warmStartReadFailed }) {
+            return@withContext currentSnapshot(filter, normalizedSymbol, selectedRange, opportunityScoringModel)
+        }
         val (generation, ticket) = stateMutex.withLock {
             activeProfileGeneration to ++nextRefreshTicket
+        }
+        loadCachedDetailForGeneration(normalizedSymbol, filter, selectedRange, opportunityScoringModel, generation)
+        if (stateMutex.withLock { generation != activeProfileGeneration }) {
+            return@withContext currentSnapshot(filter, normalizedSymbol, selectedRange, opportunityScoringModel)
         }
         val fetched = fetchRefreshResult(normalizedSymbol, generation, ticket)
         val chartAttempt = if (selectedRange == ChartRange.Year && !fetched.chartCandles.isNullOrEmpty()) {
@@ -954,35 +1001,47 @@ class DefaultDashboardRepository(
             throw IOException("No fresh data for $normalizedSymbol. Saved data remains available.")
         }
         val delta = stateMutex.withLock {
-            if (generation != activeProfileGeneration || ticket < (lastAppliedRefreshTicket[normalizedSymbol] ?: 0L)) {
+            if (generation != activeProfileGeneration || warmStartReadFailed ||
+                ticket < (lastAppliedRefreshTicket[normalizedSymbol] ?: 0L)
+            ) {
                 null
             } else {
                 val applied = applyRefreshResultLocked(result, updateProfileProgress = false)
                 lastAppliedRefreshTicket[normalizedSymbol] = ticket
                 val extraCapture = if (selectedRange != ChartRange.Year && selectedCandles != null) {
                     val key = chartKey(normalizedSymbol, selectedRange)
-                    val merged = mergeHistoricalCandles(
-                        symbol = normalizedSymbol,
-                        range = selectedRange,
-                        persistedCandles = chartCache[key].orEmpty(),
-                        incomingCandles = selectedCandles,
-                    )
-                    chartCache[key] = merged
-                    chartSummaries.getOrPut(normalizedSymbol) { linkedMapOf() }[selectedRange] =
-                        ChartAnalysis.buildSummary(selectedRange, merged, result.refreshedAtEpochSeconds)
-                    RawCapture(
-                        symbol = normalizedSymbol,
-                        captureKind = CaptureKind.ChartCandles,
-                        scopeKey = selectedRange.name,
-                        capturedAt = result.refreshedAtEpochSeconds,
-                        payload = RawCapturePayload.Chart(selectedRange, selectedCandles),
-                    )
+                    if (ticket < (lastAppliedChartTicket[key] ?: 0L)) {
+                        null
+                    } else {
+                        val merged = mergeHistoricalCandles(
+                            symbol = normalizedSymbol,
+                            range = selectedRange,
+                            persistedCandles = chartCache[key].orEmpty(),
+                            incomingCandles = selectedCandles,
+                        )
+                        chartCache[key] = merged
+                        chartSummaries.getOrPut(normalizedSymbol) { linkedMapOf() }[selectedRange] =
+                            ChartAnalysis.buildSummary(selectedRange, merged, result.refreshedAtEpochSeconds)
+                        lastAppliedChartTicket[key] = ticket
+                        RawCapture(
+                            symbol = normalizedSymbol,
+                            captureKind = CaptureKind.ChartCandles,
+                            scopeKey = selectedRange.name,
+                            capturedAt = result.refreshedAtEpochSeconds,
+                            payload = RawCapturePayload.Chart(selectedRange, selectedCandles),
+                        )
+                    }
                 } else {
                     null
                 }
                 if (extraCapture != null) appendRevisionLocked(normalizedSymbol)
                 snapshotPersistenceDeltaLocked(applied.rawCaptures + listOfNotNull(extraCapture), normalizedSymbol)
-                    .copy(refreshSymbol = normalizedSymbol, refreshTicket = ticket)
+                    .copy(
+                        refreshSymbol = normalizedSymbol,
+                        refreshTicket = ticket,
+                        chartTickets = applied.chartTickets +
+                            (if (extraCapture == null) emptyMap() else mapOf(chartKey(normalizedSymbol, selectedRange) to ticket)),
+                    )
             }
         }
         if (delta != null) {
@@ -991,7 +1050,7 @@ class DefaultDashboardRepository(
             emitUpdate()
         }
         if (stateMutex.withLock { generation == activeProfileGeneration && engine.detail(normalizedSymbol) != null }) {
-            loadDetail(normalizedSymbol, filter, selectedRange, opportunityScoringModel)
+            loadDetail(normalizedSymbol, filter, selectedRange, opportunityScoringModel, generation)
         } else {
             currentSnapshot(filter, normalizedSymbol, selectedRange, opportunityScoringModel)
         }
@@ -1014,76 +1073,136 @@ class DefaultDashboardRepository(
         filter: ViewFilter,
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
+        expectedGeneration: Long? = null,
     ): DashboardSnapshot {
-        val generation = stateMutex.withLock { activeProfileGeneration }
-        ensureAdHocSymbolLoaded(symbol)
+        val generation = expectedGeneration ?: stateMutex.withLock { activeProfileGeneration }
+        if (stateMutex.withLock { generation != activeProfileGeneration || warmStartReadFailed }) {
+            return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+        }
+        ensureAdHocSymbolLoaded(symbol, generation)
         if (stateMutex.withLock { generation != activeProfileGeneration }) {
             return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
         }
-        if (stateMutex.withLock { isDetailWarmLocked(symbol, selectedRange) }) {
-            ensureRevisionHistoryLoaded(symbol)
+        if (stateMutex.withLock { generation == activeProfileGeneration && isDetailWarmLocked(symbol, selectedRange) }) {
+            ensureRevisionHistoryLoaded(symbol, generation)
             return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
         }
-        ensureRevisionHistoryLoaded(symbol)
-        hydratePricingHistoryForDetail(symbol)
+        ensureRevisionHistoryLoaded(symbol, generation)
+        hydratePricingHistoryForDetail(symbol, generation)
+        if (stateMutex.withLock { generation != activeProfileGeneration }) {
+            return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+        }
 
         var captures = mutableListOf<RawCapture>()
         var wroteDcf = false
-        var range = selectedRange
-        var key = chartKey(symbol, range)
-        if (stateMutex.withLock { chartCache[key] } == null) {
+        val range = selectedRange
+        val key = chartKey(symbol, range)
+        val chartTicket = stateMutex.withLock {
+            if (generation == activeProfileGeneration && !warmStartReadFailed && chartCache[key] == null) {
+                ++nextRefreshTicket
+            } else {
+                null
+            }
+        }
+        if (chartTicket != null) {
             var candles = runCatching { yahooClient.fetchHistoricalCandles(symbol, range) }
                 .onFailure { error -> if (error is CancellationException) throw error }
                 .getOrNull()
             if (!candles.isNullOrEmpty()) {
-                stateMutex.withLock {
-                    chartCache[key] = candles
-                    chartSummaries.getOrPut(symbol) { linkedMapOf() }[range] =
-                        ChartAnalysis.buildSummary(range, candles, now())
+                val chartDelta = stateMutex.withLock {
+                    if (generation != activeProfileGeneration || warmStartReadFailed ||
+                        chartTicket < (lastAppliedRefreshTicket[symbol] ?: 0L) ||
+                        chartTicket < (lastAppliedChartTicket[key] ?: 0L)
+                    ) {
+                        null
+                    } else {
+                        chartCache[key] = candles
+                        chartSummaries.getOrPut(symbol) { linkedMapOf() }[range] =
+                            ChartAnalysis.buildSummary(range, candles, now())
+                        lastAppliedChartTicket[key] = chartTicket
+                        appendRevisionLocked(symbol)
+                        val capture = RawCapture(
+                            symbol = symbol,
+                            captureKind = CaptureKind.ChartCandles,
+                            scopeKey = range.name,
+                            capturedAt = now(),
+                            payload = RawCapturePayload.Chart(range, candles),
+                        )
+                        snapshotPersistenceDeltaLocked(listOf(capture), symbol).copy(
+                            detailSymbol = symbol,
+                            chartTickets = mapOf(key to chartTicket),
+                        )
+                    }
                 }
-                captures += RawCapture(
-                    symbol = symbol,
-                    captureKind = CaptureKind.ChartCandles,
-                    scopeKey = range.name,
-                    capturedAt = now(),
-                    payload = RawCapturePayload.Chart(range, candles),
-                )
+                if (chartDelta != null) {
+                    withContext(NonCancellable) { persistDelta(chartDelta, generation) }
+                    emitUpdate()
+                }
             }
         }
 
-        val detailForDcf = stateMutex.withLock { engine.detail(symbol) }
-        val fundamentals = detailForDcf?.fundamentals
-        val marketPriceCents = detailForDcf?.marketPriceCents?.takeIf { it > 0L }
+        if (stateMutex.withLock { generation != activeProfileGeneration }) {
+            return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+        }
+
         // Opening a symbol is where the audited filing is worth its 4 MB: the list resolved from
         // Yahoo so it could load at all, and this is the first moment one symbol is worth one file.
-        val needsDcfResolve = stateMutex.withLock {
-            fundamentals != null && (needsDcfResolutionLocked(symbol) || !secondaryAsked.contains(symbol))
+        val dcfRequest = stateMutex.withLock {
+            val detail = engine.detail(symbol)
+            val fundamentals = detail?.fundamentals
+            if (generation == activeProfileGeneration && !warmStartReadFailed && fundamentals != null &&
+                (needsDcfResolutionLocked(symbol) || !secondaryAsked.contains(symbol))
+            ) {
+                DetailDcfRequest(
+                    ticket = ++nextRefreshTicket,
+                    baseRefreshTicket = lastAppliedRefreshTicket[symbol],
+                    fundamentals = fundamentals,
+                    marketPriceCents = detail?.marketPriceCents?.takeIf { it > 0L },
+                    companyName = detail?.companyName,
+                )
+            } else {
+                null
+            }
         }
-        if (fundamentals != null && needsDcfResolve) {
+        var dcfOwnership: Pair<Long, Long?>? = null
+        if (dcfRequest != null) {
+            val fundamentals = dcfRequest.fundamentals
+            val marketPriceCents = dcfRequest.marketPriceCents
+            val dcfTicket = dcfRequest.ticket
             var businessClass = businessClassOf(fundamentals)
             if (isClassificationRefuse(businessClass)) {
                 var analysis = terminalClassificationAnalysis(businessClass, fundamentals)
-                stateMutex.withLock {
-                    putDcfAnalysisLocked(symbol, analysis, fundamentals)
-                    liveDcfResolvedSymbols += symbol
+                wroteDcf = stateMutex.withLock {
+                    if (!ownsDetailDcfLocked(symbol, generation, dcfRequest)) false else {
+                        putDcfAnalysisLocked(symbol, analysis, fundamentals)
+                        liveDcfResolvedSymbols += symbol
+                        lastAppliedDetailDcfTicket[symbol] = dcfTicket
+                        dcfOwnership = dcfTicket to dcfRequest.baseRefreshTicket
+                        true
+                    }
                 }
-                wroteDcf = true
             } else if (isFinancialServices(fundamentals)) {
-                val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents)
-                stateMutex.withLock {
-                    secondaryAsked.add(symbol)
-                    engine.ingestFundamentals(outcome.fundamentals)
-                    putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
-                    liveDcfResolvedSymbols += symbol
+                val outcome = residualFromDrivers(symbol, fundamentals, marketPriceCents, generation = generation)
+                wroteDcf = stateMutex.withLock {
+                    if (!ownsDetailDcfLocked(symbol, generation, dcfRequest)) false else {
+                        secondaryAsked.add(symbol)
+                        engine.ingestFundamentals(outcome.fundamentals)
+                        putDcfAnalysisLocked(symbol, outcome.analysis, outcome.fundamentals)
+                        liveDcfResolvedSymbols += symbol
+                        lastAppliedDetailDcfTicket[symbol] = dcfTicket
+                        dcfOwnership = dcfTicket to dcfRequest.baseRefreshTicket
+                        true
+                    }
                 }
-                wroteDcf = true
             } else {
             var peers = peerCouponsFor(symbol, fundamentals)
-            var issuerYield = resolveIssuerYield(symbol, detailForDcf?.companyName)
-            var components = resolveComponents(symbol, detailForDcf?.companyName)
+            var issuerYield = resolveIssuerYield(symbol, dcfRequest.companyName, generation)
+            var components = resolveComponents(symbol, dcfRequest.companyName, generation)
             // The audited file is paid once per symbol. A symbol SEC has nothing for keeps its
             // Yahoo-sourced analysis, so it still needs resolving, and it must not pay again.
-            val askSecondary = stateMutex.withLock { secondaryAsked.add(symbol) }
+            val askSecondary = stateMutex.withLock {
+                if (ownsDetailDcfLocked(symbol, generation, dcfRequest)) secondaryAsked.add(symbol) else null
+            } ?: return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
             val resolution = dcfSourceCoordinator.resolve(symbol, allowSecondary = askSecondary) { timeseries ->
                 DcfAnalysisEngine.compute(
                     fundamentals,
@@ -1096,37 +1215,60 @@ class DefaultDashboardRepository(
                 ).getOrThrow()
             }
             val resolvedAnalysis = analysisFromSelection(resolution.selection, fundamentals)
-            resolution.selection.timeseries?.let {
-                stateMutex.withLock { liveDcfResolvedSymbols += symbol }
-                wroteDcf = true
-            } ?: run {
-                stateMutex.withLock { liveDcfResolvedSymbols += symbol }
-                wroteDcf = resolvedAnalysis != null
+            val applied = stateMutex.withLock {
+                if (!ownsDetailDcfLocked(symbol, generation, dcfRequest)) false else {
+                    liveDcfResolvedSymbols += symbol
+                    resolution.selection.timeseries?.let { timeseries -> timeseriesCache[symbol] = timeseries }
+                    // Terminal not-eligible / unavailable without timeseries still needs a coverage marker.
+                    resolvedAnalysis?.let { analysis -> putDcfAnalysisLocked(symbol, analysis, fundamentals) }
+                    lastAppliedDetailDcfTicket[symbol] = dcfTicket
+                    dcfOwnership = dcfTicket to dcfRequest.baseRefreshTicket
+                    true
+                }
             }
-            stateMutex.withLock {
-                resolution.selection.timeseries?.let { timeseries -> timeseriesCache[symbol] = timeseries }
-                // Terminal not-eligible / unavailable without timeseries still needs a coverage marker.
-                resolvedAnalysis?.let { analysis -> putDcfAnalysisLocked(symbol, analysis, fundamentals) }
+            if (applied) {
+                wroteDcf = resolution.selection.timeseries != null || resolvedAnalysis != null
+                captures += fundamentalTimeseriesCaptures(symbol, resolution.fetched, resolvedAnalysis, now())
             }
-            captures += fundamentalTimeseriesCaptures(symbol, resolution.fetched, resolvedAnalysis, now())
             }
         }
 
         if (captures.isNotEmpty() || wroteDcf) {
-            val persistenceDelta = stateMutex.withLock {
-                if (generation != activeProfileGeneration) {
-                    null
-                } else {
-                    appendRevisionLocked(symbol)
-                    snapshotPersistenceDeltaLocked(captures, symbol)
+            withContext(NonCancellable) {
+                val persistenceDelta = stateMutex.withLock {
+                    if (generation != activeProfileGeneration || warmStartReadFailed) {
+                        null
+                    } else {
+                        appendRevisionLocked(symbol)
+                        snapshotPersistenceDeltaLocked(captures, symbol).let { delta ->
+                            if (dcfOwnership == null) {
+                                delta
+                            } else {
+                                delta.copy(
+                                    detailSymbol = symbol,
+                                    detailBaseRefreshTickets = listOf(dcfOwnership?.second),
+                                    detailDcfTicket = dcfOwnership?.first,
+                                )
+                            }
+                        }
+                    }
                 }
-            }
-            if (persistenceDelta != null) {
-                persistDelta(persistenceDelta, generation)
-                emitUpdate()
+                if (persistenceDelta != null) {
+                    persistDelta(persistenceDelta, generation)
+                    emitUpdate()
+                }
             }
         }
         return currentSnapshot(filter, symbol, selectedRange, opportunityScoringModel)
+    }
+
+    private fun ownsDetailDcfLocked(symbol: String, generation: Long, request: DetailDcfRequest): Boolean {
+        val currentDetail = engine.detail(symbol)
+        return generation == activeProfileGeneration && !warmStartReadFailed &&
+            request.baseRefreshTicket == lastAppliedRefreshTicket[symbol] &&
+            request.fundamentals == currentDetail?.fundamentals &&
+            request.marketPriceCents == currentDetail?.marketPriceCents?.takeIf { it > 0L } &&
+            request.ticket >= (lastAppliedDetailDcfTicket[symbol] ?: 0L)
     }
 
     override suspend fun searchTickers(
@@ -1210,19 +1352,51 @@ class DefaultDashboardRepository(
             return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
         }
 
-        val newSymbols = stateMutex.withLock {
-            symbols.filter { it !in trackedSymbols }.also { additions ->
-                trackedSymbols.addAll(additions)
-                placeholderSymbols.addAll(additions)
-                trackedSymbols = reorderSymbolsByPersistedRanking(trackedSymbols).toMutableList()
-                statusMessage = "Tracking ${additions.joinToString(", ")}"
+        var refusedDuringSwitch = false
+        // A profile switch takes this same mutex before changing the generation. Keep the
+        // in-memory addition and its database write on one side of that boundary.
+        val addition = adoptPersistMutex.withLock {
+            val result = stateMutex.withLock state@{
+                if (warmStartReadFailed) return@state null
+                if (startupPhase == DashboardStartupPhase.SwitchingProfile) {
+                    statusMessage = "Wait for the profile switch, then add the ticker again."
+                    refusedDuringSwitch = true
+                    return@state null
+                }
+                val refreshWasRunning = startupPhase == DashboardStartupPhase.Refreshing ||
+                    refreshStartMutex.isLocked || activeRefreshJob?.isActive == true ||
+                    activeEnrichmentJob?.isActive == true || activeEvaluationCaptureJob?.isActive == true
+                val additions = symbols.filter { it !in trackedSymbols }
+                if (additions.isNotEmpty()) {
+                    trackedSymbols.addAll(additions)
+                    placeholderSymbols.addAll(additions)
+                    trackedSymbols = reorderSymbolsByPersistedRanking(trackedSymbols).toMutableList()
+                    statusMessage = "Tracking ${additions.joinToString(", ")}"
+                }
+                Triple(additions, activeProfileGeneration, refreshWasRunning)
             }
+            if (result != null && result.first.isNotEmpty()) {
+                stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
+            }
+            result
         }
+        if (refusedDuringSwitch) emitUpdate()
+        if (addition == null) {
+            return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
+        }
+        val (newSymbols, generation, refreshWasRunning) = addition
 
         if (newSymbols.isNotEmpty()) {
-            stateStore.replaceTrackedSymbols(stateMutex.withLock { trackedSymbols.toList() })
             emitUpdate()
-            startRefreshForCurrentProfile(newSymbols, opportunityScoringModel, force = false)
+            beforeAddRefreshStart?.invoke()
+            startRefresh(
+                newSymbols,
+                generation,
+                opportunityScoringModel,
+                force = false,
+                addedSymbols = newSymbols,
+                fullProfileNeededAtRequest = refreshWasRunning,
+            )
         }
 
         return currentSnapshot(
@@ -1239,20 +1413,35 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
-        val request = beginProfileSwitch(profile)
+        val request = beginProfileSwitch(profile, opportunityScoringModel)
         return currentSnapshot(filter, request.symbols.firstOrNull(), selectedRange, opportunityScoringModel)
     }
 
-    private suspend fun beginProfileSwitch(profile: String): ProfileSwitchRequest {
+    private suspend fun beginProfileSwitch(
+        profile: String,
+        scoringModel: OpportunityScoringModel,
+    ): ProfileSwitchRequest {
         val switchStartedNanos = System.nanoTime()
         val symbols = timedStage("switch.resolve-symbols") { resolveProfileSymbols(profile) }
-        val generation = stateMutex.withLock {
-            activeProfileGeneration += 1
-            activeProfileGeneration
+        val generation = adoptPersistMutex.withLock {
+            stateMutex.withLock {
+                activeProfileGeneration += 1
+                releaseDetailHistoryLoadsLocked()
+                applyTransitionLocked(
+                    reduceProfileTransition(ProfileTransitionEvent.SwitchRequested(profile, symbols.size)),
+                )
+                activeProfileGeneration
+            }
         }
         timedStage("switch.cancel-active-work") { cancelActiveProfileWork() }
         marketDataRepository?.invalidate()
-        val bootstrap = timedStage("switch.load-warm-start") { loadWarmStartOrReset(symbols) }
+        val bootstrap = timedStage("switch.load-warm-start") { loadWarmStartOrPreserve(symbols, generation) }
+        if (bootstrap == null) {
+            emitUpdate()
+            return stateMutex.withLock {
+                ProfileSwitchRequest(generation, currentProfile, trackedSymbols.toList())
+            }
+        }
         timedStage("switch.adopt-profile") { adoptProfileFromStore(profile, symbols, generation, bootstrap) }
         emitUpdate()
         logStageMillis("switch.to-first-emit", millisSince(switchStartedNanos), " symbols=${symbols.size}")
@@ -1272,7 +1461,7 @@ class DefaultDashboardRepository(
             activeProfileSwitchJob = repositoryScope.launch {
                 val thisJob = coroutineContext.job
                 try {
-                    hydrateProfileSwitch(request)
+                    hydrateProfileSwitch(request, scoringModel)
                 } finally {
                     stateMutex.withLock {
                         if (activeProfileSwitchJob === thisJob) {
@@ -1292,13 +1481,27 @@ class DefaultDashboardRepository(
         selectedRange: ChartRange,
         opportunityScoringModel: OpportunityScoringModel,
     ): DashboardSnapshot {
-        stateMutex.withLock {
-            engine.toggleWatchlist(symbol)
-            appendRevisionLocked(symbol)
+        val changed = adoptPersistMutex.withLock {
+            val change = stateMutex.withLock {
+                if (warmStartReadFailed || startupPhase == DashboardStartupPhase.SwitchingProfile) {
+                    null
+                } else {
+                    engine.toggleWatchlist(symbol)
+                    appendRevisionLocked(symbol)
+                    Triple(
+                        activeProfileGeneration,
+                        engine.watchlistSymbols(),
+                        snapshotPersistenceDeltaLocked(emptyList(), symbol),
+                    )
+                }
+            }
+            if (change == null) false else {
+                stateStore.replaceWatchlist(change.second)
+                persistDelta(change.third, change.first)
+                true
+            }
         }
-        stateStore.replaceWatchlist(stateMutex.withLock { engine.watchlistSymbols() })
-        persistDelta(stateMutex.withLock { snapshotPersistenceDeltaLocked(emptyList(), symbol) })
-        emitUpdate()
+        if (changed) emitUpdate()
         return currentSnapshot(filter, selectedSymbol, selectedRange, opportunityScoringModel)
     }
 
@@ -1318,27 +1521,44 @@ class DefaultDashboardRepository(
         value.lowercase().filter { it.isLetterOrDigit() }
 
     private suspend fun loadUniverse(profile: String) {
-        var symbols = resolveProfileSymbols(profile)
+        val generation = stateMutex.withLock { activeProfileGeneration }
+        val symbols = resolveProfileSymbols(profile)
+        val bootstrap = loadWarmStartOrPreserve(symbols, generation) ?: return
         adoptProfileFromStore(
             profile,
             symbols,
-            stateMutex.withLock { activeProfileGeneration },
-            loadWarmStartOrReset(symbols),
+            generation,
+            bootstrap,
         )
         emitUpdate()
     }
 
-    private suspend fun loadWarmStartOrReset(symbols: List<String>): PersistenceBootstrap =
-        runCatching { stateStore.loadWarmStart(symbols) }
-            .getOrElse { error ->
-                stateStore.resetWarmStartState()
-                var book = runCatching { stateStore.loadPortfolioBook() }.getOrDefault(emptyList<PortfolioLot>() to null)
+    private suspend fun loadWarmStartOrPreserve(symbols: List<String>, generation: Long): PersistenceBootstrap? =
+        try {
+            val loaded = stateStore.loadWarmStart(symbols)
+            adoptPersistMutex.withLock {
                 stateMutex.withLock {
-                    resetInMemoryLocked()
-                    statusMessage = "SQLite warm-start reset after restore failure: ${error.message ?: "unknown error"}"
+                    if (generation != activeProfileGeneration) null else {
+                        warmStartReadFailed = false
+                        loaded
+                    }
                 }
-                PersistenceBootstrap(portfolioLots = book.first, bookAsOf = book.second)
             }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logger.error(TAG, "saved data read failed", error)
+            adoptPersistMutex.withLock {
+                stateMutex.withLock {
+                    if (generation == activeProfileGeneration) {
+                        warmStartReadFailed = true
+                        startupPhase = DashboardStartupPhase.RestoreFailed
+                        statusMessage = "Could not read saved data. Data is preserved; retry Refresh."
+                    }
+                }
+            }
+            null
+        }
 
     /**
      * Move to `profile` and fill it from the database, with nothing published in between.
@@ -1388,12 +1608,17 @@ class DefaultDashboardRepository(
         }
     }
 
-    private suspend fun ensureAdHocSymbolLoaded(symbol: String) {
+    private suspend fun ensureAdHocSymbolLoaded(symbol: String, generation: Long) {
         val normalizedSymbol = symbol.trim().uppercase()
-        val alreadyLoaded = stateMutex.withLock { engine.detail(normalizedSymbol) != null }
-        if (alreadyLoaded) {
-            return
-        }
+        val ticket = stateMutex.withLock {
+            if (generation == activeProfileGeneration && !warmStartReadFailed &&
+                engine.detail(normalizedSymbol) == null
+            ) {
+                ++nextRefreshTicket
+            } else {
+                null
+            }
+        } ?: return
 
         val fetchedAt = now()
         val providerResult = yahooClient.fetchSymbol(normalizedSymbol)
@@ -1418,6 +1643,9 @@ class DefaultDashboardRepository(
             }
 
         stateMutex.withLock {
+            if (generation != activeProfileGeneration || warmStartReadFailed ||
+                ticket < (lastAppliedRefreshTicket[normalizedSymbol] ?: 0L)
+            ) return
             providerResult.companyName?.takeIf(String::isNotBlank)?.let { companyName ->
                 companyNameBySymbol[normalizedSymbol] = companyName
             }
@@ -1454,6 +1682,12 @@ class DefaultDashboardRepository(
             if (engine.detail(normalizedSymbol) != null) {
                 appendRevisionLocked(normalizedSymbol)
             }
+            if (providerResult.snapshot != null || providerResult.externalSignal != null ||
+                providerResult.fundamentals != null || providerResult.companyName != null ||
+                chartCaptures.isNotEmpty()
+            ) {
+                lastAppliedRefreshTicket[normalizedSymbol] = ticket
+            }
         }
     }
 
@@ -1464,7 +1698,10 @@ class DefaultDashboardRepository(
      * the dashboard is showing the database rows for the new profile. This only puts live data on
      * top of them.
      */
-    private suspend fun hydrateProfileSwitch(request: ProfileSwitchRequest) {
+    private suspend fun hydrateProfileSwitch(
+        request: ProfileSwitchRequest,
+        scoringModel: OpportunityScoringModel,
+    ) {
         if (stateMutex.withLock { request.generation != activeProfileGeneration }) {
             return
         }
@@ -1473,8 +1710,8 @@ class DefaultDashboardRepository(
         startRefresh(
             request.symbols,
             request.generation,
-            stateStore.loadScoringPreferences().opportunityModel,
-            force = false,
+            scoringModel,
+            force = true,
         )
     }
 
@@ -1492,6 +1729,8 @@ class DefaultDashboardRepository(
         generation: Long,
         scoringModel: OpportunityScoringModel,
         force: Boolean,
+        addedSymbols: List<String>? = null,
+        fullProfileNeededAtRequest: Boolean = false,
     ) {
         if (symbols.isEmpty()) {
             return
@@ -1499,11 +1738,27 @@ class DefaultDashboardRepository(
         // One start at a time, from here to the launch. See [refreshStartMutex]: the read, the
         // cancel and the launch are one swap, and splitting them let two refreshes run at once.
         refreshStartMutex.withLock {
+            // Add must choose its final scope under this mutex. A manual full refresh can start
+            // after Add has changed the tracked list but before Add reaches this lock.
+            val refreshSymbols = stateMutex.withLock {
+                if (generation != activeProfileGeneration || warmStartReadFailed) return
+                if (addedSymbols != null && (
+                        fullProfileNeededAtRequest || startupPhase == DashboardStartupPhase.Refreshing ||
+                            activeRefreshJob?.isActive == true || activeEnrichmentJob?.isActive == true ||
+                            activeEvaluationCaptureJob?.isActive == true
+                    )
+                ) {
+                    trackedSymbols.toList()
+                } else {
+                    symbols
+                }
+            }
+            val refreshForce = force || (addedSymbols != null && refreshSymbols.size > addedSymbols.size)
             refreshRequestedNanos = System.nanoTime()
             refreshFirstSymbolLogged = false
 
             val previousJobs = stateMutex.withLock {
-                if (generation != activeProfileGeneration) {
+                if (generation != activeProfileGeneration || warmStartReadFailed) {
                     return
                 }
                 backgroundWorkMessage = null
@@ -1518,13 +1773,16 @@ class DefaultDashboardRepository(
             timedStage("refresh.cancel-previous") {
                 previousJobs.forEach { job -> job.cancelAndJoin() }
             }
-            val skip = if (force) FreshCaptureSkip() else freshCaptureSkip(symbols, stateStore.loadRefreshMarks())
+            val skip = if (refreshForce) FreshCaptureSkip() else freshCaptureSkip(refreshSymbols, stateStore.loadRefreshMarks())
 
             stateMutex.withLock {
                 if (generation != activeProfileGeneration) {
                     return
                 }
-                symbols.forEach { symbol -> liveDcfResolvedSymbols.remove(symbol) }
+                // Reserve this pass before it starts fetching. A later manual ticker refresh
+                // must own that ticker, even when this pass reaches it after the button press.
+                val refreshTicket = ++nextRefreshTicket
+                refreshSymbols.forEach { symbol -> liveDcfResolvedSymbols.remove(symbol) }
                 captureRefreshComparisonBaselineLocked()
                 refreshedSymbols.clear()
                 refreshAttemptedSymbols.clear()
@@ -1539,7 +1797,7 @@ class DefaultDashboardRepository(
                             // whatever the batch price pass missed. The total moved under the user
                             // mid-refresh and read as a number picked at random. A row already fresh
                             // on file is reported done, which it is.
-                            symbolCount = symbols.size,
+                            symbolCount = refreshSymbols.size,
                         ),
                     ),
                 )
@@ -1555,8 +1813,8 @@ class DefaultDashboardRepository(
                             peakRefreshPassesRunning = maxOf(peakRefreshPassesRunning, refreshPassesRunning)
                         }
                         afterRefreshPassRegistered?.invoke()
-                        runRefresh(symbols, generation, skip)
-                        finishRefresh(generation, scoringModel, skip)
+                        runRefresh(refreshSymbols, generation, skip, refreshTicket)
+                        finishRefresh(generation, scoringModel, skip, refreshTicket)
                     } finally {
                         // A cancelled refresh used to skip this: the first suspension in a cancelled
                         // coroutine throws, so the load stayed counted in and the process was held in
@@ -1603,6 +1861,7 @@ class DefaultDashboardRepository(
         generation: Long,
         scoringModel: OpportunityScoringModel,
         skip: FreshCaptureSkip,
+        refreshTicket: Long,
     ) {
         val symbolsToEnrich = stateMutex.withLock {
             if (generation != activeProfileGeneration) {
@@ -1612,7 +1871,7 @@ class DefaultDashboardRepository(
         }
         captureEarningsEvents(stateMutex.withLock { earningsCandidateRowsLocked(scoringModel) })
         emitUpdate()
-        startEnrichment(symbolsToEnrich, generation, skip)
+        startEnrichment(symbolsToEnrich, generation, skip, refreshTicket)
         startMarketReadForCurrentProfile(generation)
         startScoringEvaluationCapture(generation)
     }
@@ -1809,13 +2068,14 @@ class DefaultDashboardRepository(
      * knows, a few calls for the whole list; the quote pass then serves the rows it could not
      * price first, since those have nothing to show until it does.
      *
-     * A capture less than a day old is left on file, per [skip]. Start asks for this path. The
-     * Refresh button forces, and [skip] is empty: a new quoteSummary and year chart for every row.
+     * A nonforced internal pass can keep captures less than a day old, per [skip]. Startup and
+     * manual Refresh force a new quoteSummary and year chart for every row.
      */
     private suspend fun runRefresh(
         symbols: List<String>,
         generation: Long,
         skip: FreshCaptureSkip,
+        refreshTicket: Long,
     ) = coroutineScope {
         if (skip.chart.isNotEmpty()) {
             launch { timedStage("refresh.charts.restore") { restoreYearChartsFromFile(skip.chart, generation) } }
@@ -1829,15 +2089,15 @@ class DefaultDashboardRepository(
         // round starts now and the prices land beside it.
         val (warmOnFile, warmTickets) = stateMutex.withLock {
             val warm = symbols.filter { symbol -> engine.detail(symbol) != null }.toSet()
-            warm to warm.associateWith { ++nextRefreshTicket }
+            warm to warm.associateWith { refreshTicket }
         }
         val pricing = async { timedStage("refresh.prices") { primeWarmPrices(warmTickets, generation) } }
         val keeping = async {
             val priced = pricing.await()
-            val kept = symbols.filter { symbol -> symbol in skip.quote && symbol in priced }
+            val candidates = symbols.filter { symbol -> symbol in skip.quote && symbol in priced }
             stateMutex.withLock {
                 if (generation == activeProfileGeneration) {
-                    keepRowsLocked(kept, skip.quotedAt)
+                    val kept = keepRowsLocked(candidates, skip.quotedAt, refreshTicket)
                     applyTransitionLocked(
                         reduceProfileTransition(
                             ProfileTransitionEvent.RefreshProgress(
@@ -1866,6 +2126,7 @@ class DefaultDashboardRepository(
                 retryQueue = retryQueue,
                 charted = charted,
                 generation = generation,
+                refreshTicket = refreshTicket,
                 recordTerminalIssues = false,
             )
         }
@@ -1879,6 +2140,7 @@ class DefaultDashboardRepository(
                 retryQueue = retryQueue,
                 charted = charted,
                 generation = generation,
+                refreshTicket = refreshTicket,
                 recordTerminalIssues = false,
             )
         }
@@ -1886,11 +2148,13 @@ class DefaultDashboardRepository(
         if (uncharted.isNotEmpty()) {
             launch {
                 timedStage("refresh.charts") {
-                    runEnrichmentRounds(uncharted, generation, ::fetchYearChart)
+                    runEnrichmentRounds(uncharted, generation) { symbol, gen, recordErrors ->
+                        fetchYearChart(symbol, gen, refreshTicket, recordErrors)
+                    }
                 }
             }
         }
-        retryUnquotedSymbols(retryQueue, generation, charted)
+        retryUnquotedSymbols(retryQueue, generation, charted, refreshTicket)
     }
 
     /** What [marks] say is fresh enough to keep, for the symbols of this refresh. */
@@ -1908,9 +2172,17 @@ class DefaultDashboardRepository(
     }
 
     /** The rows kept as the file had them, stamped with the time of the quote they keep. */
-    private fun keepRowsLocked(kept: List<String>, quotedAt: Map<String, Long>) {
+    private fun keepRowsLocked(
+        candidates: List<String>,
+        quotedAt: Map<String, Long>,
+        refreshTicket: Long,
+    ): List<String> {
+        val kept = candidates.filter { symbol ->
+            symbol !in refreshedSymbols && refreshTicket >= (lastAppliedRefreshTicket[symbol] ?: 0L)
+        }
         keptSymbols += kept
         kept.forEach { symbol -> quotedAt[symbol]?.let { at -> freshnessTimestampBySymbol[symbol] = at } }
+        return kept
     }
 
     /**
@@ -1975,7 +2247,8 @@ class DefaultDashboardRepository(
                 if (priced.isEmpty()) {
                     logStageMillis("refresh.prices.first-batch", millisSince(refreshRequestedNanos), " rows=${quotes.size}")
                 }
-                priced += quotes.keys
+                // Only applied prices count. A newer manual refresh rejects this batch ticket.
+                priced += applied.mapNotNull { delta -> delta.refreshSymbol }
                 emitUpdate()
                 timedStage("refresh.persist") { persistPending(unwritten, generation) }
             }
@@ -2017,6 +2290,7 @@ class DefaultDashboardRepository(
         retryQueue: ArrayDeque<String>,
         generation: Long,
         charted: MutableSet<String>,
+        refreshTicket: Long,
     ) {
         repeat(MAX_RETRY_ROUNDS) { round ->
             if (retryQueue.isEmpty()) return
@@ -2032,6 +2306,7 @@ class DefaultDashboardRepository(
                 retryQueue = retryQueue,
                 charted = charted,
                 generation = generation,
+                refreshTicket = refreshTicket,
                 recordTerminalIssues = isFinalRound,
             )
         }
@@ -2042,6 +2317,7 @@ class DefaultDashboardRepository(
                 retryQueue = ArrayDeque(),
                 charted = charted,
                 generation = generation,
+                refreshTicket = refreshTicket,
                 recordTerminalIssues = true,
             )
         }
@@ -2052,6 +2328,7 @@ class DefaultDashboardRepository(
         retryQueue: ArrayDeque<String>,
         charted: MutableSet<String>,
         generation: Long,
+        refreshTicket: Long,
         recordTerminalIssues: Boolean,
     ) = coroutineScope {
         val roundStartedNanos = System.nanoTime()
@@ -2064,8 +2341,9 @@ class DefaultDashboardRepository(
             // round trips, so the controller was steering by a number it never measured.
             .flatMapMerge(concurrency = yahooClient.requestCeiling) { symbol ->
                 flow {
-                    val ticket = stateMutex.withLock { ++nextRefreshTicket }
-                    emit(timedStage("refresh.symbol") { fetchRefreshResult(symbol, generation, ticket) })
+                    emit(timedStage("refresh.symbol") {
+                        fetchRefreshResult(symbol, generation, refreshTicket)
+                    })
                 }
             }
             .collect { result ->
@@ -2206,6 +2484,7 @@ class DefaultDashboardRepository(
         updateProfileProgress: Boolean = true,
     ): PersistenceDelta {
         val rawCaptures = mutableListOf<RawCapture>()
+        val chartTickets = mutableMapOf<String, Long>()
         val providerResult = result.providerResult
         val fallbackSnapshot = if (providerResult?.snapshot == null) {
             fallbackSnapshotFromCachedDetail(
@@ -2221,6 +2500,13 @@ class DefaultDashboardRepository(
         val effectiveFundamentals = result.residualOutcome?.fundamentals
             ?: providerResult?.fundamentals
             ?: result.fallbackFundamentals
+
+        val priorDetail = engine.detail(result.symbol)
+        if ((effectiveSnapshot != null && priorDetail?.marketPriceCents != effectiveSnapshot.marketPriceCents) ||
+            (effectiveFundamentals != null && priorDetail?.fundamentals != effectiveFundamentals)
+        ) {
+            secondaryAsked.remove(result.symbol)
+        }
 
         providerResult?.companyName?.takeIf { name -> isUsableCompanyName(name) }?.let { companyName ->
             companyNameBySymbol[result.symbol] = companyName
@@ -2283,22 +2569,26 @@ class DefaultDashboardRepository(
 
         result.chartCandles?.takeIf(List<HistoricalCandle>::isNotEmpty)?.let { candles ->
             val key = chartKey(result.symbol, ChartRange.Year)
-            val mergedCandles = mergeHistoricalCandles(
-                symbol = result.symbol,
-                range = ChartRange.Year,
-                persistedCandles = chartCache[key].orEmpty(),
-                incomingCandles = candles,
-            )
-            chartCache[key] = mergedCandles
-            chartSummaries.getOrPut(result.symbol) { linkedMapOf() }[ChartRange.Year] =
-                ChartAnalysis.buildSummary(ChartRange.Year, mergedCandles, result.refreshedAtEpochSeconds)
-            rawCaptures += RawCapture(
-                symbol = result.symbol,
-                captureKind = CaptureKind.ChartCandles,
-                scopeKey = ChartRange.Year.name,
-                capturedAt = result.refreshedAtEpochSeconds,
-                payload = RawCapturePayload.Chart(ChartRange.Year, candles),
-            )
+            if (result.ticket >= (lastAppliedChartTicket[key] ?: 0L)) {
+                val mergedCandles = mergeHistoricalCandles(
+                    symbol = result.symbol,
+                    range = ChartRange.Year,
+                    persistedCandles = chartCache[key].orEmpty(),
+                    incomingCandles = candles,
+                )
+                chartCache[key] = mergedCandles
+                chartSummaries.getOrPut(result.symbol) { linkedMapOf() }[ChartRange.Year] =
+                    ChartAnalysis.buildSummary(ChartRange.Year, mergedCandles, result.refreshedAtEpochSeconds)
+                lastAppliedChartTicket[key] = result.ticket
+                chartTickets[key] = result.ticket
+                rawCaptures += RawCapture(
+                    symbol = result.symbol,
+                    captureKind = CaptureKind.ChartCandles,
+                    scopeKey = ChartRange.Year.name,
+                    capturedAt = result.refreshedAtEpochSeconds,
+                    payload = RawCapturePayload.Chart(ChartRange.Year, candles),
+                )
+            }
         }
 
         val recovered =
@@ -2383,7 +2673,7 @@ class DefaultDashboardRepository(
             lastUpdatedAtEpochSeconds = result.refreshedAtEpochSeconds
         }
 
-        return snapshotPersistenceDeltaLocked(rawCaptures, result.symbol)
+        return snapshotPersistenceDeltaLocked(rawCaptures, result.symbol).copy(chartTickets = chartTickets)
     }
 
     private fun snapshotLocked(
@@ -3892,39 +4182,92 @@ class DefaultDashboardRepository(
         lastUpdatedAtEpochSeconds = bootstrap.lastPersistedAtEpochSeconds
     }
 
-    private suspend fun ensureRevisionHistoryLoaded(symbol: String) {
-        if (!revisionHistoryHydrated.add(symbol)) return
-        val loaded = stateStore.loadRevisionHistory(symbol)
-        stateMutex.withLock {
-            val persistedHistory = loaded.mapNotNull { persisted ->
-                val detail = buildSymbolDetail(
-                    snapshot = persisted.payload.snapshot,
-                    externalSignal = persisted.payload.externalSignal,
-                    fundamentals = persisted.payload.fundamentals,
-                    lastSequence = persisted.lastSequence,
-                    updateCount = persisted.updateCount,
-                    isWatched = persisted.payload.isWatched,
-                ) ?: return@mapNotNull null
-                SymbolRevision(
-                    symbol = persisted.symbol,
-                    evaluatedAtEpochSeconds = persisted.evaluatedAt,
-                    detail = detail,
-                    chartSummaries = persisted.payload.chartSummaries.associateBy { it.range },
-                    dcfAnalysis = persisted.payload.dcfAnalysis,
-                )
-            }
-            val mergedHistory = mergeRevisionHistory(persistedHistory, revisions[symbol].orEmpty())
-            if (mergedHistory.isNotEmpty()) {
-                revisions[symbol] = mergedHistory
+    private suspend fun ensureRevisionHistoryLoaded(symbol: String, generation: Long) {
+        hydrateDetailHistoryOnce(symbol, generation, revisionHistoryHydrated, revisionHistoryLoads) {
+            val loaded = stateStore.loadRevisionHistory(symbol)
+            stateMutex.withLock {
+                if (generation != activeProfileGeneration) return@withLock
+                val persistedHistory = loaded.mapNotNull { persisted ->
+                    val detail = buildSymbolDetail(
+                        snapshot = persisted.payload.snapshot,
+                        externalSignal = persisted.payload.externalSignal,
+                        fundamentals = persisted.payload.fundamentals,
+                        lastSequence = persisted.lastSequence,
+                        updateCount = persisted.updateCount,
+                        isWatched = persisted.payload.isWatched,
+                    ) ?: return@mapNotNull null
+                    SymbolRevision(
+                        symbol = persisted.symbol,
+                        evaluatedAtEpochSeconds = persisted.evaluatedAt,
+                        detail = detail,
+                        chartSummaries = persisted.payload.chartSummaries.associateBy { it.range },
+                        dcfAnalysis = persisted.payload.dcfAnalysis,
+                    )
+                }
+                val mergedHistory = mergeRevisionHistory(persistedHistory, revisions[symbol].orEmpty())
+                if (mergedHistory.isNotEmpty()) {
+                    revisions[symbol] = mergedHistory
+                }
             }
         }
     }
 
-    private suspend fun hydratePricingHistoryForDetail(symbol: String) {
-        if (!pricingHistoryHydrated.add(symbol)) return
-        val loaded = stateStore.loadPricingHistory(symbol)
-        if (loaded.isEmpty()) return
-        stateMutex.withLock { hydrateChartRecordsLocked(loaded) }
+    private suspend fun hydratePricingHistoryForDetail(symbol: String, generation: Long) {
+        hydrateDetailHistoryOnce(symbol, generation, pricingHistoryHydrated, pricingHistoryLoads) {
+            val loaded = stateStore.loadPricingHistory(symbol)
+            stateMutex.withLock {
+                if (generation != activeProfileGeneration) return@withLock
+                if (loaded.isNotEmpty()) hydrateChartRecordsLocked(loaded)
+            }
+        }
+    }
+
+    private suspend fun hydrateDetailHistoryOnce(
+        symbol: String,
+        generation: Long,
+        hydrated: MutableSet<String>,
+        activeLoads: MutableMap<String, CompletableDeferred<Unit>>,
+        readAndApply: suspend () -> Unit,
+    ) {
+        while (true) {
+            val (signal, ownsRead) = stateMutex.withLock {
+                if (generation != activeProfileGeneration || symbol in hydrated) return
+                val active = activeLoads[symbol]
+                if (active != null) {
+                    active to false
+                } else {
+                    val created = CompletableDeferred<Unit>()
+                    activeLoads[symbol] = created
+                    created to true
+                }
+            }
+            if (!ownsRead) {
+                signal.await()
+                continue
+            }
+            try {
+                readAndApply()
+                stateMutex.withLock {
+                    if (generation == activeProfileGeneration) hydrated.add(symbol)
+                }
+            } finally {
+                withContext(NonCancellable) {
+                    stateMutex.withLock {
+                        if (activeLoads[symbol] === signal) activeLoads.remove(symbol)
+                        signal.complete(Unit)
+                    }
+                }
+            }
+            return
+        }
+    }
+
+    /** Call under [stateMutex] when the active profile generation changes. */
+    private fun releaseDetailHistoryLoadsLocked() {
+        revisionHistoryLoads.values.forEach { it.complete(Unit) }
+        revisionHistoryLoads.clear()
+        pricingHistoryLoads.values.forEach { it.complete(Unit) }
+        pricingHistoryLoads.clear()
     }
 
     private fun hydrateChartRecordsLocked(records: List<PersistedChartRecord>) {
@@ -4020,11 +4363,37 @@ class DefaultDashboardRepository(
         refreshPersistMutex.withLock {
             // A newer applied refresh owns the symbol. The check and write share one writer.
             val (current, currentIssues) = stateMutex.withLock {
-                if (generation != null && generation != activeProfileGeneration) {
+                if (warmStartReadFailed || (generation != null && generation != activeProfileGeneration)) {
                     emptyList<PersistenceDelta>() to emptyList<PersistedIssueRecord>()
                 } else {
-                    deltas.filter { delta ->
-                        delta.refreshSymbol == null || delta.refreshTicket == lastAppliedRefreshTicket[delta.refreshSymbol]
+                    deltas.mapNotNull { delta ->
+                        val detailOwned = delta.detailSymbol?.let { symbol ->
+                            delta.detailBaseRefreshTickets.all { it == lastAppliedRefreshTicket[symbol] } &&
+                                (delta.detailDcfTicket == null ||
+                                    delta.detailDcfTicket == lastAppliedDetailDcfTicket[symbol])
+                        } ?: true
+                        val refreshOwned = (delta.refreshSymbol == null ||
+                            delta.refreshTicket == lastAppliedRefreshTicket[delta.refreshSymbol]) &&
+                            detailOwned
+                        if (!refreshOwned) return@mapNotNull null
+                        val acceptedCaptures = delta.rawCaptures.filter { capture ->
+                            val chart = capture.payload as? RawCapturePayload.Chart
+                            val key = chart?.let { chartKey(capture.symbol, it.range) }
+                            val ticket = key?.let(delta.chartTickets::get)
+                            ticket == null || ticket == key?.let(lastAppliedChartTicket::get)
+                        }
+                        if (acceptedCaptures.isEmpty() && delta.rawCaptures.isNotEmpty()) {
+                            return@mapNotNull null
+                        }
+                        if (acceptedCaptures.size == delta.rawCaptures.size && delta.chartTickets.isEmpty()) {
+                            delta
+                        } else {
+                            val symbol = delta.refreshSymbol ?: delta.detailSymbol ?: delta.rawCaptures.firstOrNull()?.symbol
+                            delta.copy(
+                                rawCaptures = acceptedCaptures,
+                                revisions = listOfNotNull(symbol?.let(::buildRevisionInputLocked)),
+                            )
+                        }
                     } to issues.values.toList()
                 }
             }
@@ -4480,7 +4849,7 @@ class DefaultDashboardRepository(
     }
 
     private suspend fun emitUpdate() {
-        updates.emit(updates.value + 1)
+        updates.update { it + 1L }
     }
 
     private suspend fun setBackgroundWork(generation: Long, message: String?) {
@@ -4508,7 +4877,8 @@ class DefaultDashboardRepository(
     private suspend fun startEnrichment(
         symbols: List<String>,
         generation: Long,
-        skip: FreshCaptureSkip = FreshCaptureSkip(),
+        skip: FreshCaptureSkip,
+        refreshTicket: Long,
     ) {
         if (symbols.isEmpty()) return
         val previous = stateMutex.withLock {
@@ -4530,7 +4900,7 @@ class DefaultDashboardRepository(
                 val thisJob = coroutineContext.job
                 loadStarted()
                 try {
-                    runEnrichment(symbols, generation, skip)
+                    runEnrichment(symbols, generation, skip, refreshTicket)
                 } finally {
                     withContext(NonCancellable) {
                         stateMutex.withLock {
@@ -4549,9 +4919,10 @@ class DefaultDashboardRepository(
         symbols: List<String>,
         generation: Long,
         skip: FreshCaptureSkip,
+        refreshTicket: Long,
     ) {
         runEnrichmentRounds(symbols, generation) { symbol, gen, recordErrors ->
-            enrichSymbol(symbol, gen, recordErrors, skip)
+            enrichSymbol(symbol, gen, refreshTicket, recordErrors, skip)
         }
     }
 
@@ -4593,9 +4964,17 @@ class DefaultDashboardRepository(
                     }
                     // Persist recovered charts immediately; only surface issues on the final round.
                     val toApply = if (finalRound) result else result.copy(errors = emptyList())
-                    val delta = stateMutex.withLock { applyEnrichmentResultLocked(toApply) }
-                    if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
-                        unwritten.add(delta)
+                    val deltas = stateMutex.withLock {
+                        if (toApply.generation == activeProfileGeneration && !warmStartReadFailed) {
+                            applyEnrichmentResultLocked(toApply)
+                        } else {
+                            emptyList()
+                        }
+                    }
+                    deltas.forEach { delta ->
+                        if (delta.rawCaptures.isNotEmpty() || delta.revisions.isNotEmpty()) {
+                            unwritten.add(delta)
+                        }
                     }
                     applied += 1
                     if (applied % EMIT_UPDATE_BATCH == 0) {
@@ -4607,7 +4986,7 @@ class DefaultDashboardRepository(
                         emitUpdate()
                     }
                     if (applied % PERSIST_BATCH == 0) {
-                        persistPending(unwritten)
+                        persistPending(unwritten, generation)
                     }
                 }
             if (applied > 0 && applied % EMIT_UPDATE_BATCH != 0) {
@@ -4618,7 +4997,7 @@ class DefaultDashboardRepository(
                 }
                 emitUpdate()
             }
-            persistPending(unwritten)
+            persistPending(unwritten, generation)
             round += 1
         }
         setBackgroundWork(generation, "Completing market context and scoring evaluation; duration unknown")
@@ -4628,6 +5007,7 @@ class DefaultDashboardRepository(
     private suspend fun fetchYearChart(
         symbol: String,
         generation: Long,
+        refreshTicket: Long,
         recordErrors: Boolean,
     ): EnrichmentResult {
         val chartCaptures = mutableListOf<Pair<ChartRange, List<HistoricalCandle>>>()
@@ -4636,6 +5016,7 @@ class DefaultDashboardRepository(
         return EnrichmentResult(
             generation = generation,
             symbol = symbol,
+            ticket = refreshTicket,
             chartCaptures = chartCaptures,
             timeseries = null,
             dcfAnalysis = null,
@@ -4675,6 +5056,7 @@ class DefaultDashboardRepository(
     private suspend fun enrichSymbol(
         symbol: String,
         generation: Long,
+        refreshTicket: Long,
         recordErrors: Boolean,
         skip: FreshCaptureSkip = FreshCaptureSkip(),
     ): EnrichmentResult {
@@ -4762,6 +5144,7 @@ class DefaultDashboardRepository(
         return EnrichmentResult(
             generation = generation,
             symbol = symbol,
+            ticket = refreshTicket,
             chartCaptures = chartCaptures,
             timeseries = timeseries,
             fetchedTimeseries = fetchedTimeseries,
@@ -4784,12 +5167,17 @@ class DefaultDashboardRepository(
         return source to persisted.timeseries
     }
 
-    private fun applyEnrichmentResultLocked(result: EnrichmentResult): PersistenceDelta {
-        val rawCaptures = mutableListOf<RawCapture>()
+    private fun applyEnrichmentResultLocked(result: EnrichmentResult): List<PersistenceDelta> {
+        val deltas = mutableListOf<PersistenceDelta>()
+        val chartCaptures = mutableListOf<RawCapture>()
+        val chartTickets = mutableMapOf<String, Long>()
         val capturedAt = now()
 
         for ((range, candles) in result.chartCaptures) {
             val key = chartKey(result.symbol, range)
+            if (result.ticket < (lastAppliedRefreshTicket[result.symbol] ?: 0L) ||
+                result.ticket < (lastAppliedChartTicket[key] ?: 0L)
+            ) continue
             val mergedCandles = mergeHistoricalCandles(
                 symbol = result.symbol,
                 range = range,
@@ -4797,9 +5185,11 @@ class DefaultDashboardRepository(
                 incomingCandles = candles,
             )
             chartCache[key] = mergedCandles
+            lastAppliedChartTicket[key] = result.ticket
+            chartTickets[key] = result.ticket
             chartSummaries.getOrPut(result.symbol) { linkedMapOf() }[range] =
                 ChartAnalysis.buildSummary(range, mergedCandles, capturedAt)
-            rawCaptures += RawCapture(
+            chartCaptures += RawCapture(
                 symbol = result.symbol,
                 captureKind = CaptureKind.ChartCandles,
                 scopeKey = range.name,
@@ -4808,9 +5198,25 @@ class DefaultDashboardRepository(
             )
         }
 
+        if (chartCaptures.isNotEmpty()) {
+            issues.keys
+                .filter { key -> key.startsWith("${result.symbol}:enrichment:") }
+                .forEach { key -> issues[key]?.let { issue -> issues[key] = issue.copy(active = false) } }
+            appendRevisionLocked(result.symbol)
+            deltas += snapshotPersistenceDeltaLocked(chartCaptures, result.symbol).copy(
+                detailSymbol = result.symbol,
+                chartTickets = chartTickets,
+            )
+        }
+
+        if (result.ticket < (lastAppliedRefreshTicket[result.symbol] ?: 0L) ||
+            result.ticket < (lastAppliedDetailDcfTicket[result.symbol] ?: 0L)
+        ) return deltas
+
+        val dcfCaptures = mutableListOf<RawCapture>()
         result.timeseriesFromFile?.let { ts -> timeseriesCache[result.symbol] = ts }
         result.timeseries?.let { ts -> timeseriesCache[result.symbol] = ts }
-        rawCaptures += fundamentalTimeseriesCaptures(result.symbol, result.fetchedTimeseries, result.dcfAnalysis, capturedAt)
+        dcfCaptures += fundamentalTimeseriesCaptures(result.symbol, result.fetchedTimeseries, result.dcfAnalysis, capturedAt)
         result.residualFundamentals?.let { fund ->
             engine.ingestFundamentals(fund)
         }
@@ -4823,8 +5229,10 @@ class DefaultDashboardRepository(
             liveDcfResolvedSymbols += result.symbol
         }
 
-        // Clear prior enrichment issues when this pass recovered chart/DCF data.
-        if (result.chartCaptures.isNotEmpty() || result.timeseries != null || result.dcfAnalysis != null) {
+        val hasDcfData = result.timeseriesFromFile != null || result.timeseries != null ||
+            result.fetchedTimeseries.isNotEmpty() || result.residualFundamentals != null || result.dcfAnalysis != null
+        if (hasDcfData) {
+            lastAppliedDetailDcfTicket[result.symbol] = result.ticket
             issues.keys
                 .filter { key -> key.startsWith("${result.symbol}:enrichment:") }
                 .forEach { key -> issues[key]?.let { issue -> issues[key] = issue.copy(active = false) } }
@@ -4844,8 +5252,15 @@ class DefaultDashboardRepository(
             )
         }
 
-        appendRevisionLocked(result.symbol)
-        return snapshotPersistenceDeltaLocked(rawCaptures, result.symbol)
+        if (hasDcfData || result.errors.isNotEmpty()) {
+            appendRevisionLocked(result.symbol)
+            deltas += snapshotPersistenceDeltaLocked(dcfCaptures, result.symbol).copy(
+                detailSymbol = result.symbol,
+                detailBaseRefreshTickets = listOf(lastAppliedRefreshTicket[result.symbol]),
+                detailDcfTicket = if (hasDcfData) result.ticket else null,
+            )
+        }
+        return deltas
     }
 
     private fun recomputeCachedDcfLocked(
@@ -4903,6 +5318,7 @@ class DefaultDashboardRepository(
     private suspend fun resolveIssuerYield(
         symbol: String,
         companyName: String?,
+        generation: Long? = null,
     ): IssuerYieldPoint? {
         var key = symbol.uppercase()
         stateMutex.withLock { issuerYieldBySymbol[key] }?.let { return it }
@@ -4912,7 +5328,9 @@ class DefaultDashboardRepository(
         var point = withContext(ioDispatcher) {
             runCatching { lookup.lookup(symbol, name) }.getOrNull()
         } ?: return null
-        stateMutex.withLock { issuerYieldBySymbol[key] = point }
+        stateMutex.withLock {
+            if (generation == null || generation == activeProfileGeneration) issuerYieldBySymbol[key] = point
+        }
         return point
     }
 
@@ -4925,6 +5343,7 @@ class DefaultDashboardRepository(
     private suspend fun resolveComponents(
         symbol: String,
         companyName: String?,
+        generation: Long? = null,
     ): com.discountscreener.core.engine.IssuerComponentSet? {
         var key = symbol.uppercase()
         stateMutex.withLock { componentsBySymbol[key] }?.let { return it }
@@ -4934,7 +5353,9 @@ class DefaultDashboardRepository(
         var set = withContext(ioDispatcher) {
             runCatching { lookup.lookup(symbol, name) }.getOrNull()
         } ?: return null
-        stateMutex.withLock { componentsBySymbol[key] = set }
+        stateMutex.withLock {
+            if (generation == null || generation == activeProfileGeneration) componentsBySymbol[key] = set
+        }
         return set
     }
 
@@ -5106,11 +5527,16 @@ class DefaultDashboardRepository(
         yahoo: FundamentalSnapshot,
         marketPriceCents: Long?,
         allowSecondary: Boolean = true,
+        generation: Long? = null,
     ): ResidualFromDrivers.Outcome {
         var provider = residualFactsProvider?.takeIf { allowSecondary }
         var slim = provider?.fetchSievedCompanyFacts(symbol)
         if (provider != null) {
-            residualChainRan.add(symbol)
+            stateMutex.withLock {
+                if ((generation == null || generation == activeProfileGeneration) && !warmStartReadFailed) {
+                    residualChainRan.add(symbol)
+                }
+            }
         }
         return ResidualFromDrivers.compute(
             yahoo = yahoo,
@@ -5397,6 +5823,7 @@ class DefaultDashboardRepository(
         liveDcfResolvedSymbols.clear()
         revisionHistoryHydrated.clear()
         pricingHistoryHydrated.clear()
+        releaseDetailHistoryLoadsLocked()
         chartSummaries.clear()
         dipSetups.clear()
         leftoverSetups.clear()
@@ -5470,7 +5897,10 @@ class DefaultDashboardRepository(
         stopActiveProfileWork()
         discoveryCoordinator.cancelActiveJob()
         stateStore.resetWarmStartState()
-        stateMutex.withLock { resetInMemoryLocked() }
+        stateMutex.withLock {
+            resetInMemoryLocked()
+            warmStartReadFailed = false
+        }
         emitUpdate()
     }
 

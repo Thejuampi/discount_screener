@@ -70,6 +70,12 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - History detail experience that summarizes analyst-target movement and saved price history.
 - Startup splash during warm restore and one-time disclaimer gate.
 - Local warm-start persistence for tracked symbols, watchlist, issues, chart cache, revision history, and on-demand complete ticker price history.
+- Android restores saved rows at startup, then requests the same full refresh as the Refresh button.
+- Cached rows stay visible during refresh. A decision can remain provisional until its new inputs arrive.
+- Android requests that full refresh again after each profile switch.
+- Settled decision tags use the same refresh path after startup and manual Refresh.
+- A failed saved-data read preserves local data and shows an error. Refresh retries a failed warm restore.
+- Add ticker requires the profile switch to finish. The app shows a reason if Add is requested during the switch.
 - Plans tab (Android-only). See [Dip](android-plans-dip.md), [Cross](android-plans-cross.md), and [Leftover](android-plans-leftover.md).
 - Earnings tab (Android-only). See [Earnings gate](earnings-gate.md).
 - Daily V1-through-V5 evaluation capture after enrichment and market processing finish.

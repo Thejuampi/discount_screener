@@ -10,6 +10,7 @@ import com.discountscreener.android.domain.model.OpportunityListRow
 import com.discountscreener.android.domain.model.SystemStats
 import com.discountscreener.android.domain.model.TickerSearchSuggestion
 import com.discountscreener.android.domain.model.RowFreshness
+import com.discountscreener.android.domain.model.RowDecisionState
 import com.discountscreener.android.domain.model.TrackedRowState
 import com.discountscreener.android.domain.model.TrackedSymbolRow
 import com.discountscreener.android.domain.repository.DashboardRepository
@@ -466,6 +467,272 @@ class DashboardViewModelTest {
         assertEquals(0, repository.recreateDiscoveryCallCount)
         assertEquals(0, repository.refreshDiscoveryCallCount)
         assertEquals(0, viewModel.state.value.discoveryMembershipCount)
+    }
+
+    @Test
+    fun a_same_day_start_and_manual_refresh_settle_on_the_same_act_tag() = runTest(dispatcher) {
+        val saved = trackedRow("AAPL").copy(
+            state = TrackedRowState.Cached,
+            freshness = RowFreshness.Restored,
+            decisionState = RowDecisionState.Watch,
+        )
+        val current = saved.copy(
+            state = TrackedRowState.Live,
+            freshness = RowFreshness.Updated,
+            decisionState = RowDecisionState.Act,
+        )
+        val startupRepository = RecordingDashboardRepository(
+            trackedRows = listOf(saved),
+            refreshedTrackedRows = listOf(current),
+        )
+        val startupViewModel = testViewModel(startupRepository)
+
+        startupViewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        assertEquals(listOf(true), startupRepository.refreshForces)
+        assertEquals(RowDecisionState.Act, startupViewModel.state.value.trackedRows.single().decisionState)
+
+        val manualRepository = RecordingDashboardRepository(
+            trackedRows = listOf(saved),
+            refreshedTrackedRows = listOf(current),
+        )
+        val manualViewModel = testViewModel(manualRepository)
+        manualViewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+
+        assertEquals(listOf(true), manualRepository.refreshForces)
+        assertEquals(
+            manualViewModel.state.value.trackedRows.single().decisionState,
+            startupViewModel.state.value.trackedRows.single().decisionState,
+        )
+    }
+
+    @Test
+    fun an_older_same_model_snapshot_cannot_restore_watch_after_refresh_paints_act() = runTest(dispatcher) {
+        val saved = trackedRow("AAPL").copy(
+            state = TrackedRowState.Cached,
+            freshness = RowFreshness.Restored,
+            decisionState = RowDecisionState.Watch,
+        )
+        val current = saved.copy(
+            state = TrackedRowState.Live,
+            freshness = RowFreshness.Updated,
+            decisionState = RowDecisionState.Act,
+        )
+        val repository = RecordingDashboardRepository(
+            trackedRows = listOf(saved),
+            refreshedTrackedRows = listOf(current),
+        )
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+        assertEquals(RowDecisionState.Act, viewModel.state.value.trackedRows.single().decisionState)
+
+        repository.replaceTrackedRows(listOf(saved))
+        repository.holdSnapshots(captureTrackedRows = true)
+        repository.emitUpdate()
+        advanceUntilIdle()
+
+        viewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+        assertEquals(RowDecisionState.Act, viewModel.state.value.trackedRows.single().decisionState)
+
+        repository.releaseSnapshots()
+        advanceUntilIdle()
+        assertEquals(RowDecisionState.Act, viewModel.state.value.trackedRows.single().decisionState)
+    }
+
+    @Test
+    fun an_older_refresh_return_cannot_restore_watch_after_the_update_collector_paints_act() = runTest(dispatcher) {
+        val saved = trackedRow("AAPL").copy(
+            state = TrackedRowState.Cached,
+            freshness = RowFreshness.Restored,
+            decisionState = RowDecisionState.Watch,
+        )
+        val current = saved.copy(
+            state = TrackedRowState.Live,
+            freshness = RowFreshness.Updated,
+            decisionState = RowDecisionState.Act,
+        )
+        val repository = RecordingDashboardRepository(
+            trackedRows = listOf(saved),
+            refreshedTrackedRows = listOf(current),
+        )
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        repository.replaceTrackedRows(listOf(saved))
+        repository.holdStaleRefreshResponse()
+        val readsBeforeRefresh = repository.currentSnapshotCallCount
+        viewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+        assertTrue(repository.currentSnapshotCallCount > readsBeforeRefresh)
+        assertEquals(RowDecisionState.Act, viewModel.state.value.trackedRows.single().decisionState)
+
+        repository.releaseRefreshResponse()
+        advanceUntilIdle()
+        assertEquals(RowDecisionState.Act, viewModel.state.value.trackedRows.single().decisionState)
+    }
+
+    @Test
+    fun an_older_query_snapshot_cannot_restore_watch_after_refresh_paints_act() = runTest(dispatcher) {
+        val saved = trackedRow("AAPL").copy(decisionState = RowDecisionState.Watch)
+        val current = saved.copy(decisionState = RowDecisionState.Act)
+        val repository = RecordingDashboardRepository(listOf(saved), refreshedTrackedRows = listOf(current))
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        repository.replaceTrackedRows(listOf(saved))
+        repository.holdSnapshots(captureTrackedRows = true)
+        viewModel.dispatch(DashboardAction.UpdateQuery("AAPL"))
+        advanceUntilIdle()
+        viewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+        repository.releaseSnapshots()
+        advanceUntilIdle()
+
+        assertEquals(RowDecisionState.Act, viewModel.state.value.trackedRows.single().decisionState)
+    }
+
+    @Test
+    fun an_older_profile_snapshot_cannot_restore_watch_after_a_newer_update() = runTest(dispatcher) {
+        val saved = trackedRow("AAPL").copy(decisionState = RowDecisionState.Watch)
+        val current = saved.copy(decisionState = RowDecisionState.Act)
+        val repository = RecordingDashboardRepository(listOf(saved), refreshedTrackedRows = listOf(current))
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        repository.replaceTrackedRows(listOf(saved))
+        repository.holdProfileResponse()
+        viewModel.dispatch(DashboardAction.SelectProfile("dow"))
+        advanceUntilIdle()
+        repository.replaceTrackedRows(listOf(current))
+        repository.emitUpdate()
+        advanceUntilIdle()
+        repository.releaseProfileResponse()
+        advanceUntilIdle()
+
+        assertEquals(RowDecisionState.Act, viewModel.state.value.trackedRows.single().decisionState)
+    }
+
+    @Test
+    fun an_older_detail_snapshot_cannot_restore_watch_after_a_newer_update() = runTest(dispatcher) {
+        val saved = trackedRow("AAPL").copy(decisionState = RowDecisionState.Watch)
+        val current = saved.copy(decisionState = RowDecisionState.Act)
+        val repository = RecordingDashboardRepository(listOf(saved), refreshedTrackedRows = listOf(current))
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        repository.replaceTrackedRows(listOf(saved))
+        repository.holdDetailLoads(captureTrackedRows = true)
+        viewModel.dispatch(DashboardAction.OpenDetail("AAPL"))
+        advanceUntilIdle()
+        repository.replaceTrackedRows(listOf(current))
+        repository.emitUpdate()
+        advanceUntilIdle()
+        repository.releaseDetailLoads()
+        advanceUntilIdle()
+
+        assertEquals(RowDecisionState.Act, viewModel.state.value.trackedRows.single().decisionState)
+    }
+
+    @Test
+    fun a_failed_preferences_read_still_shows_the_preserved_restore_error() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            trackedRows = listOf(trackedRow("AAPL")),
+            scoringPreferencesError = IllegalStateException("SQLite read failed"),
+            bootstrapStartupPhase = DashboardStartupPhase.RestoreFailed,
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        assertEquals(DashboardStartupPhase.RestoreFailed, viewModel.state.value.startupPhase)
+        assertEquals(listOf("AAPL"), viewModel.state.value.trackedRows.map { it.symbol })
+        assertTrue(repository.refreshForces.isEmpty())
+        assertEquals(0, repository.loadDiscoveryCallCount)
+    }
+
+    @Test
+    fun a_failed_notes_read_keeps_restored_rows_and_stops_startup_writes() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            trackedRows = listOf(trackedRow("AAPL")),
+            symbolNotesError = IllegalStateException("SQLite notes read failed"),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        assertEquals(DashboardStartupPhase.RestoreFailed, viewModel.state.value.startupPhase)
+        assertEquals(listOf("AAPL"), viewModel.state.value.trackedRows.map { it.symbol })
+        assertTrue(repository.refreshForces.isEmpty())
+        assertEquals(0, repository.loadDiscoveryCallCount)
+    }
+
+    @Test
+    fun a_failed_discovery_read_keeps_restored_rows_and_stops_startup_writes() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            trackedRows = listOf(trackedRow("AAPL")),
+            discoveryLoadError = IllegalStateException("SQLite discovery read failed"),
+        )
+        val viewModel = testViewModel(repository)
+
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+
+        assertEquals(DashboardStartupPhase.RestoreFailed, viewModel.state.value.startupPhase)
+        assertEquals(listOf("AAPL"), viewModel.state.value.trackedRows.map { it.symbol })
+        assertTrue(repository.refreshForces.isEmpty())
+    }
+
+    @Test
+    fun manual_refresh_retries_all_saved_reads_before_provider_writes() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(
+            trackedRows = listOf(trackedRow("AAPL")),
+            symbolNotesError = IllegalStateException("SQLite notes read failed"),
+        )
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+        assertEquals(DashboardStartupPhase.RestoreFailed, viewModel.state.value.startupPhase)
+        assertTrue(repository.refreshForces.isEmpty())
+
+        viewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+        assertTrue(repository.refreshForces.isEmpty())
+
+        repository.clearSymbolNotesError()
+        viewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+        assertEquals(DashboardStartupPhase.Ready, viewModel.state.value.startupPhase)
+        assertEquals(listOf(true), repository.refreshForces)
+    }
+
+    @Test
+    fun refresh_after_a_failed_profile_switch_retries_the_current_profile() = runTest(dispatcher) {
+        val repository = RecordingDashboardRepository(trackedRows = listOf(trackedRow("AAPL")))
+        val viewModel = testViewModel(repository)
+        viewModel.dispatch(DashboardAction.Start)
+        advanceUntilIdle()
+        repository.refreshForces.clear()
+
+        repository.profileSwitchRestoreFails = true
+        viewModel.dispatch(DashboardAction.SelectProfile("merval"))
+        advanceUntilIdle()
+        assertEquals(DashboardStartupPhase.RestoreFailed, viewModel.state.value.startupPhase)
+
+        viewModel.dispatch(DashboardAction.Refresh)
+        advanceUntilIdle()
+        assertEquals(listOf(true), repository.refreshForces)
+        assertEquals(DashboardStartupPhase.Ready, viewModel.state.value.startupPhase)
+        assertEquals("dow", viewModel.state.value.currentProfile)
     }
 
     @Test
@@ -1477,12 +1744,9 @@ class DashboardViewModelTest {
         assertEquals(row.compositeScoreBase, row.compositeScore)
     }
 
-    /**
-     * A load tick under the previous model must still move refresh progress. Dropping the whole
-     * snapshot is what froze the Opportunities tab after a chip change.
-     */
+    /** A delayed progress snapshot from the previous model cannot revive a finished pass. */
     @Test
-    fun a_stale_model_snapshot_still_applies_refresh_progress() = runTest(dispatcher) {
+    fun a_stale_model_snapshot_cannot_restore_old_refresh_progress() = runTest(dispatcher) {
         var repository = RecordingDashboardRepository(
             opportunityRows = listOf(listRow("LEGACY")),
             aggressiveRows = listOf(listRow("AGGRO", compositeScore = 27)),
@@ -1500,7 +1764,8 @@ class DashboardViewModelTest {
         repository.releaseSnapshots()
         advanceUntilIdle()
 
-        assertEquals(7, viewModel.state.value.refreshCompletedSymbols)
+        assertEquals(DashboardStartupPhase.Ready, viewModel.state.value.startupPhase)
+        assertEquals(0, viewModel.state.value.refreshCompletedSymbols)
     }
 
     @Test
@@ -2025,6 +2290,7 @@ class DashboardViewModelTest {
 
     private class RecordingDashboardRepository(
         private val trackedRows: List<TrackedSymbolRow> = emptyList(),
+        private val refreshedTrackedRows: List<TrackedSymbolRow>? = null,
         private val opportunityRows: List<OpportunityListRow> = emptyList(),
         private val universeRows: List<OpportunityListRow> = opportunityRows,
         private val aggressiveRows: List<OpportunityListRow> = opportunityRows,
@@ -2042,6 +2308,10 @@ class DashboardViewModelTest {
         private val selectProfileDelayMs: Long = 0,
         private val detailLoadError: Throwable? = null,
         private val detailRefreshError: Throwable? = null,
+        private val scoringPreferencesError: Throwable? = null,
+        private var symbolNotesError: Throwable? = null,
+        private val discoveryLoadError: Throwable? = null,
+        private val bootstrapStartupPhase: DashboardStartupPhase = DashboardStartupPhase.Ready,
     ) : DashboardRepository {
         val symbolNotes = mutableMapOf<String, String>()
         var saveSnapshotCallCount = 0
@@ -2072,6 +2342,10 @@ class DashboardViewModelTest {
             liveAggressiveRows = rows
         }
 
+        fun replaceTrackedRows(rows: List<TrackedSymbolRow>) {
+            liveTrackedRows = rows
+        }
+
         fun setDetailProjection(
             detail: SymbolDetail?,
             projectedDetail: ProjectedDetailData?,
@@ -2094,8 +2368,34 @@ class DashboardViewModelTest {
         private var holdRefreshCompletedSymbols: Int? = null
         private var holdRefreshTargetSymbols: Int = 0
         private var holdStartupPhase: DashboardStartupPhase? = null
+        private var captureTrackedRowsOnHold = false
         var regimeScoringEnabled: Boolean = ScoringPreferences.DEFAULT_REGIME_ENABLED
             private set
+        val refreshForces = mutableListOf<Boolean>()
+        var profileSwitchRestoreFails = false
+        private var liveTrackedRows = trackedRows
+        private var staleRefreshResponseHold: CompletableDeferred<Unit>? = null
+        private var profileResponseHold: CompletableDeferred<Unit>? = null
+
+        fun clearSymbolNotesError() {
+            symbolNotesError = null
+        }
+
+        fun holdProfileResponse() {
+            profileResponseHold = CompletableDeferred()
+        }
+
+        fun releaseProfileResponse() {
+            profileResponseHold?.complete(Unit)
+        }
+
+        fun holdStaleRefreshResponse() {
+            staleRefreshResponseHold = CompletableDeferred()
+        }
+
+        fun releaseRefreshResponse() {
+            staleRefreshResponseHold?.complete(Unit)
+        }
 
         fun holdSnapshots(
             model: OpportunityScoringModel? = null,
@@ -2103,6 +2403,7 @@ class DashboardViewModelTest {
             refreshCompletedSymbols: Int = 7,
             refreshTargetSymbols: Int = 20,
             startupPhase: DashboardStartupPhase = DashboardStartupPhase.Refreshing,
+            captureTrackedRows: Boolean = false,
         ) {
             snapshotHold = CompletableDeferred()
             holdSnapshotModel = model
@@ -2110,6 +2411,7 @@ class DashboardViewModelTest {
             holdRefreshCompletedSymbols = refreshCompletedSymbols
             holdRefreshTargetSymbols = refreshTargetSymbols
             holdStartupPhase = startupPhase
+            captureTrackedRowsOnHold = captureTrackedRows
         }
 
         fun releaseSnapshots() {
@@ -2117,10 +2419,12 @@ class DashboardViewModelTest {
         }
 
         private var detailHold: CompletableDeferred<Unit>? = null
+        private var captureTrackedRowsOnDetailHold = false
 
         /** Holds the fetch a detail open makes, so the screen can be read while it is still out. */
-        fun holdDetailLoads() {
+        fun holdDetailLoads(captureTrackedRows: Boolean = false) {
             detailHold = CompletableDeferred()
+            captureTrackedRowsOnDetailHold = captureTrackedRows
         }
 
         fun releaseDetailLoads() {
@@ -2134,7 +2438,15 @@ class DashboardViewModelTest {
             opportunityScoringModel: OpportunityScoringModel,
         ): DashboardSnapshot {
             requestedOpportunityModels += opportunityScoringModel
-            return emptySnapshot(opportunityScoringModel)
+            return emptySnapshot(
+                opportunityScoringModel,
+                startupPhase = bootstrapStartupPhase,
+                statusMessage = if (bootstrapStartupPhase == DashboardStartupPhase.RestoreFailed) {
+                    "Could not read saved data. Data is preserved; retry Refresh."
+                } else {
+                    null
+                },
+            )
         }
 
         override suspend fun currentSnapshot(
@@ -2148,6 +2460,7 @@ class DashboardViewModelTest {
             lastRequestedOpportunityModel = opportunityScoringModel
             requestedOpportunityModels += opportunityScoringModel
             var capturedRegime = regimeScoringEnabled
+            val capturedTrackedRows = liveTrackedRows
             var hold = snapshotHold
             var held = hold != null &&
                 !hold.isCompleted &&
@@ -2164,6 +2477,12 @@ class DashboardViewModelTest {
                     refreshCompletedSymbols = holdRefreshCompletedSymbols ?: 0,
                     refreshTargetSymbols = holdRefreshTargetSymbols,
                     startupPhase = holdStartupPhase ?: snapshot.startupPhase,
+                    trackedRows = if (captureTrackedRowsOnHold) capturedTrackedRows else snapshot.trackedRows,
+                    trackedSymbols = if (captureTrackedRowsOnHold) {
+                        capturedTrackedRows.map { it.symbol }
+                    } else {
+                        snapshot.trackedSymbols
+                    },
                 )
             }
             return snapshot
@@ -2245,7 +2564,17 @@ class DashboardViewModelTest {
             force: Boolean,
         ): DashboardSnapshot {
             requestedOpportunityModels += opportunityScoringModel
+            refreshForces += force
             refreshAllError?.let { throw it }
+            val hold = staleRefreshResponseHold
+            val staleResponse = if (hold != null) emptySnapshot(opportunityScoringModel) else null
+            if (force) liveTrackedRows = refreshedTrackedRows ?: liveTrackedRows
+            if (hold != null) {
+                emitUpdate()
+                hold.await()
+                staleRefreshResponseHold = null
+                return staleResponse!!
+            }
             return emptySnapshot(opportunityScoringModel)
         }
 
@@ -2257,9 +2586,11 @@ class DashboardViewModelTest {
         ): DashboardSnapshot {
             lastOpenedSymbol = symbol
             detailLoadError?.let { error -> throw error }
+            val capturedTrackedRows = liveTrackedRows
             detailHold?.await()
             return emptySnapshot(opportunityScoringModel).copy(
                 selectedScoreRow = fetchedScoreRows[symbol],
+                trackedRows = if (captureTrackedRowsOnDetailHold) capturedTrackedRows else liveTrackedRows,
             )
         }
 
@@ -2314,13 +2645,22 @@ class DashboardViewModelTest {
             if (selectProfileDelayMs > 0) {
                 delay(selectProfileDelayMs)
             }
+            if (profileSwitchRestoreFails) {
+                return emptySnapshot(
+                    opportunityScoringModel = opportunityScoringModel,
+                    startupPhase = DashboardStartupPhase.RestoreFailed,
+                    statusMessage = "Could not read saved data. Data is preserved; retry Refresh.",
+                )
+            }
             currentProfile = profile
             finishedProfileSelects += profile
-            return emptySnapshot(
+            val snapshot = emptySnapshot(
                 opportunityScoringModel = opportunityScoringModel,
                 startupPhase = DashboardStartupPhase.SwitchingProfile,
                 statusMessage = "Switching to ${profile.uppercase()}…",
             )
+            profileResponseHold?.await()
+            return snapshot
         }
 
         override suspend fun toggleWatchlist(
@@ -2404,6 +2744,7 @@ class DashboardViewModelTest {
         var persistedScoringPreferences: ScoringPreferences? = null
 
         override suspend fun loadScoringPreferences(): ScoringPreferences {
+            scoringPreferencesError?.let { throw it }
             // A store read suspends. That gap is what lets the update collector snapshot
             // under the default chip before restore.
             yield()
@@ -2416,7 +2757,10 @@ class DashboardViewModelTest {
         }
 
         /** Same rule as the store: a blank note deletes, and the trim happens on the way in. */
-        override suspend fun loadSymbolNotes(): Map<String, String> = symbolNotes.toMap()
+        override suspend fun loadSymbolNotes(): Map<String, String> {
+            symbolNotesError?.let { throw it }
+            return symbolNotes.toMap()
+        }
 
         override suspend fun saveSymbolNote(symbol: String, note: String) {
             var trimmed = note.trim()
@@ -2425,6 +2769,7 @@ class DashboardViewModelTest {
 
         override suspend fun loadDiscoverySnapshot(): DiscoverySnapshot {
             loadDiscoveryCallCount++
+            discoveryLoadError?.let { throw it }
             return DiscoverySnapshot()
         }
 
@@ -2468,8 +2813,8 @@ class DashboardViewModelTest {
             return DashboardSnapshot(
                 availableProfiles = emptyList(),
                 currentProfile = currentProfile,
-                trackedSymbols = trackedRows.map { it.symbol },
-                trackedRows = trackedRows,
+                trackedSymbols = liveTrackedRows.map { it.symbol },
+                trackedRows = liveTrackedRows,
                 watchlistSymbols = emptyList(),
                 candidateRows = emptyList(),
                 opportunityRows = rows,

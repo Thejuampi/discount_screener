@@ -558,7 +558,9 @@ private fun SystemContent(state: DashboardUiState, onAction: (DashboardAction) -
 }
 
 internal fun systemFeedProgressLabel(state: DashboardUiState): String? =
-    if (state.startupPhase == com.discountscreener.android.domain.model.DashboardStartupPhase.Ready) {
+    if (state.startupPhase == com.discountscreener.android.domain.model.DashboardStartupPhase.Ready ||
+        state.startupPhase == com.discountscreener.android.domain.model.DashboardStartupPhase.RestoreFailed
+    ) {
         null
     } else {
         "Progress: ${state.refreshCompletedSymbols}/${state.refreshTargetSymbols.coerceAtLeast(state.trackedSymbols.size)}"

@@ -32,6 +32,7 @@ enum class MarketReadStatus {
 
 enum class DashboardStartupPhase {
     Restoring,
+    RestoreFailed,
     SwitchingProfile,
     ShowingCached,
     Refreshing,
