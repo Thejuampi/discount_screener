@@ -6,6 +6,8 @@ Archived files explain past decisions. They do not define current behavior.
 
 Read the [2026-09-26 unmerged change review](unmerged-change-review-2026-09-26.md) for the branch disposition and recovery records.
 
+Read the [closure record](unmerged-change-closure-2026-09-26.md) for final audit and stash decisions.
+
 Use these current sources first:
 
 1. `shared/contracts`

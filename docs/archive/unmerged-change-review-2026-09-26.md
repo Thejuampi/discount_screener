@@ -13,7 +13,7 @@ This review closed the local branch backlog. No historical branch below carries 
 | `lab/valuation-python` | Reject as product code. Archive its research record. | It records a failed goal and reproducible analysis. |
 | `r10` | Reject as product code. Archive its stopped valuation trial. | Its QA round stopped before acceptance. |
 | `roic-on` | Reject as product code. Archive its research candidate. | The comparison harness did not run. |
-| `codex/adsk-valuation-integrity-audit` | Track the open repair in [issue #61](https://github.com/Thejuampi/discount_screener/issues/61). | Tests pass, but review found production blockers. |
+| `codex/adsk-valuation-integrity-audit` | Reject the product merge. | The [closure record](unmerged-change-closure-2026-09-26.md) records the integration failures and recovery archive. |
 
 ## Recovery Records
 

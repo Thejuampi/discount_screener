@@ -50,11 +50,13 @@ Use this page to find the current source for each concern.
 - [Diagnostics](diagnostics/)
 - [Quant references](references/quant/)
 - [Lab evidence](../lab/)
+- [ORCL scenario research](../lab/orcl/README.md)
 
 ## History
 
 - [Documentation archive](archive/README.md)
 - [Unmerged change review, 2026-09-26](archive/unmerged-change-review-2026-09-26.md)
+- [Unmerged change closure, 2026-09-26](archive/unmerged-change-closure-2026-09-26.md)
 
 Archived files do not define current behavior.
 
