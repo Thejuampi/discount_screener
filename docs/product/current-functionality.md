@@ -128,6 +128,8 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - The system uses Yahoo Finance public endpoints/HTML pages for quotes, fundamentals, coverage, analyst targets, cash-flow history, candles, and option chains.
 - Android earnings also reads EDGAR 8-K item 2.02 for report dates and Alpha Vantage for SUE history. The Alpha Vantage key lives on device. It never enters git.
 - Provider parsing must handle missing, sparse, stale, or unavailable fields without inventing values.
+- Android requests compact Yahoo summaries and selected batch quote fields. Earnings consensus requests its own module.
+- [Yahoo loading research](../research/yahoo-api-loading-2026-09-25.md) records endpoint limits, captured samples, and payload measurements.
 
 ## Nonfunctional Requirements
 

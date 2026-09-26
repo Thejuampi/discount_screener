@@ -242,6 +242,21 @@ tasks.withType<Test>().configureEach {
         isIncludeNoLocationClasses = true
         excludes = listOf("jdk.internal.*")
     }
+    // These wall-clock probes need an idle test worker for meaningful load measurements.
+    // The validation script runs them separately. A direct test invocation still includes all tests.
+    val loadTimingProbes = listOf(
+        "com.discountscreener.android.data.repository.LoadCostProbeTest",
+        "com.discountscreener.android.data.repository.InteractiveLoadProbeTest",
+    )
+    when (providers.gradleProperty("loadTimingProbes").getOrElse("all")) {
+        "all" -> Unit
+        "exclude" -> filter { loadTimingProbes.forEach(::excludeTestsMatching) }
+        "only" -> {
+            filter { loadTimingProbes.forEach(::includeTestsMatching) }
+            maxParallelForks = 1
+        }
+        else -> throw GradleException("loadTimingProbes must be all, exclude, or only")
+    }
 }
 
 /**

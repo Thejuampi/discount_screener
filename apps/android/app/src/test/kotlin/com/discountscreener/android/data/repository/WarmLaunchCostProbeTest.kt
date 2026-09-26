@@ -11,7 +11,9 @@ import com.discountscreener.core.model.ChartRange
 import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ViewFilter
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
@@ -56,10 +58,13 @@ class WarmLaunchCostProbeTest {
             first.bootstrap(ViewFilter(), null, ChartRange.Year, model)
             first.refreshAll(ViewFilter(), null, ChartRange.Year, model)
             awaitQuiet(firstHttp)
+            // A quiet network can still leave valuation and cache writes in progress.
+            withTimeout(DEADLINE_MILLIS) { first.loadInFlight.first { !it } }
 
             second.bootstrap(ViewFilter(), null, ChartRange.Year, model)
             second.refreshAll(ViewFilter(), null, ChartRange.Year, model)
             awaitQuiet(secondHttp)
+            withTimeout(DEADLINE_MILLIS) { second.loadInFlight.first { !it } }
 
             println(
                 buildString {
