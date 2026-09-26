@@ -11,7 +11,7 @@ import { DashboardPanel } from "./components/DashboardPanel";
 import { DashboardEditionToggle, DashboardV2Panel, type DashboardEdition } from "./components/DashboardV2Panel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
-import { singleFlight } from "./singleFlight";
+import { canPublishModelRows, createGenerationRefresh } from "./opportunityRefresh";
 import { TickerSearch } from "./components/TickerSearch";
 import { EstimatesPanel } from "./components/EstimatesPanel";
 import { Toaster } from "./toast";
@@ -60,6 +60,7 @@ export default function App() {
   });
   /** Launch --profile / DS_UNIVERSE_PROFILE lock: backend wins over localStorage. */
   const [profileLocked, setProfileLocked] = useState(false);
+  const [universeSwitching, setUniverseSwitching] = useState(false);
   const [assetFilter, setAssetFilter] = useState<"all" | "stock" | "etf" | "crypto">(() => {
     const saved = localStorage.getItem("ds_asset_filter");
     if (saved === "stock" || saved === "etf" || saved === "crypto" || saved === "all") return saved;
@@ -97,6 +98,8 @@ export default function App() {
   const requestedModelRef = useRef(scoringModel);
   const modelSwitchingRef = useRef(false);
   const dataGenerationRef = useRef(0);
+  const universeGenerationRef = useRef(0);
+  const universeSwitchingRef = useRef(false);
   useSignalAlerts(rows, scoringModel);
   useEmailNotifications(rows, scoringModel);
   const handleViewModeChange = (v: ViewMode) => {
@@ -142,7 +145,7 @@ export default function App() {
     const bridge: AgentBridge = {
       version: 1,
       openSymbol: (symbol: string) => {
-        var sym = String(symbol || "").trim().toUpperCase();
+        const sym = String(symbol || "").trim().toUpperCase();
         if (!sym) return;
         setFilter("");
         openSymbol(sym);
@@ -167,7 +170,7 @@ export default function App() {
     };
     (window as Window & { __DS_AGENT__?: AgentBridge }).__DS_AGENT__ = bridge;
     return () => {
-      var w = window as Window & { __DS_AGENT__?: AgentBridge };
+      const w = window as Window & { __DS_AGENT__?: AgentBridge };
       if (w.__DS_AGENT__ === bridge) delete w.__DS_AGENT__;
     };
   }, [
@@ -198,33 +201,31 @@ export default function App() {
 
   // The callback reads mutable coordination refs only when invoked, never during render.
   // eslint-disable-next-line react-hooks/refs
-  const refresh = useMemo(() => singleFlight(async () => {
-    if (modelSwitchingRef.current) return;
-    const generation = dataGenerationRef.current;
-    const [opportunities, status] = await Promise.allSettled([
-      api.getOpportunities(),
-      api.getFeedStatus(),
-    ]);
-    if (generation !== dataGenerationRef.current || modelSwitchingRef.current) return;
-    if (opportunities.status === "fulfilled") {
-      setRows(opportunities.value);
-    } else {
-      console.error("opportunity refresh failed", opportunities.reason);
-    }
+  const refresh = useMemo(() => createGenerationRefresh({
+    generation: () => `${dataGenerationRef.current}:${universeGenerationRef.current}`,
+    canRefresh: () => !modelSwitchingRef.current && !universeSwitchingRef.current,
+    fetch: () => Promise.allSettled([api.getOpportunities(), api.getFeedStatus()] as const),
+    publish: ([opportunities, status]) => {
+      if (opportunities.status === "fulfilled") {
+        setRows(opportunities.value);
+      } else {
+        console.error("opportunity refresh failed", opportunities.reason);
+      }
 
-    if (status.status === "fulfilled") {
-      setSymbolsLoaded(status.value.symbols_loaded);
-      setSymbolsTotal(status.value.symbols_total);
-      if (status.value.profile_name) {
-        setUniverseProfile(status.value.profile_name);
+      if (status.status === "fulfilled") {
+        setSymbolsLoaded(status.value.symbols_loaded);
+        setSymbolsTotal(status.value.symbols_total);
+        if (status.value.profile_name) {
+          setUniverseProfile(status.value.profile_name);
+        }
+        if (typeof status.value.profile_locked === "boolean") {
+          setProfileLocked(status.value.profile_locked);
+        }
+      } else {
+        console.error("feed status refresh failed", status.reason);
       }
-      if (typeof status.value.profile_locked === "boolean") {
-        setProfileLocked(status.value.profile_locked);
-      }
-    } else {
-      console.error("feed status refresh failed", status.reason);
-    }
-  }), []);
+    },
+  }), [setRows, setSymbolsLoaded, setSymbolsTotal, setUniverseProfile, setProfileLocked]);
 
   useEffect(() => {
     let cancelled = false;
@@ -262,12 +263,18 @@ export default function App() {
 
   const toggleRegimeScoring = async () => {
     const next = !regimeScoring;
+    const dataGeneration = dataGenerationRef.current;
+    const universeGeneration = universeGenerationRef.current;
     try {
       const enabled = await api.setRegimeScoringEnabled(next);
       setRegimeScoring(enabled);
       localStorage.setItem(REGIME_SCORING_KEY, enabled ? "1" : "0");
       const nextRows = await api.getOpportunities();
-      setRows(nextRows);
+      if (dataGeneration === dataGenerationRef.current &&
+          universeGeneration === universeGenerationRef.current &&
+          !modelSwitchingRef.current && !universeSwitchingRef.current) {
+        setRows(nextRows);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -287,6 +294,8 @@ export default function App() {
     if (modelSwitchingRef.current || next === scoringModelRef.current) return;
     modelSwitchingRef.current = true;
     const generation = ++dataGenerationRef.current;
+    const initialUniverseGeneration = universeGenerationRef.current;
+    let refreshAfterUniverseChange = false;
     try {
       let backendModel = scoringModelRef.current;
       while (true) {
@@ -300,13 +309,23 @@ export default function App() {
         }
         if (requestedModelRef.current !== target) continue;
         if (target === scoringModelRef.current) break;
+        const universeGeneration = universeGenerationRef.current;
         const [nextRows, status] = await Promise.all([api.getOpportunities(), api.getFeedStatus()]);
         if (requestedModelRef.current !== target) continue;
         scoringModelRef.current = target;
-        setRows(nextRows);
         setScoringModel(target);
-        setSymbolsLoaded(status.symbols_loaded);
-        setSymbolsTotal(status.symbols_total);
+        if (canPublishModelRows(
+          initialUniverseGeneration,
+          universeGeneration,
+          universeGenerationRef.current,
+          universeSwitchingRef.current,
+        )) {
+          setRows(nextRows);
+          setSymbolsLoaded(status.symbols_loaded);
+          setSymbolsTotal(status.symbols_total);
+        } else {
+          refreshAfterUniverseChange = true;
+        }
         localStorage.setItem(SCORING_STORAGE_KEY, target);
         break;
       }
@@ -315,12 +334,20 @@ export default function App() {
       requestedModelRef.current = scoringModelRef.current;
       try { await api.setScoringModel(scoringModelRef.current); } catch (rollbackError) { console.error(rollbackError); }
     } finally {
-      if (generation === dataGenerationRef.current) modelSwitchingRef.current = false;
+      if (generation === dataGenerationRef.current) {
+        modelSwitchingRef.current = false;
+        if (refreshAfterUniverseChange || initialUniverseGeneration !== universeGenerationRef.current) {
+          void refresh();
+        }
+      }
     }
   };
 
   const handleUniverseChange = async (name: string) => {
-    if (!name || name === universeProfile || profileLocked) return;
+    if (!name || name === universeProfile || profileLocked || universeSwitchingRef.current) return;
+    const generation = ++universeGenerationRef.current;
+    universeSwitchingRef.current = true;
+    setUniverseSwitching(true);
     setUniverseProfile(name);
     localStorage.setItem(UNIVERSE_STORAGE_KEY, name);
     setSelectedSymbol(null);
@@ -328,14 +355,15 @@ export default function App() {
     setSymbolsLoaded(0);
     try {
       const status = await api.setUniverseProfile(name);
+      if (generation !== universeGenerationRef.current) return;
       setSymbolsTotal(status.symbols_total);
       setSymbolsLoaded(status.symbols_loaded);
       setUniverseProfile(status.name);
       setProfileLocked(!!status.profile_locked);
       // Persist canonical id only (never alias `test`).
       localStorage.setItem(UNIVERSE_STORAGE_KEY, status.name);
-      void refresh();
     } catch (e) {
+      if (generation !== universeGenerationRef.current) return;
       console.error("universe switch failed", e);
       // Restore UI from backend if switch was rejected (e.g. locked).
       try {
@@ -344,19 +372,30 @@ export default function App() {
         setSymbolsTotal(status.symbols_total);
         setSymbolsLoaded(status.symbols_loaded);
         setProfileLocked(!!status.profile_locked);
+        localStorage.setItem(UNIVERSE_STORAGE_KEY, canonicalUniverseName(status.name));
       } catch (restoreErr) {
         console.error(restoreErr);
+      }
+    } finally {
+      if (generation === universeGenerationRef.current) {
+        universeSwitchingRef.current = false;
+        setUniverseSwitching(false);
+        void refresh();
       }
     }
   };
 
   useEffect(() => {
     if (!modelReady) return;
+    const generation = ++universeGenerationRef.current;
+    universeSwitchingRef.current = true;
     const saved = localStorage.getItem(UNIVERSE_STORAGE_KEY);
     // If launch locked the profile, backend wins — never re-apply localStorage sp500.
     void (async () => {
       try {
         const current = await api.getUniverseProfile();
+        if (generation !== universeGenerationRef.current) return;
+        setUniverseSwitching(true);
         setProfileLocked(!!current.profile_locked);
         const plan = planUniverseBoot(
           {
@@ -377,12 +416,14 @@ export default function App() {
           return;
         }
         const status = await api.setUniverseProfile(plan.name);
+        if (generation !== universeGenerationRef.current) return;
         setUniverseProfile(status.name);
         setSymbolsTotal(status.symbols_total);
         setSymbolsLoaded(status.symbols_loaded);
         setProfileLocked(!!status.profile_locked);
         localStorage.setItem(UNIVERSE_STORAGE_KEY, canonicalUniverseName(status.name));
       } catch (e) {
+        if (generation !== universeGenerationRef.current) return;
         console.error("universe restore failed", e);
         try {
           await api.startFeed();
@@ -390,7 +431,11 @@ export default function App() {
           console.error(feedErr);
         }
       } finally {
-        void refresh();
+        if (generation === universeGenerationRef.current) {
+          universeSwitchingRef.current = false;
+          setUniverseSwitching(false);
+          void refresh();
+        }
       }
     })();
   }, [refresh, modelReady]);
@@ -550,7 +595,7 @@ export default function App() {
             title={profileLocked ? t("universe.lockedHint") : t("universe.hint")}
             onChange={(e) => void handleUniverseChange(e.target.value)}
             aria-label={t("universe.label")}
-            disabled={profileLocked}
+            disabled={profileLocked || universeSwitching}
           >
             {(universeProfiles.length > 0
               ? universeProfiles

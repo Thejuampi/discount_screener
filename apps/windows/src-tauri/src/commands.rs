@@ -3,6 +3,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::State;
@@ -39,15 +40,27 @@ const SNAPSHOT_INTERVAL_SECS: u64 = 3600; // capture once per hour
 
 struct ValuationInflightGuard {
     symbol: String,
-    inflight: Arc<Mutex<HashSet<String>>>,
+    generation: u64,
+    inflight: Arc<Mutex<HashSet<(u64, String)>>>,
 }
 
 impl Drop for ValuationInflightGuard {
     fn drop(&mut self) {
         if let Ok(mut inflight) = self.inflight.lock() {
-            inflight.remove(&self.symbol);
+            inflight.remove(&(self.generation, self.symbol.clone()));
         }
     }
+}
+
+fn claim_demand_valuation(
+    inflight: &Mutex<HashSet<(u64, String)>>,
+    generation: u64,
+    symbol: &str,
+) -> bool {
+    inflight
+        .lock()
+        .unwrap()
+        .insert((generation, symbol.to_string()))
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -182,7 +195,16 @@ fn build_opportunity_rows(
     apply_regime: bool,
     regime_snapshot: Option<crate::regime::MarketRegime>,
 ) -> Vec<OpportunityRow> {
-    use crate::regime::{score_regime_fit, RegimeScoringPolicy, ScoreSide};
+    build_opportunity_rows_with_hook(screener, apply_regime, regime_snapshot, || {})
+}
+
+fn build_opportunity_rows_with_hook<F: FnOnce()>(
+    screener: &std::sync::Mutex<crate::engine::ScreenerState>,
+    apply_regime: bool,
+    regime_snapshot: Option<crate::regime::MarketRegime>,
+    projection_started: F,
+) -> Vec<OpportunityRow> {
+    use crate::regime::{RegimeScoringPolicy, ScoreSide};
 
     let policy_long = regime_snapshot
         .as_ref()
@@ -191,27 +213,105 @@ fn build_opportunity_rows(
         .as_ref()
         .and_then(|r| RegimeScoringPolicy::from_regime(r, ScoreSide::Short));
 
+    // Freeze one coherent view. Scoring and price paths then run without the feed lock.
+    let projection = capture_opportunity_projection(screener);
+    project_opportunity_rows(
+        projection,
+        apply_regime,
+        policy_long,
+        policy_short,
+        projection_started,
+    )
+}
+
+struct OpportunityProjection {
+    model: ScoringModel,
+    rows: Vec<OpportunityProjectionInput>,
+}
+
+struct OpportunityProjectionInput {
+    row: CandidateRow,
+    daily: Option<crate::engine::ChartSummary>,
+    weekly: Option<crate::engine::ChartSummary>,
+    hourly: Option<crate::engine::ChartSummary>,
+    daily_candles: Vec<HistoricalCandle>,
+    dcf_analysis: Option<crate::dcf_model::DcfAnalysis>,
+    crypto_setup: Option<(i32, &'static str)>,
+}
+
+fn capture_opportunity_projection(
+    screener: &std::sync::Mutex<crate::engine::ScreenerState>,
+) -> OpportunityProjection {
     let mut screener = screener.lock().unwrap();
     // Purge/replace stale FCFF caches for financials before scoring/list DCF values.
     let recon_syms: Vec<String> = screener.fundamentals.keys().cloned().collect();
     for sym in recon_syms {
         screener.ensure_model_routed_valuation(&sym);
     }
-    let rows = screener.candidate_rows();
-    let benchmarks = compute_sector_benchmarks(&rows);
-    rows.into_iter()
+    let model = ScoringModel::parse(&screener.scoring_model);
+    let rows = screener
+        .candidate_rows()
+        .into_iter()
         .map(|row| {
-            let daily = screener.chart_summaries.get(&row.symbol);
-            let weekly = screener.weekly_summaries.get(&row.symbol);
-            let hourly = screener.hourly_summaries.get(&row.symbol);
-            let daily_candles_default: Vec<HistoricalCandle> = Vec::new();
-            let daily_candles_ref = screener
-                .daily_candles
-                .get(&row.symbol)
-                .unwrap_or(&daily_candles_default);
+            let symbol = row.symbol.as_str();
+            OpportunityProjectionInput {
+                daily: screener.chart_summaries.get(symbol).cloned(),
+                weekly: screener.weekly_summaries.get(symbol).cloned(),
+                hourly: screener.hourly_summaries.get(symbol).cloned(),
+                daily_candles: screener
+                    .daily_candles
+                    .get(symbol)
+                    .cloned()
+                    .unwrap_or_default(),
+                dcf_analysis: screener.selected_dcf_analysis(symbol).cloned(),
+                crypto_setup: screener
+                    .crypto_metrics
+                    .get(symbol)
+                    .map(|metrics| (metrics.crypto_score, metrics.crypto_label)),
+                row,
+            }
+        })
+        .collect();
+    OpportunityProjection { model, rows }
+}
+
+fn project_opportunity_rows<F: FnOnce()>(
+    projection: OpportunityProjection,
+    apply_regime: bool,
+    policy_long: Option<crate::regime::RegimeScoringPolicy>,
+    policy_short: Option<crate::regime::RegimeScoringPolicy>,
+    projection_started: F,
+) -> Vec<OpportunityRow> {
+    use crate::regime::score_regime_fit;
+
+    let model = projection.model;
+    let rows: Vec<CandidateRow> = projection
+        .rows
+        .iter()
+        .map(|input| input.row.clone())
+        .collect();
+    let benchmarks = compute_sector_benchmarks(&rows);
+    let mut projection_started = Some(projection_started);
+    projection.rows.into_iter()
+        .map(|input| {
+            if let Some(hook) = projection_started.take() {
+                hook();
+            }
+            let OpportunityProjectionInput {
+                row,
+                daily,
+                weekly,
+                hourly,
+                daily_candles,
+                dcf_analysis,
+                crypto_setup,
+            } = input;
+            let daily = daily.as_ref();
+            let weekly = weekly.as_ref();
+            let hourly = hourly.as_ref();
+            let daily_candles_ref = daily_candles.as_slice();
             let bench = row.sector_name.as_ref().and_then(|s| benchmarks.get(s));
-            let model = ScoringModel::parse(&screener.scoring_model);
-            let dcf_analysis = screener.selected_dcf_analysis(&row.symbol);
+            let dcf_analysis = dcf_analysis.as_ref();
             let equity = !is_crypto(row.symbol.as_str()) && !is_etf(row.symbol.as_str());
             let (
                 fund_score,
@@ -394,8 +494,8 @@ fn build_opportunity_rows(
             // V3: setup_score == composite (Android ranking parity).
             // V2 / crypto: Windows setup helper (or crypto cycle score).
             let (setup_score, setup_label) = if is_crypto(sym_str) {
-                if let Some(cm) = screener.crypto_metrics.get(sym_str) {
-                    (cm.crypto_score, cm.crypto_label)
+                if let Some((score, label)) = crypto_setup {
+                    (score, label)
                 } else {
                     compute_setup_score(
                         composite,
@@ -438,31 +538,26 @@ fn build_opportunity_rows(
                         .round() as i32,
                 )
             } else {
-                screener.daily_candles.get(sym_str).and_then(|c| {
-                    if c.len() >= 2 && row.market_price_cents > 0 {
-                        let prev = c[c.len() - 2].close_cents;
-                        if prev > 0 {
-                            return Some(
-                                (((row.market_price_cents - prev) as f64 / prev as f64) * 10_000.0)
-                                    .round() as i32,
-                            );
-                        }
+                if daily_candles_ref.len() >= 2 && row.market_price_cents > 0 {
+                    let prev = daily_candles_ref[daily_candles_ref.len() - 2].close_cents;
+                    if prev > 0 {
+                        Some(
+                            (((row.market_price_cents - prev) as f64 / prev as f64) * 10_000.0)
+                                .round() as i32,
+                        )
+                    } else {
+                        None
                     }
+                } else {
                     None
-                })
+                }
             };
             let dcf = row.dcf_value_cents;
-            let spark: Vec<i64> = screener
-                .daily_candles
-                .get(sym_str)
-                .map(|c| {
-                    let n = c.len();
-                    c[n.saturating_sub(24)..]
-                        .iter()
-                        .map(|x| x.close_cents)
-                        .collect()
-                })
-                .unwrap_or_default();
+            let n = daily_candles_ref.len();
+            let spark: Vec<i64> = daily_candles_ref[n.saturating_sub(24)..]
+                .iter()
+                .map(|c| c.close_cents)
+                .collect();
             let ins_net = row.insider_net_shares_90d;
             let ins_buy = row.insider_buy_count;
             let ins_sell = row.insider_sell_count;
@@ -530,6 +625,261 @@ fn build_opportunity_rows(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod opportunity_projection_tests {
+    use super::*;
+    use crate::engine::{
+        ExternalValuationSignal, FundamentalSnapshot, MarketSnapshot, ScreenerState,
+    };
+    use crate::regime::MarketRegime;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    fn fixture_state() -> Arc<Mutex<ScreenerState>> {
+        let mut state = ScreenerState::new();
+        for (symbol, price, intrinsic, sector) in [
+            ("AAPL", 20_000, 27_000, "Technology"),
+            ("COF", 15_000, 22_000, "Financial Services"),
+            ("BTC-USD", 6_000_000, 6_500_000, "Cryptocurrency"),
+        ] {
+            state.ingest_snapshot(MarketSnapshot {
+                symbol: symbol.into(),
+                company_name: Some(format!("{symbol} Inc.")),
+                profitable: true,
+                market_price_cents: price,
+                intrinsic_value_cents: intrinsic,
+                previous_close_cents: price - 100,
+                next_earnings_epoch: None,
+            });
+            state.ingest_signal(ExternalValuationSignal {
+                symbol: symbol.into(),
+                fair_value_cents: intrinsic,
+                age_seconds: 0,
+                low_fair_value_cents: Some(intrinsic - 1_000),
+                high_fair_value_cents: Some(intrinsic + 1_000),
+                analyst_opinion_count: Some(16),
+                recommendation_mean_hundredths: Some(180),
+                strong_buy_count: Some(5),
+                buy_count: Some(8),
+                hold_count: Some(2),
+                sell_count: Some(1),
+                strong_sell_count: Some(0),
+                weighted_fair_value_cents: None,
+                weighted_analyst_count: None,
+            });
+            if symbol != "BTC-USD" {
+                state.ingest_fundamentals(FundamentalSnapshot {
+                    symbol: symbol.into(),
+                    sector_name: Some(sector.into()),
+                    market_cap_dollars: Some(900_000_000_000),
+                    shares_outstanding: Some(1_000_000_000),
+                    return_on_equity_bps: Some(2_000),
+                    earnings_growth_bps: Some(1_200),
+                    free_cash_flow_dollars: Some(45_000_000_000),
+                    operating_cash_flow_dollars: Some(60_000_000_000),
+                    beta_millis: Some(1_200),
+                    book_value_per_share_cents: (symbol == "COF").then_some(12_000),
+                    retention_bps: (symbol == "COF").then_some(7_500),
+                    ..Default::default()
+                });
+            }
+            let candles: Vec<HistoricalCandle> = (0..35)
+                .map(|day| HistoricalCandle {
+                    epoch_seconds: day * 86_400,
+                    open_cents: price - 300 + day * 10,
+                    high_cents: price - 100 + day * 10,
+                    low_cents: price - 500 + day * 10,
+                    close_cents: price - 250 + day * 10,
+                    volume: 1_000_000 + day as u64 * 10_000,
+                })
+                .collect();
+            let summary = compute_chart_summary(&candles).expect("fixture chart");
+            state.ingest_chart_summary(symbol.into(), summary.clone());
+            state.ingest_weekly_summary(symbol.into(), summary.clone());
+            state.ingest_hourly_summary(symbol.into(), summary);
+            state.ingest_daily_candles(symbol.into(), candles.clone());
+            if symbol == "BTC-USD" {
+                state.ingest_crypto_metrics(
+                    symbol.into(),
+                    crate::crypto_cycle::compute_crypto_score(
+                        symbol,
+                        &candles,
+                        Some(40),
+                        None,
+                        1_800_000_000,
+                    ),
+                );
+            }
+        }
+        Arc::new(Mutex::new(state))
+    }
+
+    fn usable_regime() -> MarketRegime {
+        MarketRegime {
+            primary_regime: "LateBull".into(),
+            environment_band: "RiskOn".into(),
+            action_stance: "Euphoria".into(),
+            global_confidence_bps: 9_000,
+            cnn_fear_greed: Some(85),
+            ..MarketRegime::default()
+        }
+    }
+
+    #[test]
+    fn projection_baseline_for_all_models_and_regime_states() {
+        let state = fixture_state();
+        // Fixed FNV-1a fingerprints cover every serialized field, including paths and signals.
+        let expected = [
+            [10_657_763_759_874_342_574; 3],
+            [
+                8_842_849_984_942_063_844,
+                3_695_932_376_257_929_518,
+                3_728_405_759_594_883_312,
+            ],
+            [
+                8_098_799_701_833_326_822,
+                8_720_776_105_178_677_850,
+                6_051_405_844_356_966_017,
+            ],
+        ];
+        for (model_index, model) in ["aggressive_v2", "aggressive_v3", "short_v3"]
+            .into_iter()
+            .enumerate()
+        {
+            state.lock().unwrap().scoring_model = model.into();
+            for (case_index, (name, enabled, regime)) in [
+                ("disabled", false, None),
+                ("unavailable", true, None),
+                ("available", true, Some(usable_regime())),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let rows = build_opportunity_rows(&state, enabled, regime);
+                let json = serde_json::to_string(&rows).unwrap();
+                let digest = json
+                    .bytes()
+                    .fold(14_695_981_039_346_656_037_u64, |hash, byte| {
+                        (hash ^ byte as u64).wrapping_mul(1_099_511_628_211)
+                    });
+                assert_eq!(digest, expected[model_index][case_index], "{model} {name}");
+                assert_eq!(rows.len(), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn feed_writer_can_acquire_lock_during_projection() {
+        let state = fixture_state();
+        let worker_state = Arc::clone(&state);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            build_opportunity_rows_with_hook(&worker_state, true, Some(usable_regime()), || {
+                started_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+            })
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (writer_tx, writer_rx) = mpsc::channel();
+        let writer_state = Arc::clone(&state);
+        let writer = thread::spawn(move || {
+            writer_state.lock().unwrap().scoring_model = "short_v3".into();
+            writer_tx.send(()).unwrap();
+        });
+        let acquired = writer_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        resume_tx.send(()).unwrap();
+        writer.join().unwrap();
+        let projected = worker.join().unwrap();
+        assert!(
+            acquired,
+            "feed writer must acquire the lock while projection waits"
+        );
+        assert_eq!(projected[0].row.symbol, "COF");
+        assert_eq!(projected[0].composite_score, 32);
+        assert_eq!(state.lock().unwrap().scoring_model, "short_v3");
+    }
+
+    #[test]
+    fn captured_projection_keeps_one_profile_and_model_after_live_state_changes() {
+        use crate::regime::{RegimeScoringPolicy, ScoreSide};
+
+        let state = fixture_state();
+        let regime = usable_regime();
+        let baseline = build_opportunity_rows(&state, true, Some(regime.clone()));
+        let captured = capture_opportunity_projection(&state);
+
+        {
+            let mut live = state.lock().unwrap();
+            live.clear_universe();
+            live.scoring_model = "short_v3".into();
+            live.ingest_snapshot(MarketSnapshot {
+                symbol: "MSFT".into(),
+                company_name: Some("Microsoft".into()),
+                profitable: true,
+                market_price_cents: 25_000,
+                intrinsic_value_cents: 30_000,
+                previous_close_cents: 24_000,
+                next_earnings_epoch: None,
+            });
+        }
+
+        let projected = project_opportunity_rows(
+            captured,
+            true,
+            RegimeScoringPolicy::from_regime(&regime, ScoreSide::Long),
+            RegimeScoringPolicy::from_regime(&regime, ScoreSide::Short),
+            || {},
+        );
+        assert_eq!(
+            serde_json::to_value(&projected).unwrap(),
+            serde_json::to_value(&baseline).unwrap()
+        );
+        let live = build_opportunity_rows(&state, true, Some(regime));
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].row.symbol, "MSFT");
+        assert_eq!(
+            live[0].price_path.as_ref().map(|path| path.side),
+            Some(crate::price_path::PathSide::Short)
+        );
+    }
+
+    #[test]
+    fn financial_reconciliation_is_captured_before_projection() {
+        let state = fixture_state();
+        let baseline = build_opportunity_rows(&state, false, None);
+        let old_dcf = baseline
+            .iter()
+            .find(|row| row.row.symbol == "COF")
+            .unwrap()
+            .dcf_value_cents;
+        assert!(old_dcf.is_some_and(|value| value > 0));
+        let captured = capture_opportunity_projection(&state);
+        state
+            .lock()
+            .unwrap()
+            .ingest_fundamentals(FundamentalSnapshot {
+                symbol: "COF".into(),
+                return_on_equity_bps: Some(800),
+                ..Default::default()
+            });
+
+        let previous = project_opportunity_rows(captured, false, None, None, || {});
+        let previous_dcf = previous
+            .iter()
+            .find(|row| row.row.symbol == "COF")
+            .unwrap()
+            .dcf_value_cents;
+        let current = build_opportunity_rows(&state, false, None);
+        let current_dcf = current
+            .iter()
+            .find(|row| row.row.symbol == "COF")
+            .unwrap()
+            .dcf_value_cents;
+        assert_eq!(previous_dcf, old_dcf);
+        assert_ne!(current_dcf, old_dcf);
+    }
 }
 
 #[tauri::command]
@@ -608,8 +958,12 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
     if is_crypto(symbol) || is_etf(symbol) {
         return;
     }
-    {
+    let generation = state.feed_generation.load(Ordering::SeqCst);
+    let request_context = {
         let mut s = state.screener.lock().unwrap();
+        if !generation_is_current(&state.feed_generation, generation) {
+            return;
+        }
         // Need fundamentals before EDGAR compute is useful. Missing shares may
         // be recovered from SEC DEI in the demand path below; do not refuse
         // before trying the provider fallback.
@@ -654,12 +1008,10 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
         {
             return;
         }
-    }
-    {
-        let mut inflight = state.valuation_inflight.lock().unwrap();
-        if !inflight.insert(symbol.to_string()) {
-            return; // already computing
-        }
+        DemandFailureContext::capture(&s, symbol)
+    };
+    if !claim_demand_valuation(&state.valuation_inflight, generation, symbol) {
+        return; // already computing for this generation
     }
 
     let worker_symbol = symbol.to_string();
@@ -667,13 +1019,16 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
     let cik_cache = Arc::clone(&state.edgar_cik_map);
     let inflight = Arc::clone(&state.valuation_inflight);
     let feed_log = Arc::clone(&state.feed_log);
+    let feed_gen = state.feed_generation_arc();
     let valuation_yahoo = state.valuation_yahoo.clone();
+    let mut worker_context = request_context.clone();
 
     let spawn_result = thread::Builder::new()
         .name(format!("edgar-dcf-{worker_symbol}"))
         .spawn(move || {
             let _inflight_guard = ValuationInflightGuard {
                 symbol: worker_symbol.clone(),
+                generation,
                 inflight,
             };
             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -682,6 +1037,9 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
                     &screener,
                     &cik_cache,
                     &valuation_yahoo,
+                    &feed_gen,
+                    generation,
+                    &mut worker_context,
                 )
             }));
 
@@ -689,23 +1047,47 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     feed_log.warn(&format!("demand-valuation {worker_symbol}: {error}"));
-                    record_demand_valuation_failure(&worker_symbol, &screener, &error);
+                    record_demand_valuation_failure(
+                        &worker_symbol,
+                        &screener,
+                        &feed_gen,
+                        generation,
+                        &worker_context.input_key,
+                        &worker_context.dcf_revision,
+                        &error,
+                    );
                 }
                 Err(_) => {
                     let error = "valuation worker panicked";
                     feed_log.warn(&format!("demand-valuation {worker_symbol}: {error}"));
-                    record_demand_valuation_failure(&worker_symbol, &screener, error);
+                    record_demand_valuation_failure(
+                        &worker_symbol,
+                        &screener,
+                        &feed_gen,
+                        generation,
+                        &worker_context.input_key,
+                        &worker_context.dcf_revision,
+                        error,
+                    );
                 }
             }
         });
     if let Err(error) = spawn_result {
-        state.valuation_inflight.lock().unwrap().remove(symbol);
+        state
+            .valuation_inflight
+            .lock()
+            .unwrap()
+            .remove(&(generation, symbol.to_string()));
         state
             .feed_log
             .warn(&format!("demand-valuation {symbol}: start worker: {error}"));
         record_demand_valuation_failure(
             symbol,
             &state.screener,
+            &state.feed_generation,
+            generation,
+            &request_context.input_key,
+            &request_context.dcf_revision,
             &format!("start valuation worker: {error}"),
         );
     }
@@ -714,13 +1096,28 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
 fn record_demand_valuation_failure(
     symbol: &str,
     screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    expected_input_key: &[u8],
+    expected_dcf_revision: &[u8],
     error: &str,
 ) {
     let mut state = screener.lock().unwrap();
+    if !generation_is_current(active_generation, generation) || error == DEMAND_INPUTS_CHANGED {
+        return;
+    }
     let Some(fund) = state.fundamentals.get(symbol).cloned() else {
-        state.set_valuation_error(symbol.to_string(), error.to_string());
         return;
     };
+    let price = state
+        .snapshots
+        .get(symbol)
+        .map(|snapshot| snapshot.market_price_cents);
+    if financial_dcf_input_key(&fund, price) != expected_input_key
+        || dcf_revision_key(&state, symbol) != expected_dcf_revision
+    {
+        return;
+    }
     let class = crate::dcf_model::classify_business(
         fund.sector_name.as_deref(),
         fund.industry_name.as_deref(),
@@ -766,6 +1163,78 @@ fn financial_required_drivers_missing(fund: &crate::engine::FundamentalSnapshot)
         || !matches!(fund.retention_bps, Some(0..=10_000))
 }
 
+const DEMAND_INPUTS_CHANGED: &str = "valuation inputs changed during demand computation";
+
+#[derive(Clone)]
+struct DemandFailureContext {
+    input_key: Vec<u8>,
+    dcf_revision: Vec<u8>,
+}
+
+impl DemandFailureContext {
+    fn capture(state: &crate::engine::ScreenerState, symbol: &str) -> Self {
+        let input_key = state
+            .fundamentals
+            .get(symbol)
+            .map(|fund| {
+                let price = state
+                    .snapshots
+                    .get(symbol)
+                    .map(|snapshot| snapshot.market_price_cents);
+                financial_dcf_input_key(fund, price)
+            })
+            .unwrap_or_default();
+        Self {
+            input_key,
+            dcf_revision: dcf_revision_key(state, symbol),
+        }
+    }
+
+    fn matches_current(&self, state: &crate::engine::ScreenerState, symbol: &str) -> bool {
+        let current = Self::capture(state, symbol);
+        current.input_key == self.input_key && current.dcf_revision == self.dcf_revision
+    }
+}
+
+fn demand_inputs_are_current(
+    state: &crate::engine::ScreenerState,
+    symbol: &str,
+    fund: &crate::engine::FundamentalSnapshot,
+    price: Option<i64>,
+) -> bool {
+    let Some(current_fund) = state.fundamentals.get(symbol) else {
+        return false;
+    };
+    let current_price = state
+        .snapshots
+        .get(symbol)
+        .map(|snapshot| snapshot.market_price_cents);
+    financial_dcf_input_key(current_fund, current_price) == financial_dcf_input_key(fund, price)
+}
+
+fn dcf_revision_key(state: &crate::engine::ScreenerState, symbol: &str) -> Vec<u8> {
+    // The worker can publish a forward-only envelope or an error without DCF.
+    // Capture every valuation output that a concurrent worker could replace.
+    serde_json::to_vec(&(
+        state.dcf_analyses.get(symbol),
+        state.dcf_values.get(symbol),
+        state.operating_valuations.get(symbol),
+        state.valuation_errors.get(symbol),
+    ))
+    .expect("valuation state is serializable")
+}
+
+fn demand_publication_inputs_are_current(
+    state: &crate::engine::ScreenerState,
+    symbol: &str,
+    fund: &crate::engine::FundamentalSnapshot,
+    price: Option<i64>,
+    captured_dcf_revision: &[u8],
+) -> bool {
+    demand_inputs_are_current(state, symbol, fund, price)
+        && dcf_revision_key(state, symbol) == captured_dcf_revision
+}
+
 /// Prefer live US 10Y for solid rate quality; fall back to provisional defaults.
 fn resolve_market_params(yahoo: Option<&YahooClient>) -> crate::dcf_model::MarketParams {
     if let Some(client) = yahoo {
@@ -786,12 +1255,18 @@ fn compute_demand_valuation_once(
     screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
     cik_cache: &Arc<std::sync::Mutex<Option<HashMap<String, u64>>>>,
     valuation_yahoo: &Option<Arc<YahooClient>>,
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    failure_context: &mut DemandFailureContext,
 ) -> Result<(), String> {
     compute_demand_valuation_once_with_financial_refresh(
         symbol,
         screener,
         cik_cache,
         valuation_yahoo,
+        active_generation,
+        generation,
+        failure_context,
         |symbol| {
             let Some(yahoo) = valuation_yahoo.as_deref() else {
                 return Ok(None);
@@ -809,13 +1284,19 @@ fn compute_demand_valuation_once_with_financial_refresh<F>(
     screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
     cik_cache: &Arc<std::sync::Mutex<Option<HashMap<String, u64>>>>,
     valuation_yahoo: &Option<Arc<YahooClient>>,
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    failure_context: &mut DemandFailureContext,
     refresh_financial_fundamentals: F,
 ) -> Result<(), String>
 where
     F: FnOnce(&str) -> Result<Option<crate::engine::FundamentalSnapshot>, String>,
 {
-    let (mut fund, price, class, existing_fcff) = {
+    let (mut fund, price, class, existing_fcff, mut dcf_revision) = {
         let s = screener.lock().unwrap();
+        if !generation_is_current(active_generation, generation) {
+            return Err("profile changed during demand valuation".into());
+        }
         let fund = s
             .fundamentals
             .get(symbol)
@@ -837,7 +1318,14 @@ where
                 && analysis.engine_version == crate::dcf_model::ENGINE_VERSION
                 && analysis.model_policy_version == crate::dcf_model::MODEL_POLICY_VERSION
         });
-        (fund, price, class, existing_fcff)
+        *failure_context = DemandFailureContext::capture(&s, symbol);
+        (
+            fund,
+            price,
+            class,
+            existing_fcff,
+            dcf_revision_key(&s, symbol),
+        )
     };
 
     if matches!(
@@ -859,7 +1347,21 @@ where
         if financial_required_drivers_missing(&fund) {
             if let Some(refreshed) = refresh_financial_fundamentals(symbol)? {
                 let mut state = screener.lock().unwrap();
+                if !generation_is_current(active_generation, generation) {
+                    return Err("profile changed during demand valuation".into());
+                }
+                if !demand_publication_inputs_are_current(
+                    &state,
+                    symbol,
+                    &fund,
+                    price,
+                    &dcf_revision,
+                ) {
+                    return Err(DEMAND_INPUTS_CHANGED.into());
+                }
                 state.ingest_fundamentals(refreshed);
+                *failure_context = DemandFailureContext::capture(&state, symbol);
+                dcf_revision = dcf_revision_key(&state, symbol);
                 fund = state
                     .fundamentals
                     .get(symbol)
@@ -885,9 +1387,25 @@ where
         if fund.shares_outstanding.unwrap_or(0) == 0 {
             let shares = edgar::fetch_shares_outstanding(&edgar::edgar_client(), symbol, cik)?
                 .ok_or_else(|| "share count is missing from Yahoo and SEC DEI".to_string())?;
+            let previous_fund = fund.clone();
             fund.shares_outstanding = Some(shares);
             shares_resolved_from_sec = true;
-            screener.lock().unwrap().ingest_fundamentals(fund.clone());
+            let mut state = screener.lock().unwrap();
+            if !generation_is_current(active_generation, generation) {
+                return Err("profile changed during demand valuation".into());
+            }
+            if !demand_publication_inputs_are_current(
+                &state,
+                symbol,
+                &previous_fund,
+                price,
+                &dcf_revision,
+            ) {
+                return Err(DEMAND_INPUTS_CHANGED.into());
+            }
+            state.ingest_fundamentals(fund.clone());
+            *failure_context = DemandFailureContext::capture(&state, symbol);
+            dcf_revision = dcf_revision_key(&state, symbol);
         }
         if !matches!(fund.retention_bps, Some(0..=10_000)) {
             return Err("retention/payout is missing or invalid after Yahoo refresh".into());
@@ -904,10 +1422,14 @@ where
         if shares_resolved_from_sec {
             analysis.reason_codes.push("shares=sec_dei_fallback".into());
         }
-        screener
-            .lock()
-            .unwrap()
-            .ingest_dcf_analysis(symbol.to_string(), analysis);
+        let mut state = screener.lock().unwrap();
+        if !generation_is_current(active_generation, generation) {
+            return Err("profile changed during demand valuation".into());
+        }
+        if !demand_publication_inputs_are_current(&state, symbol, &fund, price, &dcf_revision) {
+            return Err(DEMAND_INPUTS_CHANGED.into());
+        }
+        state.ingest_dcf_analysis(symbol.to_string(), analysis);
         return Ok(());
     }
 
@@ -956,9 +1478,25 @@ where
             if fund.shares_outstanding.unwrap_or(0) == 0 {
                 match edgar::fetch_shares_outstanding(&edgar::edgar_client(), symbol, cik) {
                     Ok(Some(shares)) => {
+                        let previous_fund = fund.clone();
                         fund.shares_outstanding = Some(shares);
                         shares_resolved_from_sec = true;
-                        screener.lock().unwrap().ingest_fundamentals(fund.clone());
+                        let mut state = screener.lock().unwrap();
+                        if !generation_is_current(active_generation, generation) {
+                            return Err("profile changed during demand valuation".into());
+                        }
+                        if !demand_publication_inputs_are_current(
+                            &state,
+                            symbol,
+                            &previous_fund,
+                            price,
+                            &dcf_revision,
+                        ) {
+                            return Err(DEMAND_INPUTS_CHANGED.into());
+                        }
+                        state.ingest_fundamentals(fund.clone());
+                        *failure_context = DemandFailureContext::capture(&state, symbol);
+                        dcf_revision = dcf_revision_key(&state, symbol);
                     }
                     Ok(None) => fcff_failure = Some("missing_shares:yahoo_and_sec_dei".to_string()),
                     Err(error) => fcff_failure = Some(format!("sec_shares:{error}")),
@@ -1011,16 +1549,14 @@ where
             market_price_cents: price,
         },
     );
-    let final_fundamentals_fingerprint =
-        crate::operating_valuation_runtime::fundamentals_fingerprint(&fund);
     let mut state = screener.lock().unwrap();
-    let inputs_are_current = state.fundamentals.get(symbol).is_some_and(|current| {
-        crate::operating_valuation_runtime::fundamentals_fingerprint(current)
-            == final_fundamentals_fingerprint
-    });
-    if inputs_are_current {
-        state.ingest_operating_valuation(symbol.to_string(), analysis, envelope);
+    if !generation_is_current(active_generation, generation) {
+        return Err("profile changed during demand valuation".into());
     }
+    if !demand_publication_inputs_are_current(&state, symbol, &fund, price, &dcf_revision) {
+        return Err(DEMAND_INPUTS_CHANGED.into());
+    }
+    state.ingest_operating_valuation(symbol.to_string(), analysis, envelope);
     Ok(())
 }
 
@@ -1188,6 +1724,28 @@ fn universe_profile_status(state: &AppState) -> UniverseProfileStatus {
 /// Idempotent by **canonical symbol set** when profile name matches: same membership
 /// set does not restart workers (order changes alone are ignored).
 fn apply_universe_profile(raw_name: &str, state: &AppState) -> Result<(), String> {
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        apply_universe_profile_serial(raw_name, state)
+    })
+}
+
+fn with_profile_apply_gate<T>(gate: &Mutex<()>, apply: impl FnOnce() -> T) -> T {
+    let _guard = gate.lock().unwrap_or_else(|poison| poison.into_inner());
+    apply()
+}
+
+fn with_current_profile_generation<T>(
+    gate: &Mutex<()>,
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    write: impl FnOnce() -> T,
+) -> Option<T> {
+    with_profile_apply_gate(gate, || {
+        generation_is_current(active_generation, generation).then(write)
+    })
+}
+
+fn apply_universe_profile_serial(raw_name: &str, state: &AppState) -> Result<(), String> {
     let requested = resolve_profile_name(raw_name)
         .ok_or_else(|| format!("unknown universe profile: {raw_name}"))?
         .to_string();
@@ -1310,11 +1868,19 @@ fn ingest_fetch_result(
 
 #[tauri::command]
 pub fn refresh_symbol(symbol: String, state: State<AppState>) -> Result<String, String> {
+    let generation = state.feed_generation.load(Ordering::SeqCst);
     let client = YahooClient::new().map_err(|e| e.to_string())?;
     let result = client.fetch_symbol(&symbol).map_err(|e| e.to_string())?;
 
-    let mut screener = state.screener.lock().unwrap();
-    let _ = ingest_fetch_result(&mut screener, result, is_crypto(&symbol), is_etf(&symbol));
+    apply_refresh_quote_if_current(
+        &state.feed_generation,
+        generation,
+        &state.screener,
+        result,
+        is_crypto(&symbol),
+        is_etf(&symbol),
+    )
+    .ok_or_else(|| "profile changed during symbol refresh".to_string())?;
     Ok(symbol)
 }
 
@@ -1488,33 +2054,55 @@ pub async fn run_qa_valuation_divergence_audit(
     let screener = Arc::clone(&state.screener);
     let cik_cache = Arc::clone(&state.edgar_cik_map);
     let feed_log = Arc::clone(&state.feed_log);
+    let feed_gen = state.feed_generation_arc();
+    let generation = feed_gen.load(Ordering::SeqCst);
     let valuation_yahoo = state.valuation_yahoo.clone();
     tauri::async_runtime::spawn_blocking(move || {
         for symbol in &symbols {
-            let needs_valuation = {
+            let (needs_valuation, mut audit_context) = {
                 let mut s = screener.lock().unwrap();
+                if !generation_is_current(&feed_gen, generation) {
+                    return Err("profile changed during QA valuation audit".into());
+                }
                 s.ensure_model_routed_valuation(symbol);
-                !s.has_current_operating_valuation(symbol)
+                let needs = !s.has_current_operating_valuation(symbol)
                     && !s.dcf_analyses.get(symbol).is_some_and(|analysis| {
                         analysis.business_class
                             == crate::dcf_model::BusinessClass::FinancialServices
-                    })
+                    });
+                (needs, DemandFailureContext::capture(&s, symbol))
             };
             if needs_valuation {
-                if let Err(error) =
-                    compute_demand_valuation_once(symbol, &screener, &cik_cache, &valuation_yahoo)
-                {
+                if let Err(error) = compute_demand_valuation_once(
+                    symbol,
+                    &screener,
+                    &cik_cache,
+                    &valuation_yahoo,
+                    &feed_gen,
+                    generation,
+                    &mut audit_context,
+                ) {
                     feed_log.warn(&format!("qa-divergence-audit {symbol}: {error}"));
-                    screener
-                        .lock()
-                        .unwrap()
-                        .set_valuation_error(symbol.clone(), error);
+                    if error == DEMAND_INPUTS_CHANGED {
+                        return Err(DEMAND_INPUTS_CHANGED.into());
+                    }
+                    let mut s = screener.lock().unwrap();
+                    if !generation_is_current(&feed_gen, generation) {
+                        return Err("profile changed during QA valuation audit".into());
+                    }
+                    if !audit_context.matches_current(&s, symbol) {
+                        return Err(DEMAND_INPUTS_CHANGED.into());
+                    }
+                    s.set_valuation_error(symbol.clone(), error);
                 }
             }
         }
 
         let candidates = {
             let mut s = screener.lock().unwrap();
+            if !generation_is_current(&feed_gen, generation) {
+                return Err("profile changed during QA valuation audit".into());
+            }
             symbols
                 .iter()
                 .map(|symbol| {
@@ -1678,46 +2266,79 @@ pub(crate) fn ensure_symbol_loaded_inner(
     if symbol.is_empty() {
         return Err("empty symbol".into());
     }
+    let generation = state.feed_generation.load(Ordering::SeqCst);
 
     let client = YahooClient::new().map_err(|e| e.to_string())?;
     let _ = client.warm_session();
 
     match client.fetch_symbol(&symbol) {
         Ok(result) => {
-            let mut screener = state.screener.lock().unwrap();
-            let _ = ingest_fetch_result(&mut screener, result, is_crypto(&symbol), is_etf(&symbol));
+            apply_refresh_quote_if_current(
+                &state.feed_generation,
+                generation,
+                &state.screener,
+                result,
+                is_crypto(&symbol),
+                is_etf(&symbol),
+            )
+            .ok_or_else(|| "profile changed during detail load".to_string())?;
         }
         Err(_) => {
             // Quote may fail; candles below can still recover a price path.
         }
     }
 
+    if !generation_is_current(&state.feed_generation, generation) {
+        return Err("profile changed during detail load".into());
+    }
+
     if let Ok(candles) = client.fetch_candles(&symbol, "1y", "1d") {
         if let Some(summary) = compute_chart_summary(&candles) {
-            let mut s = state.screener.lock().unwrap();
-            s.ingest_chart_summary(symbol.clone(), summary);
-            s.ingest_daily_candles(symbol.clone(), candles);
+            if !mutate_current_enrichment_state(
+                &state.feed_generation,
+                generation,
+                &state.screener,
+                |s| {
+                    s.ingest_chart_summary(symbol.clone(), summary);
+                    s.ingest_daily_candles(symbol.clone(), candles);
+                },
+            ) {
+                return Err("profile changed during detail load".into());
+            }
         }
+    }
+
+    if !generation_is_current(&state.feed_generation, generation) {
+        return Err("profile changed during detail load".into());
     }
 
     // Deep multi-TF in background — detail UI already has price + daily chart.
     let screener = Arc::clone(&state.screener);
     let fng_cache = Arc::clone(&state.fng_cache);
+    let feed_gen = state.feed_generation_arc();
     let deep_symbol = symbol.clone();
     let _ = thread::Builder::new()
         .name(format!("ensure-deep-{}", deep_symbol))
         .spawn(move || {
+            if !generation_is_current(&feed_gen, generation) {
+                return;
+            }
             let client = match YahooClient::new() {
                 Ok(c) => c,
                 Err(_) => return,
             };
             if let Ok(candles) = client.fetch_candles(&deep_symbol, "5y", "1wk") {
                 if let Some(summary) = compute_chart_summary(&candles) {
-                    let mut s = screener.lock().unwrap();
-                    s.ingest_weekly_summary(deep_symbol.clone(), summary);
-                    if is_crypto(&deep_symbol) {
-                        s.ingest_weekly_candles(deep_symbol.clone(), candles.clone());
-                        drop(s);
+                    let crypto = is_crypto(&deep_symbol);
+                    if !mutate_current_enrichment_state(&feed_gen, generation, &screener, |s| {
+                        s.ingest_weekly_summary(deep_symbol.clone(), summary);
+                        if crypto {
+                            s.ingest_weekly_candles(deep_symbol.clone(), candles.clone());
+                        }
+                    }) {
+                        return;
+                    }
+                    if crypto {
                         let fng = fng_cache.get_cached().or_else(|| {
                             let http = crate::crypto_cycle::crypto_client();
                             let v = crate::crypto_cycle::fetch_fear_greed(&http).ok();
@@ -1737,27 +2358,39 @@ pub(crate) fn ensure_symbol_loaded_inner(
                             fng,
                             now_e,
                         );
-                        screener
-                            .lock()
-                            .unwrap()
-                            .ingest_crypto_metrics(deep_symbol.clone(), metrics);
+                        if !mutate_current_enrichment_state(&feed_gen, generation, &screener, |s| {
+                            s.ingest_crypto_metrics(deep_symbol.clone(), metrics)
+                        }) {
+                            return;
+                        }
                     }
                 }
             }
+            if !generation_is_current(&feed_gen, generation) {
+                return;
+            }
             if let Ok(candles) = client.fetch_candles(&deep_symbol, "1mo", "1h") {
                 if let Some(summary) = compute_chart_summary(&candles) {
-                    screener
-                        .lock()
-                        .unwrap()
-                        .ingest_hourly_summary(deep_symbol.clone(), summary);
+                    if !mutate_current_enrichment_state(&feed_gen, generation, &screener, |s| {
+                        s.ingest_hourly_summary(deep_symbol.clone(), summary)
+                    }) {
+                        return;
+                    }
                 }
             }
-            if let Ok(candles) = client.fetch_candles(&deep_symbol, "10y", "1mo") {
+            if !generation_is_current(&feed_gen, generation) {
+                return;
+            }
+            if let Ok(candles) = client.fetch_candles(
+                &deep_symbol,
+                DETAIL_MONTHLY_CHART_REQUEST.range,
+                DETAIL_MONTHLY_CHART_REQUEST.interval,
+            ) {
                 if let Some(summary) = compute_chart_summary(&candles) {
-                    screener
-                        .lock()
-                        .unwrap()
-                        .ingest_monthly_summary(deep_symbol.clone(), summary);
+                    let _ =
+                        mutate_current_enrichment_state(&feed_gen, generation, &screener, |s| {
+                            s.ingest_monthly_summary(deep_symbol.clone(), summary)
+                        });
                 }
             }
         });
@@ -1794,6 +2427,227 @@ const REFRESH_CONCURRENCY: usize = 2;
 const ENRICHMENT_CONCURRENCY: usize = 2;
 const MAX_RETRY_ROUNDS: usize = 6;
 const FULL_REFRESH_INTERVAL_SECS: u64 = 15 * 60;
+const INSIDER_FRESHNESS_INTERVAL_SECS: u64 = 24 * 60 * 60;
+const INSIDER_RETRY_INTERVAL_SECS: u64 = 15 * 60;
+const FINANCIAL_DCF_RETRY_INTERVAL_SECS: u64 = 15 * 60;
+const EDGAR_SCAN_PAUSE_SECS: u64 = 5;
+
+#[derive(Clone, Copy)]
+enum BulkChartKind {
+    Weekly,
+    Hourly,
+}
+
+#[derive(Clone, Copy)]
+struct ChartRequest {
+    range: &'static str,
+    interval: &'static str,
+}
+
+const BULK_CHART_REQUESTS: [(ChartRequest, BulkChartKind); 2] = [
+    (
+        ChartRequest {
+            range: "5y",
+            interval: "1wk",
+        },
+        BulkChartKind::Weekly,
+    ),
+    (
+        ChartRequest {
+            range: "1mo",
+            interval: "1h",
+        },
+        BulkChartKind::Hourly,
+    ),
+];
+const DETAIL_MONTHLY_CHART_REQUEST: ChartRequest = ChartRequest {
+    range: "10y",
+    interval: "1mo",
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BulkChartAttemptOutcome {
+    Complete,
+    RateLimited,
+    Cancelled,
+}
+
+struct EnrichmentJob {
+    symbol: String,
+    next_chart: usize,
+    retry_round: usize,
+}
+
+impl EnrichmentJob {
+    fn new(symbol: String) -> Self {
+        Self {
+            symbol,
+            next_chart: 0,
+            retry_round: 0,
+        }
+    }
+}
+
+struct DelayedEnrichmentJob {
+    job: EnrichmentJob,
+    ready_at: Instant,
+}
+
+#[derive(Default)]
+struct DelayedEnrichmentQueue {
+    jobs: HashMap<String, DelayedEnrichmentJob>,
+}
+
+impl DelayedEnrichmentQueue {
+    fn schedule(&mut self, job: EnrichmentJob, now: Instant, delay: Duration) -> bool {
+        use std::collections::hash_map::Entry;
+
+        match self.jobs.entry(job.symbol.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(DelayedEnrichmentJob {
+                    job,
+                    ready_at: now + delay,
+                });
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
+    fn take_due(&mut self, now: Instant) -> Option<EnrichmentJob> {
+        let symbol = self
+            .jobs
+            .iter()
+            .filter(|(_, delayed)| delayed.ready_at <= now)
+            .min_by_key(|(_, delayed)| delayed.ready_at)
+            .map(|(symbol, _)| symbol.clone())?;
+        self.jobs.remove(&symbol).map(|delayed| delayed.job)
+    }
+
+    fn next_wait(&self, now: Instant) -> Duration {
+        self.jobs
+            .values()
+            .map(|delayed| delayed.ready_at.saturating_duration_since(now))
+            .min()
+            .unwrap_or(Duration::from_millis(500))
+            .min(Duration::from_millis(500))
+    }
+
+    fn len(&self) -> usize {
+        self.jobs.len()
+    }
+}
+
+fn take_ready_enrichment_job(
+    receiver: &std::sync::mpsc::Receiver<String>,
+    delayed: &mut DelayedEnrichmentQueue,
+    now: Instant,
+) -> Option<EnrichmentJob> {
+    match receiver.try_recv() {
+        Ok(symbol) => Some(EnrichmentJob::new(symbol)),
+        Err(_) => delayed.take_due(now),
+    }
+}
+
+fn run_bulk_chart_pass(
+    start: usize,
+    mut fetch: impl FnMut(ChartRequest, BulkChartKind) -> BulkChartAttemptOutcome,
+) -> (usize, BulkChartAttemptOutcome) {
+    for (index, (request, kind)) in BULK_CHART_REQUESTS.into_iter().enumerate().skip(start) {
+        match fetch(request, kind) {
+            BulkChartAttemptOutcome::Complete => {}
+            other => return (index, other),
+        }
+    }
+    (BULK_CHART_REQUESTS.len(), BulkChartAttemptOutcome::Complete)
+}
+
+#[cfg(test)]
+fn for_each_bulk_chart_request(mut fetch: impl FnMut(ChartRequest, BulkChartKind) -> bool) -> bool {
+    run_bulk_chart_pass(0, |request, kind| {
+        if fetch(request, kind) {
+            BulkChartAttemptOutcome::Complete
+        } else {
+            BulkChartAttemptOutcome::Cancelled
+        }
+    })
+    .1 == BulkChartAttemptOutcome::Complete
+}
+
+#[derive(Default)]
+struct InsiderRefreshSchedule {
+    next_attempt: std::collections::HashMap<String, Instant>,
+}
+
+impl InsiderRefreshSchedule {
+    fn is_due(&self, symbol: &str, now: Instant) -> bool {
+        self.next_attempt
+            .get(symbol)
+            .is_none_or(|deadline| now >= *deadline)
+    }
+
+    fn record_result(
+        &mut self,
+        symbol: &str,
+        now: Instant,
+        result: &Result<Option<edgar::InsiderSummary>, String>,
+    ) {
+        let interval = if result.is_ok() {
+            INSIDER_FRESHNESS_INTERVAL_SECS
+        } else {
+            INSIDER_RETRY_INTERVAL_SECS
+        };
+        self.next_attempt
+            .insert(symbol.to_string(), now + Duration::from_secs(interval));
+    }
+}
+
+fn financial_dcf_input_key(
+    fund: &crate::engine::FundamentalSnapshot,
+    price: Option<i64>,
+) -> Vec<u8> {
+    // Preserve every current and future fundamental field in the comparison.
+    serde_json::to_vec(&(fund, price)).expect("financial fundamentals are serializable")
+}
+
+enum FinancialDcfAttempt {
+    Succeeded(Vec<u8>),
+    Failed { key: Vec<u8>, retry_at: Instant },
+}
+
+#[derive(Default)]
+struct FinancialDcfSchedule {
+    attempts: std::collections::HashMap<String, FinancialDcfAttempt>,
+}
+
+impl FinancialDcfSchedule {
+    fn should_compute(&self, symbol: &str, key: &[u8], now: Instant, has_analysis: bool) -> bool {
+        match self.attempts.get(symbol) {
+            Some(FinancialDcfAttempt::Succeeded(previous)) => previous != key || !has_analysis,
+            Some(FinancialDcfAttempt::Failed {
+                key: previous,
+                retry_at,
+            }) => previous != key || now >= *retry_at,
+            None => true,
+        }
+    }
+
+    fn record_result(&mut self, symbol: &str, key: Vec<u8>, now: Instant, success: bool) {
+        let attempt = if success {
+            FinancialDcfAttempt::Succeeded(key)
+        } else {
+            FinancialDcfAttempt::Failed {
+                key,
+                retry_at: now + Duration::from_secs(FINANCIAL_DCF_RETRY_INTERVAL_SECS),
+            }
+        };
+        self.attempts.insert(symbol.to_string(), attempt);
+    }
+
+    fn forget(&mut self, symbol: &str) {
+        self.attempts.remove(symbol);
+    }
+}
 
 fn generation_is_current(state_gen: &std::sync::atomic::AtomicU64, gen: u64) -> bool {
     state_gen.load(std::sync::atomic::Ordering::SeqCst) == gen
@@ -1844,6 +2698,95 @@ fn batch_retry_delay_ms(rate_limit_secs: u64, completed_round: usize) -> u64 {
     } else {
         retry_backoff_ms(completed_round)
     }
+}
+
+fn chart_enrichment_retry_delay_ms(rate_limit_secs: u64, completed_round: usize) -> Option<u64> {
+    if completed_round >= MAX_RETRY_ROUNDS {
+        return None;
+    }
+    // Chart 429 may not update the quoteSummary session. Back off locally too.
+    let chart_cooldown_secs = 90u64
+        .saturating_mul(1u64 << completed_round.min(4))
+        .min(15 * 60);
+    Some(
+        rate_limit_secs
+            .saturating_add(1)
+            .max(chart_cooldown_secs)
+            .saturating_mul(1_000),
+    )
+}
+
+fn wait_for_enrichment_retry(
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    wait_ms: u64,
+) -> bool {
+    let mut remaining = wait_ms;
+    while remaining > 0 {
+        if !generation_is_current(active_generation, generation) {
+            return false;
+        }
+        let step = remaining.min(500);
+        thread::sleep(Duration::from_millis(step));
+        remaining -= step;
+    }
+    generation_is_current(active_generation, generation)
+}
+
+fn mutate_current_enrichment_state(
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    screener: &Mutex<crate::engine::ScreenerState>,
+    mutate: impl FnOnce(&mut crate::engine::ScreenerState),
+) -> bool {
+    let mut state = screener.lock().unwrap();
+    if !generation_is_current(active_generation, generation) {
+        return false;
+    }
+    mutate(&mut state);
+    true
+}
+
+fn mutate_current_feed_status(
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    feed_status: &Mutex<crate::state::FeedStatus>,
+    mutate: impl FnOnce(&mut crate::state::FeedStatus),
+) -> bool {
+    let mut status = feed_status.lock().unwrap();
+    if !generation_is_current(active_generation, generation) {
+        return false;
+    }
+    mutate(&mut status);
+    true
+}
+
+fn queue_visible_symbol_for_enrichment(
+    sym: &str,
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    completed: &Mutex<HashSet<String>>,
+    loaded: &AtomicUsize,
+    feed_status: &Mutex<crate::state::FeedStatus>,
+    enrichment_senders: &[std::sync::mpsc::Sender<String>],
+    total: usize,
+) -> bool {
+    if !generation_is_current(active_generation, generation) {
+        return false;
+    }
+    if !completed.lock().unwrap().insert(sym.to_string()) {
+        return true;
+    }
+    let n = loaded.fetch_add(1, Ordering::Relaxed) + 1;
+    if !mutate_current_feed_status(active_generation, generation, feed_status, |status| {
+        status.symbols_loaded = status.symbols_loaded.max(n.min(total));
+    }) {
+        return false;
+    }
+    // A symbol enters this finite queue only once per feed generation.
+    let worker = (n - 1) % enrichment_senders.len();
+    let _ = enrichment_senders[worker].send(sym.to_string());
+    true
 }
 
 /// Short status-bar summary. Kept ≤60 chars — `StatusBar` truncates `last_error`
@@ -1910,6 +2853,943 @@ mod feed_coordinator_tests {
     use crate::engine::{FundamentalSnapshot, MarketSnapshot, ScreenerState};
     use crate::fetcher::FetchResult;
     use crate::opportunity_v3::ScoringModel;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn late_visible_symbol_reaches_enrichment_after_worker_consumes_first_symbol() {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        use std::sync::{mpsc, Mutex};
+
+        let (sender, receiver) = mpsc::channel();
+        let completed = Mutex::new(HashSet::new());
+        let loaded = AtomicUsize::new(0);
+        let active = AtomicU64::new(1);
+        let status = Mutex::new(crate::state::FeedStatus::default());
+        let (first_done_sender, first_done_receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let first = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+            first_done_sender.send(first).unwrap();
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+        });
+
+        super::queue_visible_symbol_for_enrichment(
+            "EARLY",
+            &active,
+            1,
+            &completed,
+            &loaded,
+            &status,
+            &[sender.clone()],
+            2,
+        );
+        assert_eq!(
+            first_done_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            "EARLY"
+        );
+        super::queue_visible_symbol_for_enrichment(
+            "EARLY",
+            &active,
+            1,
+            &completed,
+            &loaded,
+            &status,
+            &[sender.clone()],
+            2,
+        );
+        super::queue_visible_symbol_for_enrichment(
+            "LATE",
+            &active,
+            1,
+            &completed,
+            &loaded,
+            &status,
+            &[sender],
+            2,
+        );
+
+        assert_eq!(worker.join().unwrap(), "LATE");
+        assert_eq!(loaded.load(Ordering::Relaxed), 2);
+        assert_eq!(status.lock().unwrap().symbols_loaded, 2);
+        assert_eq!(completed.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn chart_rate_limit_retries_are_bounded_and_respect_shared_cooldown() {
+        assert_eq!(
+            super::chart_enrichment_retry_delay_ms(120, 0),
+            Some(121_000)
+        );
+        assert_eq!(super::chart_enrichment_retry_delay_ms(0, 0), Some(90_000));
+        assert_eq!(super::chart_enrichment_retry_delay_ms(0, 1), Some(180_000));
+        assert_eq!(
+            super::chart_enrichment_retry_delay_ms(0, super::MAX_RETRY_ROUNDS),
+            None
+        );
+    }
+
+    #[test]
+    fn chart_retry_resumes_at_failed_request() {
+        let mut requests = Vec::new();
+        let (next, outcome) = super::run_bulk_chart_pass(0, |request, _| {
+            requests.push((request.range, request.interval));
+            if request.interval == "1h" {
+                super::BulkChartAttemptOutcome::RateLimited
+            } else {
+                super::BulkChartAttemptOutcome::Complete
+            }
+        });
+        assert_eq!(outcome, super::BulkChartAttemptOutcome::RateLimited);
+        assert_eq!(next, 1);
+        assert_eq!(requests, [("5y", "1wk"), ("1mo", "1h")]);
+
+        requests.clear();
+        let (next, outcome) = super::run_bulk_chart_pass(next, |request, _| {
+            requests.push((request.range, request.interval));
+            super::BulkChartAttemptOutcome::Complete
+        });
+        assert_eq!(outcome, super::BulkChartAttemptOutcome::Complete);
+        assert_eq!(next, 2);
+        assert_eq!(requests, [("1mo", "1h")]);
+    }
+
+    #[test]
+    fn delayed_chart_retry_does_not_block_ready_symbol() {
+        use std::sync::mpsc;
+
+        let start = Instant::now();
+        let (sender, receiver) = mpsc::channel();
+        let mut delayed = super::DelayedEnrichmentQueue::default();
+        let failed = super::EnrichmentJob {
+            symbol: "EARLY".into(),
+            next_chart: 1,
+            retry_round: 1,
+        };
+        assert!(delayed.schedule(failed, start, Duration::from_secs(90)));
+        sender.send("READY".into()).unwrap();
+
+        let ready = super::take_ready_enrichment_job(&receiver, &mut delayed, start).unwrap();
+        assert_eq!(ready.symbol, "READY");
+        assert_eq!(ready.next_chart, 0);
+        assert_eq!(ready.retry_round, 0);
+        assert_eq!(delayed.len(), 1);
+        assert!(super::take_ready_enrichment_job(
+            &receiver,
+            &mut delayed,
+            start + Duration::from_secs(89)
+        )
+        .is_none());
+
+        let retried = super::take_ready_enrichment_job(
+            &receiver,
+            &mut delayed,
+            start + Duration::from_secs(90),
+        )
+        .unwrap();
+        assert_eq!(retried.symbol, "EARLY");
+        assert_eq!(retried.next_chart, 1);
+        assert_eq!(retried.retry_round, 1);
+    }
+
+    #[test]
+    fn delayed_chart_retry_keeps_only_one_job_per_symbol() {
+        let start = Instant::now();
+        let mut delayed = super::DelayedEnrichmentQueue::default();
+        let first = super::EnrichmentJob {
+            symbol: "AAPL".into(),
+            next_chart: 1,
+            retry_round: 1,
+        };
+        assert!(delayed.schedule(first, start, Duration::from_secs(90)));
+        let duplicate = super::EnrichmentJob {
+            symbol: "AAPL".into(),
+            next_chart: 0,
+            retry_round: 0,
+        };
+        assert!(!delayed.schedule(duplicate, start, Duration::from_secs(1)));
+        assert_eq!(delayed.len(), 1);
+        assert!(delayed.take_due(start + Duration::from_secs(1)).is_none());
+        assert_eq!(
+            delayed
+                .take_due(start + Duration::from_secs(90))
+                .unwrap()
+                .next_chart,
+            1
+        );
+    }
+
+    #[test]
+    fn stale_enrichment_cannot_write_after_generation_change() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Mutex;
+
+        let active = AtomicU64::new(4);
+        let screener = Mutex::new(ScreenerState::new());
+        assert!(super::mutate_current_enrichment_state(
+            &active,
+            4,
+            &screener,
+            |state| state.scoring_model = "current".into()
+        ));
+        active.store(5, Ordering::SeqCst);
+        assert!(!super::mutate_current_enrichment_state(
+            &active,
+            4,
+            &screener,
+            |state| state.scoring_model = "stale".into()
+        ));
+        assert_eq!(screener.lock().unwrap().scoring_model, "current");
+    }
+
+    #[test]
+    fn stale_bulk_quote_and_chart_cannot_repopulate_new_profile() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Mutex;
+
+        let active = AtomicU64::new(4);
+        let screener = Mutex::new(ScreenerState::new());
+        let old_quote = FetchResult {
+            symbol: "OLD".into(),
+            snapshot: Some(MarketSnapshot {
+                symbol: "OLD".into(),
+                company_name: None,
+                profitable: true,
+                market_price_cents: 10_000,
+                intrinsic_value_cents: 0,
+                previous_close_cents: 0,
+                next_earnings_epoch: None,
+            }),
+            signal: None,
+            fundamentals: None,
+        };
+        active.store(5, Ordering::SeqCst);
+        screener.lock().unwrap().ingest_snapshot(MarketSnapshot {
+            symbol: "NEW".into(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 20_000,
+            intrinsic_value_cents: 0,
+            previous_close_cents: 0,
+            next_earnings_epoch: None,
+        });
+        assert_eq!(
+            super::apply_refresh_quote_if_current(&active, 4, &screener, old_quote, false, false),
+            None
+        );
+        let old_chart = vec![crate::engine::HistoricalCandle {
+            epoch_seconds: 1,
+            open_cents: 10_000,
+            high_cents: 10_000,
+            low_cents: 10_000,
+            close_cents: 10_000,
+            volume: 100,
+        }];
+        assert_eq!(
+            super::apply_refresh_chart_if_current(
+                &active,
+                4,
+                &screener,
+                "OLD",
+                old_chart,
+                RefreshOutcome::default(),
+            ),
+            None
+        );
+        let state = screener.lock().unwrap();
+        assert_eq!(state.snapshots.len(), 1);
+        assert!(state.snapshots.contains_key("NEW"));
+        assert!(!state.chart_summaries.contains_key("OLD"));
+    }
+
+    #[test]
+    fn stale_sec_result_and_feed_error_cannot_enter_new_profile() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Mutex;
+
+        let active = AtomicU64::new(7);
+        let screener = Mutex::new(ScreenerState::new());
+        let status = Mutex::new(crate::state::FeedStatus::default());
+        active.store(8, Ordering::SeqCst);
+        assert!(!super::mutate_current_enrichment_state(
+            &active,
+            7,
+            &screener,
+            |state| state.ingest_insider(
+                "OLD".into(),
+                crate::engine::InsiderData {
+                    net_shares_90d: 100,
+                    buy_count: 1,
+                    sell_count: 0,
+                }
+            )
+        ));
+        assert!(!super::mutate_current_feed_status(
+            &active,
+            7,
+            &status,
+            |status| {
+                status.last_error = Some("old SEC error".into());
+            }
+        ));
+        assert!(screener.lock().unwrap().insider_data.is_empty());
+        assert!(status.lock().unwrap().last_error.is_none());
+    }
+
+    #[test]
+    fn concurrent_profile_adoptions_are_serialized() {
+        use std::sync::mpsc;
+        use std::sync::{Arc, Mutex};
+
+        let gate = Arc::new(Mutex::new(()));
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first_gate = Arc::clone(&gate);
+        let first = std::thread::spawn(move || {
+            super::with_profile_apply_gate(&first_gate, || {
+                first_entered_tx.send(()).unwrap();
+                release_first_rx.recv().unwrap();
+            });
+        });
+        first_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+        let second_gate = Arc::clone(&gate);
+        let second = std::thread::spawn(move || {
+            second_started_tx.send(()).unwrap();
+            super::with_profile_apply_gate(&second_gate, || second_entered_tx.send(()).unwrap());
+        });
+        second_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(second_entered_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+        release_first_tx.send(()).unwrap();
+        first.join().unwrap();
+        second_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        second.join().unwrap();
+    }
+
+    #[test]
+    fn old_demand_worker_cannot_block_or_release_new_generation_owner() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        let inflight = Arc::new(Mutex::new(HashSet::new()));
+        assert!(super::claim_demand_valuation(&inflight, 4, "COF"));
+        assert!(super::claim_demand_valuation(&inflight, 5, "COF"));
+        let old = super::ValuationInflightGuard {
+            symbol: "COF".into(),
+            generation: 4,
+            inflight: Arc::clone(&inflight),
+        };
+        drop(old);
+        assert!(!super::claim_demand_valuation(&inflight, 5, "COF"));
+        assert_eq!(inflight.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stale_demand_failure_cannot_mark_new_profile_or_newer_inputs() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{Arc, Mutex};
+
+        let active = AtomicU64::new(5);
+        let mut state = ScreenerState::new();
+        let fund = FundamentalSnapshot {
+            symbol: "NEW".into(),
+            sector_name: Some("Financial Services".into()),
+            ..Default::default()
+        };
+        state.ingest_fundamentals(fund.clone());
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "NEW".into(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 15_000,
+            intrinsic_value_cents: 0,
+            previous_close_cents: 0,
+            next_earnings_epoch: None,
+        });
+        let old_key = super::financial_dcf_input_key(&fund, Some(15_000));
+        let old_revision = super::dcf_revision_key(&state, "NEW");
+        let screener = Arc::new(Mutex::new(state));
+        super::record_demand_valuation_failure(
+            "NEW",
+            &screener,
+            &active,
+            4,
+            &old_key,
+            &old_revision,
+            "old failure",
+        );
+        assert!(screener.lock().unwrap().valuation_errors.is_empty());
+        screener
+            .lock()
+            .unwrap()
+            .snapshots
+            .get_mut("NEW")
+            .unwrap()
+            .market_price_cents = 16_000;
+        super::record_demand_valuation_failure(
+            "NEW",
+            &screener,
+            &active,
+            5,
+            &old_key,
+            &old_revision,
+            "old input failure",
+        );
+        assert!(screener.lock().unwrap().valuation_errors.is_empty());
+        let current_key = super::financial_dcf_input_key(&fund, Some(16_000));
+        screener.lock().unwrap().dcf_values.insert("NEW".into(), 42);
+        super::record_demand_valuation_failure(
+            "NEW",
+            &screener,
+            &active,
+            5,
+            &current_key,
+            &old_revision,
+            "old DCF failure",
+        );
+        assert_eq!(screener.lock().unwrap().dcf_values.get("NEW"), Some(&42));
+        assert!(screener.lock().unwrap().valuation_errors.is_empty());
+        let current_revision = super::dcf_revision_key(&screener.lock().unwrap(), "NEW");
+        super::record_demand_valuation_failure(
+            "NEW",
+            &screener,
+            &active,
+            5,
+            &current_key,
+            &current_revision,
+            super::DEMAND_INPUTS_CHANGED,
+        );
+        assert_eq!(screener.lock().unwrap().dcf_values.get("NEW"), Some(&42));
+        assert!(screener.lock().unwrap().valuation_errors.is_empty());
+        super::record_demand_valuation_failure(
+            "NEW",
+            &screener,
+            &active,
+            5,
+            &current_key,
+            &current_revision,
+            "current failure",
+        );
+        assert_eq!(
+            screener
+                .lock()
+                .unwrap()
+                .valuation_errors
+                .get("NEW")
+                .map(String::as_str),
+            Some("current failure")
+        );
+    }
+
+    #[test]
+    fn financial_refresh_failure_keeps_its_reason_after_own_fundamental_write() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{Arc, Mutex};
+
+        let active = AtomicU64::new(7);
+        let fund = FundamentalSnapshot {
+            symbol: "COF".into(),
+            sector_name: Some("Financial Services".into()),
+            shares_outstanding: Some(10_000),
+            book_value_per_share_cents: Some(10_000),
+            return_on_equity_bps: Some(900),
+            retention_bps: None,
+            ..Default::default()
+        };
+        let mut state = ScreenerState::new();
+        state.ingest_fundamentals(fund.clone());
+        let initial_key = super::financial_dcf_input_key(&fund, None);
+        let mut failure_context = super::DemandFailureContext::capture(&state, "COF");
+        let screener = Arc::new(Mutex::new(state));
+        let cik_cache = Arc::new(Mutex::new(None));
+        let mut refreshed = fund;
+        refreshed.book_value_per_share_cents = Some(11_000);
+
+        let error = compute_demand_valuation_once_with_financial_refresh(
+            "COF",
+            &screener,
+            &cik_cache,
+            &None,
+            &active,
+            7,
+            &mut failure_context,
+            |_| Ok(Some(refreshed)),
+        )
+        .unwrap_err();
+        assert!(error.contains("retention/payout"));
+        super::record_demand_valuation_failure(
+            "COF",
+            &screener,
+            &active,
+            7,
+            &failure_context.input_key,
+            &failure_context.dcf_revision,
+            &error,
+        );
+        assert_eq!(
+            screener
+                .lock()
+                .unwrap()
+                .valuation_errors
+                .get("COF")
+                .map(String::as_str),
+            Some(error.as_str())
+        );
+        assert_ne!(failure_context.input_key, initial_key);
+    }
+
+    #[test]
+    fn financial_refresh_failure_cannot_mark_later_unrelated_inputs() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{Arc, Mutex};
+
+        let active = AtomicU64::new(7);
+        let fund = FundamentalSnapshot {
+            symbol: "COF".into(),
+            sector_name: Some("Financial Services".into()),
+            shares_outstanding: Some(10_000),
+            book_value_per_share_cents: Some(10_000),
+            return_on_equity_bps: Some(900),
+            retention_bps: None,
+            ..Default::default()
+        };
+        let mut state = ScreenerState::new();
+        state.ingest_fundamentals(fund.clone());
+        let mut failure_context = super::DemandFailureContext::capture(&state, "COF");
+        let screener = Arc::new(Mutex::new(state));
+        let cik_cache = Arc::new(Mutex::new(None));
+        let mut refreshed = fund;
+        refreshed.book_value_per_share_cents = Some(11_000);
+        let error = compute_demand_valuation_once_with_financial_refresh(
+            "COF",
+            &screener,
+            &cik_cache,
+            &None,
+            &active,
+            7,
+            &mut failure_context,
+            |_| Ok(Some(refreshed)),
+        )
+        .unwrap_err();
+        screener
+            .lock()
+            .unwrap()
+            .fundamentals
+            .get_mut("COF")
+            .unwrap()
+            .book_value_per_share_cents = Some(12_000);
+
+        super::record_demand_valuation_failure(
+            "COF",
+            &screener,
+            &active,
+            7,
+            &failure_context.input_key,
+            &failure_context.dcf_revision,
+            &error,
+        );
+        assert!(screener.lock().unwrap().valuation_errors.is_empty());
+    }
+
+    #[test]
+    fn stale_financial_refresh_cannot_publish_after_profile_switch() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let active = AtomicU64::new(4);
+        let mut state = ScreenerState::new();
+        state.ingest_fundamentals(FundamentalSnapshot {
+            symbol: "COF".into(),
+            sector_name: Some("Financial Services".into()),
+            shares_outstanding: Some(10_000),
+            book_value_per_share_cents: Some(10_000),
+            return_on_equity_bps: Some(900),
+            retention_bps: None,
+            ..Default::default()
+        });
+        let screener = Arc::new(Mutex::new(state));
+        let cik_cache = Arc::new(Mutex::new(None));
+        let mut failure_context =
+            super::DemandFailureContext::capture(&screener.lock().unwrap(), "COF");
+        let result = compute_demand_valuation_once_with_financial_refresh(
+            "COF",
+            &screener,
+            &cik_cache,
+            &None,
+            &active,
+            4,
+            &mut failure_context,
+            |_| {
+                active.store(5, Ordering::SeqCst);
+                let mut state = screener.lock().unwrap();
+                state.clear_universe();
+                state.ingest_fundamentals(FundamentalSnapshot {
+                    symbol: "NEW".into(),
+                    ..Default::default()
+                });
+                Ok(Some(FundamentalSnapshot {
+                    symbol: "COF".into(),
+                    retention_bps: Some(7_000),
+                    ..Default::default()
+                }))
+            },
+        );
+        assert!(result.unwrap_err().contains("profile changed"));
+        let state = screener.lock().unwrap();
+        assert!(!state.fundamentals.contains_key("COF"));
+        assert!(state.fundamentals.contains_key("NEW"));
+        assert!(!state.dcf_analyses.contains_key("COF"));
+    }
+
+    #[test]
+    fn financial_refresh_cannot_replace_newer_price_or_fundamentals_in_same_generation() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{Arc, Mutex};
+
+        let active = AtomicU64::new(4);
+        let mut state = ScreenerState::new();
+        let stale_fund = FundamentalSnapshot {
+            symbol: "COF".into(),
+            sector_name: Some("Financial Services".into()),
+            shares_outstanding: Some(10_000),
+            book_value_per_share_cents: Some(10_000),
+            return_on_equity_bps: Some(900),
+            retention_bps: None,
+            ..Default::default()
+        };
+        state.ingest_fundamentals(stale_fund.clone());
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "COF".into(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 15_000,
+            intrinsic_value_cents: 0,
+            previous_close_cents: 0,
+            next_earnings_epoch: None,
+        });
+        let screener = Arc::new(Mutex::new(state));
+        let cik_cache = Arc::new(Mutex::new(None));
+        let mut refreshed = stale_fund;
+        refreshed.retention_bps = Some(7_000);
+        let mut failure_context =
+            super::DemandFailureContext::capture(&screener.lock().unwrap(), "COF");
+        let result = compute_demand_valuation_once_with_financial_refresh(
+            "COF",
+            &screener,
+            &cik_cache,
+            &None,
+            &active,
+            4,
+            &mut failure_context,
+            |_| {
+                screener
+                    .lock()
+                    .unwrap()
+                    .snapshots
+                    .get_mut("COF")
+                    .unwrap()
+                    .market_price_cents = 16_000;
+                Ok(Some(refreshed))
+            },
+        );
+        assert!(result.unwrap_err().contains("inputs changed"));
+        let state = screener.lock().unwrap();
+        assert_eq!(state.fundamentals["COF"].retention_bps, None);
+        assert_eq!(state.snapshots["COF"].market_price_cents, 16_000);
+        assert!(!state.dcf_analyses.contains_key("COF"));
+    }
+
+    #[test]
+    fn demand_input_identity_changes_with_price_and_fundamentals() {
+        let mut state = ScreenerState::new();
+        let fund = FundamentalSnapshot {
+            symbol: "COF".into(),
+            sector_name: Some("Financial Services".into()),
+            retention_bps: Some(7_000),
+            ..Default::default()
+        };
+        state.ingest_fundamentals(fund.clone());
+        state.ingest_snapshot(MarketSnapshot {
+            symbol: "COF".into(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: 15_000,
+            intrinsic_value_cents: 0,
+            previous_close_cents: 0,
+            next_earnings_epoch: None,
+        });
+        assert!(super::demand_inputs_are_current(
+            &state,
+            "COF",
+            &fund,
+            Some(15_000)
+        ));
+        state.snapshots.get_mut("COF").unwrap().market_price_cents = 16_000;
+        assert!(!super::demand_inputs_are_current(
+            &state,
+            "COF",
+            &fund,
+            Some(15_000)
+        ));
+        state.snapshots.get_mut("COF").unwrap().market_price_cents = 15_000;
+        state.fundamentals.get_mut("COF").unwrap().retention_bps = Some(6_000);
+        assert!(!super::demand_inputs_are_current(
+            &state,
+            "COF",
+            &fund,
+            Some(15_000)
+        ));
+    }
+
+    #[test]
+    fn demand_publication_refuses_a_replaced_dcf_analysis() {
+        let mut state = ScreenerState::new();
+        let fund = FundamentalSnapshot {
+            symbol: "COF".into(),
+            sector_name: Some("Financial Services".into()),
+            shares_outstanding: Some(10_000),
+            book_value_per_share_cents: Some(10_000),
+            return_on_equity_bps: Some(900),
+            retention_bps: Some(7_000),
+            ..Default::default()
+        };
+        state.ingest_fundamentals(fund.clone());
+        let captured_revision = super::dcf_revision_key(&state, "COF");
+        assert!(super::demand_publication_inputs_are_current(
+            &state,
+            "COF",
+            &fund,
+            None,
+            &captured_revision,
+        ));
+
+        let mut replacement = state.dcf_analyses["COF"].clone();
+        replacement.base_intrinsic_value_cents += 1;
+        state.dcf_analyses.insert("COF".into(), replacement);
+        assert!(!super::demand_publication_inputs_are_current(
+            &state,
+            "COF",
+            &fund,
+            None,
+            &captured_revision,
+        ));
+    }
+
+    #[test]
+    fn demand_publication_refuses_a_newer_operating_envelope_without_fcff() {
+        let mut state = ScreenerState::new();
+        let fund = FundamentalSnapshot {
+            symbol: "TECH".into(),
+            sector_name: Some("Technology".into()),
+            ..Default::default()
+        };
+        state.ingest_fundamentals(fund.clone());
+        let captured_revision = super::dcf_revision_key(&state, "TECH");
+        let market_params = crate::dcf_model::MarketParams::default_usd();
+        let envelope = crate::operating_valuation_runtime::route_runtime_valuation(
+            crate::operating_valuation_runtime::RuntimeValuationInput {
+                business_class: crate::dcf_model::BusinessClass::OperatingNonFinancial,
+                fundamentals: &fund,
+                fcff_analysis: None,
+                fcff_failure: Some("missing SEC FCFF"),
+                forward_evidence: Err(
+                    crate::operating_valuation_runtime::ForwardSourceFailure::NotAttempted,
+                ),
+                market_params: &market_params,
+                as_of_epoch_day: 20_000,
+                market_price_cents: None,
+            },
+        );
+        state.ingest_operating_valuation("TECH".into(), None, envelope);
+        assert!(!super::demand_publication_inputs_are_current(
+            &state,
+            "TECH",
+            &fund,
+            None,
+            &captured_revision,
+        ));
+    }
+
+    #[test]
+    fn demand_publication_refuses_a_newer_failure_without_dcf() {
+        let mut state = ScreenerState::new();
+        let fund = FundamentalSnapshot {
+            symbol: "TECH".into(),
+            sector_name: Some("Technology".into()),
+            ..Default::default()
+        };
+        state.ingest_fundamentals(fund.clone());
+        let captured_revision = super::dcf_revision_key(&state, "TECH");
+        state.set_valuation_error("TECH".into(), "newer failure".into());
+        assert!(!super::demand_publication_inputs_are_current(
+            &state,
+            "TECH",
+            &fund,
+            None,
+            &captured_revision,
+        ));
+    }
+
+    #[test]
+    fn old_profile_history_insert_is_refused_after_switch() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Mutex;
+
+        let gate = Mutex::new(());
+        let active = AtomicU64::new(9);
+        let mut inserted = false;
+        let result = super::with_current_profile_generation(&gate, &active, 8, || {
+            inserted = true;
+        });
+        assert!(result.is_none());
+        assert!(!inserted);
+        assert!(
+            super::with_current_profile_generation(&gate, &active, 9, || {
+                inserted = true;
+            })
+            .is_some()
+        );
+        assert!(inserted);
+    }
+
+    #[test]
+    fn bulk_charts_request_only_weekly_and_hourly_while_detail_keeps_monthly() {
+        let mut requests = Vec::new();
+        let completed = super::for_each_bulk_chart_request(|request, _kind| {
+            requests.push((request.range, request.interval));
+            true
+        });
+
+        assert!(completed);
+        assert_eq!(requests, [("5y", "1wk"), ("1mo", "1h")]);
+        assert_eq!(
+            (
+                super::DETAIL_MONTHLY_CHART_REQUEST.range,
+                super::DETAIL_MONTHLY_CHART_REQUEST.interval
+            ),
+            ("10y", "1mo")
+        );
+    }
+
+    #[test]
+    fn insider_success_is_reused_until_freshness_expires() {
+        let mut schedule = super::InsiderRefreshSchedule::default();
+        let start = Instant::now();
+        let empty_activity = Ok(Some(crate::edgar::InsiderSummary {
+            net_shares_90d: 0,
+            buy_count: 0,
+            sell_count: 0,
+            filing_count: 0,
+        }));
+        let mut requests = 0;
+
+        for now in [
+            start,
+            start + Duration::from_secs(1),
+            start + Duration::from_secs(super::INSIDER_FRESHNESS_INTERVAL_SECS - 1),
+            start + Duration::from_secs(super::INSIDER_FRESHNESS_INTERVAL_SECS),
+        ] {
+            if schedule.is_due("AAPL", now) {
+                requests += 1;
+                schedule.record_result("AAPL", now, &empty_activity);
+            }
+        }
+
+        assert_eq!(requests, 2);
+        assert!(schedule.is_due("MSFT", start));
+    }
+
+    #[test]
+    fn insider_failure_retries_after_backoff_and_empty_payload_stays_fresh() {
+        let mut schedule = super::InsiderRefreshSchedule::default();
+        let start = Instant::now();
+
+        schedule.record_result("AAPL", start, &Err("SEC unavailable".into()));
+        assert!(!schedule.is_due("AAPL", start + Duration::from_secs(1)));
+        assert!(!schedule.is_due(
+            "AAPL",
+            start + Duration::from_secs(super::INSIDER_RETRY_INTERVAL_SECS - 1)
+        ));
+        assert!(schedule.is_due(
+            "AAPL",
+            start + Duration::from_secs(super::INSIDER_RETRY_INTERVAL_SECS)
+        ));
+
+        schedule.record_result("AAPL", start, &Ok(None));
+        assert!(!schedule.is_due("AAPL", start + Duration::from_secs(1)));
+        assert!(!schedule.is_due(
+            "AAPL",
+            start + Duration::from_secs(super::INSIDER_RETRY_INTERVAL_SECS)
+        ));
+        assert!(schedule.is_due(
+            "AAPL",
+            start + Duration::from_secs(super::INSIDER_FRESHNESS_INTERVAL_SECS)
+        ));
+    }
+
+    #[test]
+    fn financial_dcf_skips_identical_inputs_and_recomputes_changed_inputs() {
+        let start = Instant::now();
+        let mut schedule = super::FinancialDcfSchedule::default();
+        let mut fund = FundamentalSnapshot {
+            symbol: "COF".into(),
+            return_on_equity_bps: Some(900),
+            retention_bps: Some(8_000),
+            ..Default::default()
+        };
+        let first = super::financial_dcf_input_key(&fund, Some(15_000));
+        assert!(schedule.should_compute("COF", &first, start, false));
+        schedule.record_result("COF", first.clone(), start, true);
+        assert!(!schedule.should_compute("COF", &first, start + Duration::from_secs(60), true));
+        assert!(schedule.should_compute("COF", &first, start + Duration::from_secs(60), false));
+
+        let new_price = super::financial_dcf_input_key(&fund, Some(16_000));
+        assert!(schedule.should_compute("COF", &new_price, start, true));
+        fund.retention_bps = Some(7_000);
+        let new_retention = super::financial_dcf_input_key(&fund, Some(15_000));
+        assert!(schedule.should_compute("COF", &new_retention, start, true));
+    }
+
+    #[test]
+    fn financial_dcf_retries_failed_input_after_backoff_or_input_change() {
+        let start = Instant::now();
+        let mut schedule = super::FinancialDcfSchedule::default();
+        let mut fund = FundamentalSnapshot {
+            symbol: "COF".into(),
+            ..Default::default()
+        };
+        let incomplete = super::financial_dcf_input_key(&fund, Some(15_000));
+        schedule.record_result("COF", incomplete.clone(), start, false);
+        assert!(!schedule.should_compute(
+            "COF",
+            &incomplete,
+            start + Duration::from_secs(1),
+            false
+        ));
+        assert!(schedule.should_compute(
+            "COF",
+            &incomplete,
+            start + Duration::from_secs(super::FINANCIAL_DCF_RETRY_INTERVAL_SECS),
+            false
+        ));
+
+        fund.retention_bps = Some(8_000);
+        let enriched = super::financial_dcf_input_key(&fund, Some(15_000));
+        assert!(schedule.should_compute("COF", &enriched, start + Duration::from_secs(1), false));
+        schedule.forget("COF");
+        assert!(schedule.should_compute("COF", &incomplete, start + Duration::from_secs(1), false));
+    }
 
     #[test]
     fn financial_detail_refreshes_when_retention_is_missing() {
@@ -1955,12 +3835,18 @@ mod feed_coordinator_tests {
 
         let screener = std::sync::Arc::new(std::sync::Mutex::new(state));
         let cik_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let active = std::sync::atomic::AtomicU64::new(1);
         let mut refresh_calls = 0;
+        let mut failure_context =
+            super::DemandFailureContext::capture(&screener.lock().unwrap(), "COF");
         compute_demand_valuation_once_with_financial_refresh(
             "COF",
             &screener,
             &cik_cache,
             &None,
+            &active,
+            1,
+            &mut failure_context,
             |requested_symbol| {
                 refresh_calls += 1;
                 assert_eq!(requested_symbol, "COF");
@@ -2229,122 +4115,181 @@ struct RefreshOutcome {
     enriched: bool,
 }
 
+fn apply_refresh_quote_if_current(
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    screener: &Mutex<crate::engine::ScreenerState>,
+    result: crate::fetcher::FetchResult,
+    crypto: bool,
+    etf: bool,
+) -> Option<RefreshOutcome> {
+    let mut outcome = RefreshOutcome::default();
+    mutate_current_enrichment_state(active_generation, generation, screener, |state| {
+        outcome = ingest_fetch_result(state, result, crypto, etf);
+    })
+    .then_some(outcome)
+}
+
+fn apply_refresh_chart_if_current(
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    screener: &Mutex<crate::engine::ScreenerState>,
+    sym: &str,
+    candles: Vec<HistoricalCandle>,
+    mut outcome: RefreshOutcome,
+) -> Option<RefreshOutcome> {
+    let summary = compute_chart_summary(&candles);
+    let crypto = is_crypto(sym);
+    let etf = is_etf(sym);
+    mutate_current_enrichment_state(active_generation, generation, screener, |state| {
+        let Some(summary) = summary else { return };
+        let close = summary.latest_close_cents;
+        let already = state.snapshots.contains_key(sym);
+        state.ingest_chart_summary(sym.to_string(), summary);
+        state.ingest_daily_candles(sym.to_string(), candles);
+        if close <= 0 {
+            return;
+        }
+        if already {
+            let needs_price = state
+                .snapshots
+                .get(sym)
+                .map(|x| x.market_price_cents <= 0)
+                .unwrap_or(true);
+            if needs_price {
+                use crate::engine::MarketSnapshot;
+                let prev = state.snapshots.get(sym).cloned();
+                state.ingest_partial_snapshot(MarketSnapshot {
+                    symbol: sym.to_string(),
+                    company_name: prev.as_ref().and_then(|x| x.company_name.clone()),
+                    profitable: prev.as_ref().map(|x| x.profitable).unwrap_or(crypto || etf),
+                    market_price_cents: close,
+                    intrinsic_value_cents: prev
+                        .as_ref()
+                        .map(|x| x.intrinsic_value_cents)
+                        .unwrap_or(0),
+                    previous_close_cents: prev
+                        .as_ref()
+                        .map(|x| x.previous_close_cents)
+                        .unwrap_or(0),
+                    next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
+                });
+            }
+            outcome.visible = true;
+        } else {
+            use crate::engine::{FundamentalSnapshot, MarketSnapshot};
+            state.ingest_partial_snapshot(MarketSnapshot {
+                symbol: sym.to_string(),
+                company_name: None,
+                profitable: crypto || etf,
+                market_price_cents: close,
+                intrinsic_value_cents: 0,
+                previous_close_cents: 0,
+                next_earnings_epoch: None,
+            });
+            let sector = if crypto {
+                Some("Cryptocurrency".to_string())
+            } else {
+                etf_sector(sym).map(|s| s.to_string())
+            };
+            if sector.is_some() {
+                state.ingest_fundamentals(FundamentalSnapshot {
+                    symbol: sym.to_string(),
+                    sector_name: sector,
+                    ..Default::default()
+                });
+            }
+            outcome.visible = true;
+        }
+    })
+    .then_some(outcome)
+}
+
 /// Fetch one symbol progressively: price/name makes it visible immediately, while
 /// quoteSummary completeness controls only whether it remains in the retry set.
 fn refresh_one_symbol(
     client: &YahooClient,
     screener: &std::sync::Mutex<crate::engine::ScreenerState>,
     feed_status: &std::sync::Mutex<crate::state::FeedStatus>,
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
     sym: &str,
-) -> RefreshOutcome {
+) -> Option<RefreshOutcome> {
     let crypto = is_crypto(sym);
     let etf = is_etf(sym);
     let mut outcome = RefreshOutcome::default();
 
     match client.fetch_symbol(sym) {
         Ok(result) => {
-            let mut s = screener.lock().unwrap();
-            outcome = ingest_fetch_result(&mut s, result, crypto, etf);
+            outcome = apply_refresh_quote_if_current(
+                active_generation,
+                generation,
+                screener,
+                result,
+                crypto,
+                etf,
+            )?;
             if outcome.enriched {
-                feed_status.lock().unwrap().last_error = None;
+                if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
+                    s.last_error = None;
+                }) {
+                    return None;
+                }
             }
         }
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("429") {
-                feed_status.lock().unwrap().last_error = Some(
-                    "Yahoo rate-limited — retrying until full quote columns are available".into(),
-                );
+                if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
+                    s.last_error = Some(
+                        "Yahoo rate-limited — retrying until full quote columns are available"
+                            .into(),
+                    );
+                }) {
+                    return None;
+                }
             } else if !(msg.contains("404") || msg.contains("401") || msg.contains("403")) {
-                feed_status.lock().unwrap().last_error = Some(format!("{sym}: {e}"));
-            }
-        }
-    }
-
-    // Year chart for spark/technicals — only attach to symbols already in the list,
-    // or create crypto/ETF rows that can stand without analyst columns.
-    if let Ok(candles) = client.fetch_candles(sym, "1y", "1d") {
-        if let Some(summary) = compute_chart_summary(&candles) {
-            let close = summary.latest_close_cents;
-            let mut s = screener.lock().unwrap();
-            let already = s.snapshots.contains_key(sym);
-            s.ingest_chart_summary(sym.to_string(), summary);
-            s.ingest_daily_candles(sym.to_string(), candles);
-            if close > 0 {
-                if already {
-                    let needs_price = s
-                        .snapshots
-                        .get(sym)
-                        .map(|x| x.market_price_cents <= 0)
-                        .unwrap_or(true);
-                    if needs_price {
-                        use crate::engine::MarketSnapshot;
-                        let prev = s.snapshots.get(sym).cloned();
-                        s.ingest_partial_snapshot(MarketSnapshot {
-                            symbol: sym.to_string(),
-                            company_name: prev.as_ref().and_then(|x| x.company_name.clone()),
-                            profitable: prev
-                                .as_ref()
-                                .map(|x| x.profitable)
-                                .unwrap_or(crypto || etf),
-                            market_price_cents: close,
-                            intrinsic_value_cents: prev
-                                .as_ref()
-                                .map(|x| x.intrinsic_value_cents)
-                                .unwrap_or(0),
-                            previous_close_cents: prev
-                                .as_ref()
-                                .map(|x| x.previous_close_cents)
-                                .unwrap_or(0),
-                            next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
-                        });
-                    }
-                    outcome.visible = true;
-                } else {
-                    // Chart alone is enough for progressive visibility. Asset-specific
-                    // sector labels are enrichment, not a prerequisite for stock rows.
-                    use crate::engine::{FundamentalSnapshot, MarketSnapshot};
-                    s.ingest_partial_snapshot(MarketSnapshot {
-                        symbol: sym.to_string(),
-                        company_name: None,
-                        profitable: crypto || etf,
-                        market_price_cents: close,
-                        intrinsic_value_cents: 0,
-                        previous_close_cents: 0,
-                        next_earnings_epoch: None,
-                    });
-                    let sector = if crypto {
-                        Some("Cryptocurrency".to_string())
-                    } else {
-                        etf_sector(sym).map(|s| s.to_string())
-                    };
-                    if sector.is_some() {
-                        s.ingest_fundamentals(FundamentalSnapshot {
-                            symbol: sym.to_string(),
-                            sector_name: sector,
-                            ..Default::default()
-                        });
-                    }
-                    outcome.visible = true;
+                if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
+                    s.last_error = Some(format!("{sym}: {e}"));
+                }) {
+                    return None;
                 }
             }
         }
     }
 
-    outcome
+    if !generation_is_current(active_generation, generation) {
+        return None;
+    }
+
+    // Year chart for spark/technicals — only attach to symbols already in the list,
+    // or create crypto/ETF rows that can stand without analyst columns.
+    if let Ok(candles) = client.fetch_candles(sym, "1y", "1d") {
+        outcome = apply_refresh_chart_if_current(
+            active_generation,
+            generation,
+            screener,
+            sym,
+            candles,
+            outcome,
+        )?;
+    }
+
+    generation_is_current(active_generation, generation).then_some(outcome)
 }
 
 #[tauri::command]
 pub fn start_feed(state: State<AppState>) -> Result<(), String> {
-    {
+    with_profile_apply_gate(&state.profile_apply_gate, || {
         let status = state.feed_status.lock().unwrap();
         if status.running {
             return Ok(());
         }
-    }
-    // Cold start with the already-selected (or default) universe.
-    let profile = state.active_profile.lock().unwrap().clone();
-    apply_universe_profile(&profile, &state)
+        drop(status);
+        // Cold start with the already-selected (or default) universe.
+        let profile = state.active_profile.lock().unwrap().clone();
+        apply_universe_profile_serial(&profile, &state)
+    })
 }
 
 /// Spawn refresh / enrich / EDGAR / snapshot workers for symbols at generation.
@@ -2370,6 +4315,10 @@ fn spawn_feed_workers(
     let completed = Arc::new(std::sync::Mutex::new(
         std::collections::HashSet::<String>::with_capacity(total),
     ));
+    let (enrichment_senders, enrichment_receivers): (Vec<_>, Vec<_>) = (0..ENRICHMENT_CONCURRENCY)
+        .map(|_| std::sync::mpsc::channel::<String>())
+        .unzip();
+    let enrichment_senders = Arc::new(enrichment_senders);
 
     // ── Android-style refresh coordinator ───────────────────────────────────
     {
@@ -2380,6 +4329,7 @@ fn spawn_feed_workers(
         let feed_log = Arc::clone(&state.feed_log);
         let loaded = Arc::clone(&loaded);
         let completed = Arc::clone(&completed);
+        let enrichment_senders = Arc::clone(&enrichment_senders);
         let feed_gen = Arc::clone(&feed_gen);
         let initial_pass_completed_generation =
             Arc::clone(&state.initial_pass_completed_generation);
@@ -2409,9 +4359,15 @@ fn spawn_feed_workers(
                         let wait_ms = batch_retry_delay_ms(cool, round - 1);
                         let pending_refs = pending_as_refs(&pending);
                         feed_log.log_pending_retry(round, MAX_RETRY_ROUNDS, &pending_refs);
-                        feed_status.lock().unwrap().last_error = Some(
-                            format_incomplete_retry_status(round, MAX_RETRY_ROUNDS, &pending),
-                        );
+                        if !mutate_current_feed_status(&feed_gen, generation, &feed_status, |s| {
+                            s.last_error = Some(format_incomplete_retry_status(
+                                round,
+                                MAX_RETRY_ROUNDS,
+                                &pending,
+                            ));
+                        }) {
+                            return;
+                        }
                         thread::sleep(std::time::Duration::from_millis(wait_ms));
                         if !generation_is_current(&feed_gen, generation) {
                             return;
@@ -2432,6 +4388,7 @@ fn spawn_feed_workers(
                         let feed_status = Arc::clone(&feed_status);
                         let loaded = Arc::clone(&loaded);
                         let completed = Arc::clone(&completed);
+                        let enrichment_senders = Arc::clone(&enrichment_senders);
                         let feed_gen = Arc::clone(&feed_gen);
 
                         handles.push(
@@ -2457,17 +4414,28 @@ fn spawn_feed_workers(
                                         break;
                                     }
                                     let sym = batch[i].as_str();
-                                    let outcome =
-                                        refresh_one_symbol(&client, &screener, &feed_status, sym);
-                                    if !generation_is_current(&feed_gen, generation) {
+                                    let Some(outcome) = refresh_one_symbol(
+                                        &client,
+                                        &screener,
+                                        &feed_status,
+                                        &feed_gen,
+                                        generation,
+                                        sym,
+                                    ) else {
                                         break;
-                                    }
+                                    };
                                     if outcome.visible {
-                                        let mut done = completed.lock().unwrap();
-                                        if done.insert(sym.to_string()) {
-                                            let n = loaded.fetch_add(1, Ordering::Relaxed) + 1;
-                                            feed_status.lock().unwrap().symbols_loaded =
-                                                n.min(total);
+                                        if !queue_visible_symbol_for_enrichment(
+                                            sym,
+                                            &feed_gen,
+                                            generation,
+                                            &completed,
+                                            &loaded,
+                                            &feed_status,
+                                            &enrichment_senders,
+                                            total,
+                                        ) {
+                                            break;
                                         }
                                     }
                                     let retry = {
@@ -2500,8 +4468,11 @@ fn spawn_feed_workers(
                 if !pending.is_empty() {
                     let pending_refs = pending_as_refs(&pending);
                     feed_log.log_terminal_incomplete(&pending_refs);
-                    feed_status.lock().unwrap().last_error =
-                        Some(format_terminal_incomplete_status(&pending));
+                    if !mutate_current_feed_status(&feed_gen, generation, &feed_status, |s| {
+                        s.last_error = Some(format_terminal_incomplete_status(&pending));
+                    }) {
+                        return;
+                    }
                 } else {
                     feed_log.info("feed initial enrichment complete: no pending symbols");
                 }
@@ -2527,6 +4498,7 @@ fn spawn_feed_workers(
                         let feed_status = Arc::clone(&feed_status);
                         let loaded = Arc::clone(&loaded);
                         let completed = Arc::clone(&completed);
+                        let enrichment_senders = Arc::clone(&enrichment_senders);
                         let feed_gen = Arc::clone(&feed_gen);
                         handles.push(
                             thread::Builder::new()
@@ -2540,17 +4512,28 @@ fn spawn_feed_workers(
                                         break;
                                     }
                                     let sym = symbols[i].as_str();
-                                    let outcome =
-                                        refresh_one_symbol(&client, &screener, &feed_status, sym);
-                                    if !generation_is_current(&feed_gen, generation) {
+                                    let Some(outcome) = refresh_one_symbol(
+                                        &client,
+                                        &screener,
+                                        &feed_status,
+                                        &feed_gen,
+                                        generation,
+                                        sym,
+                                    ) else {
                                         break;
-                                    }
+                                    };
                                     if outcome.visible {
-                                        let mut done = completed.lock().unwrap();
-                                        if done.insert(sym.to_string()) {
-                                            let n = loaded.fetch_add(1, Ordering::Relaxed) + 1;
-                                            feed_status.lock().unwrap().symbols_loaded =
-                                                n.min(symbols.len());
+                                        if !queue_visible_symbol_for_enrichment(
+                                            sym,
+                                            &feed_gen,
+                                            generation,
+                                            &completed,
+                                            &loaded,
+                                            &feed_status,
+                                            &enrichment_senders,
+                                            symbols.len(),
+                                        ) {
+                                            break;
                                         }
                                     }
                                 })
@@ -2573,109 +4556,183 @@ fn spawn_feed_workers(
 
     // ── Enrichment ──────────────────────────────────────────────────────────
     {
-        let symbols = Arc::clone(&symbols);
         let client = Arc::clone(&shared_client);
         let screener = Arc::clone(&state.screener);
         let fng_cache = Arc::clone(&state.fng_cache);
-        let completed = Arc::clone(&completed);
-        let enrich_cursor = Arc::new(AtomicUsize::new(0));
+        let feed_log = Arc::clone(&state.feed_log);
         let feed_gen = Arc::clone(&feed_gen);
 
-        for w in 0..ENRICHMENT_CONCURRENCY {
-            let symbols = Arc::clone(&symbols);
+        for (w, receiver) in enrichment_receivers.into_iter().enumerate() {
             let client = Arc::clone(&client);
             let screener = Arc::clone(&screener);
             let fng_cache = Arc::clone(&fng_cache);
-            let completed = Arc::clone(&completed);
-            let cursor = Arc::clone(&enrich_cursor);
+            let feed_log = Arc::clone(&feed_log);
             let feed_gen = Arc::clone(&feed_gen);
 
             if let Err(e) = thread::Builder::new()
                 .name(format!("enrich-{w}"))
                 .spawn(move || {
-                    while completed.lock().unwrap().is_empty() {
-                        if !generation_is_current(&feed_gen, generation) {
-                            return;
-                        }
-                        thread::sleep(std::time::Duration::from_millis(500));
-                    }
+                    let mut delayed = DelayedEnrichmentQueue::default();
                     loop {
                         if !generation_is_current(&feed_gen, generation) {
                             return;
                         }
-                        let i = cursor.fetch_add(1, Ordering::Relaxed);
-                        if i >= symbols.len() {
-                            break;
-                        }
-                        let sym = symbols[i].as_str();
-                        if !completed.lock().unwrap().contains(sym) {
-                            continue;
-                        }
-                        if client.is_rate_limited() {
-                            break;
-                        }
-
-                        if let Ok(candles) = client.fetch_candles(sym, "5y", "1wk") {
-                            if !generation_is_current(&feed_gen, generation) {
-                                return;
-                            }
-                            if let Some(summary) = compute_chart_summary(&candles) {
-                                let mut s = screener.lock().unwrap();
-                                s.ingest_weekly_summary(sym.to_string(), summary);
-                                if is_crypto(sym) {
-                                    s.ingest_weekly_candles(sym.to_string(), candles.clone());
-                                    drop(s);
-                                    let fng = fng_cache.get_cached().or_else(|| {
-                                        let http = crate::crypto_cycle::crypto_client();
-                                        let v = crate::crypto_cycle::fetch_fear_greed(&http).ok();
-                                        if let Some(ref fng) = v {
-                                            fng_cache.put(fng.clone());
-                                        }
-                                        v
-                                    });
-                                    let now_e = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs() as i64)
-                                        .unwrap_or(0);
-                                    let metrics = crate::crypto_cycle::compute_crypto_score(
-                                        sym,
-                                        &candles,
-                                        Some(0),
-                                        fng,
-                                        now_e,
-                                    );
-                                    if generation_is_current(&feed_gen, generation) {
-                                        screener
-                                            .lock()
-                                            .unwrap()
-                                            .ingest_crypto_metrics(sym.to_string(), metrics);
+                        let mut job = if let Some(job) =
+                            take_ready_enrichment_job(&receiver, &mut delayed, Instant::now())
+                        {
+                            job
+                        } else {
+                            let timeout = delayed.next_wait(Instant::now());
+                            match receiver.recv_timeout(timeout) {
+                                Ok(symbol) => EnrichmentJob::new(symbol),
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                    if delayed.len() == 0 {
+                                        return;
                                     }
+                                    if !wait_for_enrichment_retry(
+                                        &feed_gen,
+                                        generation,
+                                        timeout.as_millis().max(1) as u64,
+                                    ) {
+                                        return;
+                                    }
+                                    continue;
                                 }
                             }
+                        };
+                        let sym = job.symbol.as_str();
+                        if !generation_is_current(&feed_gen, generation) {
+                            return;
                         }
-                        if let Ok(candles) = client.fetch_candles(sym, "1mo", "1h") {
-                            if !generation_is_current(&feed_gen, generation) {
-                                return;
-                            }
-                            if let Some(summary) = compute_chart_summary(&candles) {
-                                screener
-                                    .lock()
-                                    .unwrap()
-                                    .ingest_hourly_summary(sym.to_string(), summary);
-                            }
+                        let cooldown = client.rate_limit_remaining_secs();
+                        if cooldown > 0 {
+                            let delay = Duration::from_secs(cooldown.saturating_add(1));
+                            let _ = delayed.schedule(job, Instant::now(), delay);
+                            continue;
                         }
-                        if let Ok(candles) = client.fetch_candles(sym, "10y", "1mo") {
-                            if !generation_is_current(&feed_gen, generation) {
-                                return;
+
+                        let (chart_index, outcome) =
+                            run_bulk_chart_pass(job.next_chart, |request, kind| {
+                                if !generation_is_current(&feed_gen, generation) {
+                                    return BulkChartAttemptOutcome::Cancelled;
+                                }
+                                let candles = match client.fetch_candles(
+                                    sym,
+                                    request.range,
+                                    request.interval,
+                                ) {
+                                    Ok(candles) => candles,
+                                    Err(error)
+                                        if crate::yahoo_session::is_rate_limit_error(&error) =>
+                                    {
+                                        return BulkChartAttemptOutcome::RateLimited;
+                                    }
+                                    Err(_) => return BulkChartAttemptOutcome::Complete,
+                                };
+                                if !generation_is_current(&feed_gen, generation) {
+                                    return BulkChartAttemptOutcome::Cancelled;
+                                }
+                                if let Some(summary) = compute_chart_summary(&candles) {
+                                    match kind {
+                                        BulkChartKind::Weekly => {
+                                            if !mutate_current_enrichment_state(
+                                                &feed_gen,
+                                                generation,
+                                                &screener,
+                                                |state| {
+                                                    state.ingest_weekly_summary(
+                                                        sym.to_string(),
+                                                        summary,
+                                                    );
+                                                    if is_crypto(sym) {
+                                                        state.ingest_weekly_candles(
+                                                            sym.to_string(),
+                                                            candles.clone(),
+                                                        );
+                                                    }
+                                                },
+                                            ) {
+                                                return BulkChartAttemptOutcome::Cancelled;
+                                            }
+                                            if is_crypto(sym) {
+                                                let fng = fng_cache.get_cached().or_else(|| {
+                                                    let http = crate::crypto_cycle::crypto_client();
+                                                    let v = crate::crypto_cycle::fetch_fear_greed(
+                                                        &http,
+                                                    )
+                                                    .ok();
+                                                    if let Some(ref fng) = v {
+                                                        fng_cache.put(fng.clone());
+                                                    }
+                                                    v
+                                                });
+                                                let now_e = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_secs() as i64)
+                                                    .unwrap_or(0);
+                                                let metrics =
+                                                    crate::crypto_cycle::compute_crypto_score(
+                                                        sym,
+                                                        &candles,
+                                                        Some(0),
+                                                        fng,
+                                                        now_e,
+                                                    );
+                                                if !mutate_current_enrichment_state(
+                                                    &feed_gen,
+                                                    generation,
+                                                    &screener,
+                                                    |state| {
+                                                        state.ingest_crypto_metrics(
+                                                            sym.to_string(),
+                                                            metrics,
+                                                        );
+                                                    },
+                                                ) {
+                                                    return BulkChartAttemptOutcome::Cancelled;
+                                                }
+                                            }
+                                        }
+                                        BulkChartKind::Hourly => {
+                                            if !mutate_current_enrichment_state(
+                                                &feed_gen,
+                                                generation,
+                                                &screener,
+                                                |state| {
+                                                    state.ingest_hourly_summary(
+                                                        sym.to_string(),
+                                                        summary,
+                                                    );
+                                                },
+                                            ) {
+                                                return BulkChartAttemptOutcome::Cancelled;
+                                            }
+                                        }
+                                    }
+                                }
+                                BulkChartAttemptOutcome::Complete
+                            });
+                        job.next_chart = chart_index;
+                        match outcome {
+                            BulkChartAttemptOutcome::Complete => {
+                                thread::sleep(Duration::from_millis(150));
+                                continue;
                             }
-                            if let Some(summary) = compute_chart_summary(&candles) {
-                                screener
-                                    .lock()
-                                    .unwrap()
-                                    .ingest_monthly_summary(sym.to_string(), summary);
-                            }
+                            BulkChartAttemptOutcome::Cancelled => return,
+                            BulkChartAttemptOutcome::RateLimited => {}
                         }
-                        thread::sleep(std::time::Duration::from_millis(150));
+                        let Some(wait_ms) = chart_enrichment_retry_delay_ms(
+                            client.rate_limit_remaining_secs(),
+                            job.retry_round,
+                        ) else {
+                            feed_log
+                                .warn(&format!("chart enrichment rate limit exhausted for {sym}"));
+                            continue;
+                        };
+                        job.retry_round += 1;
+                        let _ =
+                            delayed.schedule(job, Instant::now(), Duration::from_millis(wait_ms));
                     }
                 })
             {
@@ -2696,14 +4753,18 @@ fn spawn_feed_workers(
             .name("edgar-dcf".to_string())
             .spawn(move || {
                 let edgar_client = edgar::edgar_client();
+                let mut insider_schedule = InsiderRefreshSchedule::default();
+                let mut financial_dcf_schedule = FinancialDcfSchedule::default();
 
                 let cik_map: HashMap<String, u64> = match edgar::fetch_cik_map(&edgar_client) {
                     Ok(m) => m,
                     Err(e) => {
-                        if generation_is_current(&feed_gen, generation) {
-                            feed_status.lock().unwrap().last_error =
-                                Some(format!("EDGAR CIK: {}", e));
-                        }
+                        let _ = mutate_current_feed_status(
+                            &feed_gen,
+                            generation,
+                            &feed_status,
+                            |status| status.last_error = Some(format!("EDGAR CIK: {e}")),
+                        );
                         return;
                     }
                 };
@@ -2759,41 +4820,98 @@ fn spawn_feed_workers(
 
                         if business_class == crate::dcf_model::BusinessClass::FinancialServices {
                             let mut s = screener.lock().unwrap();
-                            let fund = s.fundamentals.get(sym).cloned();
-                            let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
-                            if let Some(fund) = fund {
-                                if let Ok(analysis) = crate::dcf_model::compute_from_fundamentals(
-                                    &fund,
-                                    price,
-                                    "fundamentals",
-                                ) {
-                                    s.ingest_dcf_analysis(sym.to_string(), analysis);
-                                }
-                            }
-                        } else if matches!(
-                            business_class,
-                            crate::dcf_model::BusinessClass::Unclassified
-                                | crate::dcf_model::BusinessClass::NotEligible
-                        ) {
-                            // Closed-world refusal also clears any legacy value restored
-                            // before classification became available.
-                            screener.lock().unwrap().clear_dcf(sym);
-                        }
-
-                        if let Ok(Some(ins)) = edgar::fetch_insider_activity(&edgar_client, cik) {
                             if !generation_is_current(&feed_gen, generation) {
                                 return;
                             }
-                            screener.lock().unwrap().ingest_insider(
-                                sym.to_string(),
-                                InsiderData {
-                                    net_shares_90d: ins.net_shares_90d,
-                                    buy_count: ins.buy_count,
-                                    sell_count: ins.sell_count,
-                                },
-                            );
+                            let fund = s.fundamentals.get(sym).cloned();
+                            let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
+                            if let Some(fund) = fund {
+                                let key = financial_dcf_input_key(&fund, price);
+                                let has_analysis =
+                                    s.dcf_analyses.get(sym).is_some_and(|analysis| {
+                                        analysis.model
+                                        == crate::dcf_model::ValuationModel::ResidualIncomeEquity
+                                    });
+                                let now = Instant::now();
+                                if financial_dcf_schedule.should_compute(
+                                    sym,
+                                    &key,
+                                    now,
+                                    has_analysis,
+                                ) {
+                                    let result = crate::dcf_model::compute_from_fundamentals(
+                                        &fund,
+                                        price,
+                                        "fundamentals",
+                                    );
+                                    let success = if let Ok(analysis) = result {
+                                        s.ingest_dcf_analysis(sym.to_string(), analysis);
+                                        true
+                                    } else {
+                                        false
+                                    };
+                                    financial_dcf_schedule.record_result(sym, key, now, success);
+                                }
+                            }
+                        } else {
+                            financial_dcf_schedule.forget(sym);
+                            if matches!(
+                                business_class,
+                                crate::dcf_model::BusinessClass::Unclassified
+                                    | crate::dcf_model::BusinessClass::NotEligible
+                            ) {
+                                // Closed-world refusal also clears any legacy value restored
+                                // before classification became available.
+                                if !mutate_current_enrichment_state(
+                                    &feed_gen,
+                                    generation,
+                                    &screener,
+                                    |state| state.clear_dcf(sym),
+                                ) {
+                                    return;
+                                }
+                            }
                         }
-                        thread::sleep(std::time::Duration::from_millis(125));
+
+                        if !insider_schedule.is_due(sym, Instant::now()) {
+                            continue;
+                        }
+                        if !generation_is_current(&feed_gen, generation) {
+                            return;
+                        }
+                        let insider_result = edgar::fetch_insider_activity(&edgar_client, cik);
+                        if !generation_is_current(&feed_gen, generation) {
+                            return;
+                        }
+                        insider_schedule.record_result(sym, Instant::now(), &insider_result);
+                        if let Ok(Some(ins)) = insider_result {
+                            if !mutate_current_enrichment_state(
+                                &feed_gen,
+                                generation,
+                                &screener,
+                                |state| {
+                                    state.ingest_insider(
+                                        sym.to_string(),
+                                        InsiderData {
+                                            net_shares_90d: ins.net_shares_90d,
+                                            buy_count: ins.buy_count,
+                                            sell_count: ins.sell_count,
+                                        },
+                                    );
+                                },
+                            ) {
+                                return;
+                            }
+                        }
+                        // Keep submissions requests below the existing SEC request pace.
+                        thread::sleep(Duration::from_millis(125));
+                    }
+                    // Recheck changed financial fundamentals without spinning over the universe.
+                    for _ in 0..EDGAR_SCAN_PAUSE_SECS {
+                        if !generation_is_current(&feed_gen, generation) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_secs(1));
                     }
                 }
             })
@@ -2805,6 +4923,7 @@ fn spawn_feed_workers(
         let screener = Arc::clone(&state.screener);
         let db = Arc::clone(&state.db);
         let feed_gen = Arc::clone(&feed_gen);
+        let profile_gate = Arc::clone(&state.profile_apply_gate);
 
         thread::Builder::new()
             .name("snapshot".to_string())
@@ -2886,7 +5005,16 @@ fn spawn_feed_workers(
                                 confidence: &r.confidence,
                             })
                             .collect();
-                        let _ = db.insert_snapshots(&borrowed);
+                        if with_current_profile_generation(
+                            &profile_gate,
+                            &feed_gen,
+                            generation,
+                            || db.insert_snapshots(&borrowed),
+                        )
+                        .is_none()
+                        {
+                            return;
+                        }
                     }
 
                     thread::sleep(std::time::Duration::from_secs(SNAPSHOT_INTERVAL_SECS));
@@ -3764,9 +5892,52 @@ pub fn journal_delete(id: i64, state: State<AppState>) -> Result<(), String> {
     state.db.journal_delete(id)
 }
 
-/// Resolve current prices for arbitrary symbols. Checks the in-memory screener
-/// snapshots first (instant, zero network), then falls back to Yahoo's chart
-/// API for symbols outside the app's universe (e.g. custom portfolio holdings).
+/// Resolve uncached portfolio prices in one quote batch when multiple symbols need prices.
+/// Keep chart lookup for missing quote rows and single-symbol requests.
+fn resolve_missing_portfolio_prices<B, C>(
+    missing: Vec<String>,
+    mut batch_prices: B,
+    mut chart_price: C,
+) -> HashMap<String, i64>
+where
+    B: FnMut(&[String]) -> Result<HashMap<String, i64>, String>,
+    C: FnMut(&str) -> Option<i64>,
+{
+    let mut unique = Vec::new();
+    let mut seen = HashSet::new();
+    for symbol in missing {
+        let symbol = symbol.trim().to_ascii_uppercase();
+        if !symbol.is_empty() && seen.insert(symbol.clone()) {
+            unique.push(symbol);
+        }
+    }
+    if unique.is_empty() {
+        return HashMap::new();
+    }
+
+    // A cold Yahoo quote session uses two setup requests. Three or fewer
+    // chart calls spend no more requests and keep the previous price path.
+    let batch = if unique.len() >= 4 {
+        batch_prices(&unique).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let mut resolved = HashMap::new();
+    for symbol in unique {
+        let price = batch
+            .get(&symbol)
+            .copied()
+            .filter(|price| *price > 0)
+            .or_else(|| chart_price(&symbol).filter(|price| *price > 0));
+        if let Some(price) = price {
+            resolved.insert(symbol, price);
+        }
+    }
+    resolved
+}
+
+/// Resolve current prices for arbitrary symbols. Read live screener prices first.
+/// Batch Yahoo quotes cover multiple holdings outside the active universe.
 #[tauri::command]
 pub async fn get_quote_prices(
     symbols: Vec<String>,
@@ -3793,14 +5964,29 @@ pub async fn get_quote_prices(
         }
         if !missing.is_empty() {
             let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
-            for sym in missing {
-                if let Ok(candles) = client.fetch_candles(&sym, "5d", "1d") {
-                    if let Some(last) = candles.last() {
-                        out.insert(sym.clone(), last.close_cents);
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
+            out.extend(resolve_missing_portfolio_prices(
+                missing,
+                |symbols| {
+                    client
+                        .fetch_quotes(symbols)
+                        .map(|result| {
+                            result
+                                .quotes
+                                .into_iter()
+                                .map(|(symbol, quote)| (symbol, quote.market_price_cents))
+                                .collect()
+                        })
+                        .map_err(|error| error.to_string())
+                },
+                |symbol| {
+                    let price = client
+                        .fetch_candles(symbol, "5d", "1d")
+                        .ok()
+                        .and_then(|candles| candles.last().map(|last| last.close_cents));
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    price
+                },
+            ));
         }
         Ok(out)
     })
@@ -3811,6 +5997,91 @@ pub async fn get_quote_prices(
 #[tauri::command]
 pub fn portfolio_delete(id: i64, state: State<AppState>) -> Result<(), String> {
     state.db.portfolio_delete(id)
+}
+
+#[cfg(test)]
+mod portfolio_quote_tests {
+    use super::resolve_missing_portfolio_prices;
+    use std::collections::HashMap;
+
+    #[test]
+    fn missing_holdings_share_one_batch_and_only_missing_quotes_use_charts() {
+        let mut batch_calls = 0;
+        let mut chart_symbols = Vec::new();
+        let prices = resolve_missing_portfolio_prices(
+            vec![
+                "aapl".into(),
+                "MSFT".into(),
+                "JPM".into(),
+                "TSM".into(),
+                "AAPL".into(),
+                "".into(),
+            ],
+            |symbols| {
+                batch_calls += 1;
+                assert_eq!(symbols, &["AAPL", "MSFT", "JPM", "TSM"]);
+                Ok(HashMap::from([
+                    ("AAPL".into(), 15_000),
+                    ("JPM".into(), 20_000),
+                    ("TSM".into(), 30_000),
+                ]))
+            },
+            |symbol| {
+                chart_symbols.push(symbol.to_string());
+                Some(42_000)
+            },
+        );
+
+        assert_eq!(batch_calls, 1);
+        assert_eq!(chart_symbols, ["MSFT"]);
+        assert_eq!(
+            prices,
+            HashMap::from([
+                ("AAPL".into(), 15_000),
+                ("MSFT".into(), 42_000),
+                ("JPM".into(), 20_000),
+                ("TSM".into(), 30_000),
+            ])
+        );
+    }
+
+    #[test]
+    fn batch_failure_falls_back_without_losing_valid_chart_prices() {
+        let mut chart_symbols = Vec::new();
+        let prices = resolve_missing_portfolio_prices(
+            vec!["AAPL".into(), "MSFT".into(), "JPM".into(), "TSM".into()],
+            |_| Err("provider unavailable".to_string()),
+            |symbol| {
+                chart_symbols.push(symbol.to_string());
+                (symbol == "MSFT").then_some(25_000)
+            },
+        );
+
+        assert_eq!(chart_symbols, ["AAPL", "MSFT", "JPM", "TSM"]);
+        assert_eq!(prices, HashMap::from([("MSFT".into(), 25_000)]));
+    }
+
+    #[test]
+    fn three_or_fewer_missing_holdings_keep_the_existing_chart_path() {
+        let mut batch_calls = 0;
+        let prices = resolve_missing_portfolio_prices(
+            vec!["AAPL".into(), "MSFT".into(), "JPM".into()],
+            |_| {
+                batch_calls += 1;
+                Ok(HashMap::new())
+            },
+            |_| Some(14_000),
+        );
+        assert_eq!(batch_calls, 0);
+        assert_eq!(
+            prices,
+            HashMap::from([
+                ("AAPL".into(), 14_000),
+                ("MSFT".into(), 14_000),
+                ("JPM".into(), 14_000),
+            ])
+        );
+    }
 }
 
 #[tauri::command]

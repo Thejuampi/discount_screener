@@ -10,6 +10,8 @@ import type { IChartApi } from "lightweight-charts";
 import { api } from "../api";
 import type { Candle, ChartPattern, FibAnalysis } from "../api";
 import { drawPatternLines, drawFibLevels } from "../chartPatternDraw";
+import { CandleRequestCache } from "../candleRequestCache";
+import { observeChartWidth } from "../chartResizeObserver";
 
 interface Props {
   symbol: string;
@@ -65,16 +67,21 @@ export function calcMACD(closes: number[]) {
 export function CandleChart({ symbol, range, patterns, fib, ema = true, volume = true }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const [candleCache] = useState(() => new CandleRequestCache<Candle[]>({
+    cacheValue: (candles) => candles.length > 0,
+  }));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
 
     // Cancellation flag: if this effect re-runs (symbol/range changed) before
     // the async fetch resolves, we must NOT create a chart from the stale data,
     // otherwise multiple charts pile up in the DOM.
     let cancelled = false;
+    let stopObserving: (() => void) | null = null;
 
     // Cleanup previous chart synchronously
     if (chartRef.current) {
@@ -83,25 +90,23 @@ export function CandleChart({ symbol, range, patterns, fib, ema = true, volume =
     }
     // Belt-and-suspenders: clear any orphaned chart canvases from the container
     // (in case prior fetches resolved out of order before this effect ran)
-    if (containerRef.current) {
-      containerRef.current.innerHTML = "";
-    }
+    container.innerHTML = "";
 
     setLoading(true);
     setError(null);
 
-    api.getCandles(symbol, range).then((candles: Candle[]) => {
+    candleCache.load(symbol, range, () => api.getCandles(symbol, range)).then((candles: Candle[]) => {
       if (cancelled) return;   // ← stale fetch, drop it
-      if (!containerRef.current || candles.length === 0) {
+      if (candles.length === 0) {
         setLoading(false);
         setError("No candle data available");
         return;
       }
 
-      const h = containerRef.current.clientHeight || 400;
+      const h = container.clientHeight || 400;
 
-      const chart = createChart(containerRef.current, {
-        width: containerRef.current.clientWidth,
+      const chart = createChart(container, {
+        width: container.clientWidth,
         height: h,
         layout: {
           background: { type: ColorType.Solid, color: "#0f172a" },
@@ -199,13 +204,11 @@ export function CandleChart({ symbol, range, patterns, fib, ema = true, volume =
       setLoading(false);
 
       // Resize observer
-      const ro = new ResizeObserver(() => {
-        if (containerRef.current) {
-          chart.applyOptions({ width: containerRef.current.clientWidth });
+      stopObserving = observeChartWidth(container, () => {
+        if (!cancelled) {
+          chart.applyOptions({ width: container.clientWidth });
         }
       });
-      ro.observe(containerRef.current);
-      return () => ro.disconnect();
     }).catch((e: any) => {
       if (cancelled) return;
       setLoading(false);
@@ -214,15 +217,14 @@ export function CandleChart({ symbol, range, patterns, fib, ema = true, volume =
 
     return () => {
       cancelled = true;
+      stopObserving?.();
       if (chartRef.current) {
         chartRef.current.remove();
         chartRef.current = null;
       }
-      if (containerRef.current) {
-        containerRef.current.innerHTML = "";
-      }
+      container.innerHTML = "";
     };
-  }, [symbol, range, patterns, fib, ema, volume]);
+  }, [symbol, range, patterns, fib, ema, volume, candleCache]);
 
   return (
     <div className="chart-container">

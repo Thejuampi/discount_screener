@@ -49,6 +49,12 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 
 - Opportunity scoring, Quant Lens, and residual-income / FCFF valuation.
 - Advisor CSV import: holdings snapshot vs Chase 90-day blotter. Warn, then confirm.
+- Vantage requests compact Yahoo summaries and batches missing Advisor prices.
+- Detail requests monthly charts on demand. Chart controls reuse recent candles for the same range.
+- SEC insider results follow a bounded freshness interval. Financial residual income reruns when its inputs change.
+- Vantage scores opportunity rows outside the shared screener lock after it captures one input view.
+- Vantage queues chart enrichment when each symbol becomes visible, including symbols that arrive late.
+- Vantage ignores older opportunity responses after a universe change.
 
 ### Android App
 

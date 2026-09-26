@@ -168,9 +168,9 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Modules requested by the Android client (+ calendarEvents for Windows earnings field).
+/// Compact dashboard modules. Forward consensus requests earningsTrend on demand.
 pub const QUOTE_SUMMARY_MODULES: &str =
-    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend,calendarEvents";
+    "price,financialData,summaryDetail,defaultKeyStatistics,summaryProfile,recommendationTrend,calendarEvents";
 pub const FORWARD_FORECAST_MODULES: &str = "earningsTrend,price";
 
 /// Map share-class dots to Yahoo path form: `BRK.B` → `BRK-B`, keep exchange suffixes.
@@ -219,7 +219,10 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
     let statistics = result.get("defaultKeyStatistics");
     let recommendation_trend = result.get("recommendationTrend");
     let price = result.get("price");
-    let asset_profile = result.get("assetProfile");
+    let asset_profile = result
+        .get("summaryProfile")
+        .filter(|profile| profile.is_object())
+        .or_else(|| result.get("assetProfile"));
     let calendar = result.get("calendarEvents");
 
     let company_name = price
@@ -270,10 +273,7 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let epochs: Vec<i64> = arr
-                .iter()
-                .filter_map(|d| d.get("raw").and_then(|v| v.as_i64()))
-                .collect();
+            let epochs: Vec<i64> = arr.iter().filter_map(raw_epoch).collect();
             epochs
                 .iter()
                 .filter(|&&e| e >= now)
@@ -676,10 +676,71 @@ fn trend_count(trend: &Option<Value>, key: &str) -> Option<u32> {
     trend.as_ref()?.get(key)?.as_u64().map(|n| n as u32)
 }
 
+fn raw_epoch(value: &Value) -> Option<i64> {
+    value.get("raw").unwrap_or(value).as_i64()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn compact_payload_fixture(form: &str, symbol: &str) -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/android/app/src/test/resources/yahoo/payload-2026-09-25")
+            .join(format!("summary-{form}-{symbol}.json"));
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("missing fixture {}: {error}", path.display()));
+        serde_json::from_str(&raw).expect("recorded Yahoo response")
+    }
+
+    #[test]
+    fn compact_summary_matches_original_for_six_recorded_symbols() {
+        for symbol in ["AAPL", "MSFT", "JPM", "BRK-B", "TSM", "SPY"] {
+            let display_symbol = if symbol == "BRK-B" { "BRK.B" } else { symbol };
+            let original =
+                parse_quote_summary(&compact_payload_fixture("original", symbol), display_symbol);
+            let slim =
+                parse_quote_summary(&compact_payload_fixture("slim", symbol), display_symbol);
+            assert!(
+                original.snapshot.is_some(),
+                "{symbol}: original price missing"
+            );
+            assert!(
+                original.fundamentals.is_some(),
+                "{symbol}: original fundamentals missing"
+            );
+            assert_eq!(
+                serde_json::to_value(&original.snapshot).expect("original snapshot"),
+                serde_json::to_value(&slim.snapshot).expect("slim snapshot"),
+                "{symbol}: snapshot parity"
+            );
+            assert_eq!(
+                serde_json::to_value(&original.signal).expect("original signal"),
+                serde_json::to_value(&slim.signal).expect("slim signal"),
+                "{symbol}: analyst signal parity"
+            );
+            assert_eq!(
+                serde_json::to_value(&original.fundamentals).expect("original fundamentals"),
+                serde_json::to_value(&slim.fundamentals).expect("slim fundamentals"),
+                "{symbol}: fundamentals parity"
+            );
+        }
+    }
+
+    #[test]
+    fn null_summary_profile_keeps_legacy_asset_profile_classification() {
+        let mut response = fixture("AAPL.json");
+        response["quoteSummary"]["result"][0]["summaryProfile"] = Value::Null;
+        let fundamentals = parse_quote_summary(&response, "AAPL")
+            .fundamentals
+            .expect("legacy fundamentals");
+        assert_eq!(fundamentals.sector_name.as_deref(), Some("Technology"));
+        assert_eq!(
+            fundamentals.industry_name.as_deref(),
+            Some("Consumer Electronics")
+        );
+    }
 
     fn fixture(name: &str) -> Value {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -4,6 +4,7 @@
 //! via cookie + crumb session. Chart / search remain public REST endpoints.
 //! HTML quote-page scrape runs on quoteSummary HTTP 404, and when `html_fallback` is on.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Duration;
 
@@ -12,9 +13,10 @@ use serde_json::Value;
 
 use crate::engine::HistoricalCandle;
 use crate::quote_summary::{
-    apply_asset_class_overrides, parse_forward_forecast_evidence, parse_quote_summary,
-    with_price_fallback, yahoo_request_symbol, ForwardForecastEvidence,
-    ForwardForecastProviderError, FORWARD_FORECAST_MODULES, QUOTE_SUMMARY_MODULES,
+    apply_asset_class_overrides, dollars_to_cents, parse_forward_forecast_evidence,
+    parse_quote_summary, raw_double, with_price_fallback, yahoo_request_symbol,
+    ForwardForecastEvidence, ForwardForecastProviderError, FORWARD_FORECAST_MODULES,
+    QUOTE_SUMMARY_MODULES,
 };
 use crate::ticker_search::{parse_search_quotes, YahooSearchQuote};
 use crate::yahoo_session::{is_auth_error, is_rate_limit_error, YahooSession};
@@ -25,12 +27,32 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const QUOTE_PAGE_URL: &str = "https://finance.yahoo.com/quote/";
 const CHART_API_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart/";
 const QUOTE_SUMMARY_URL: &str = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/";
+const QUOTE_BATCH_URL: &str = "https://query1.finance.yahoo.com/v7/finance/quote";
 const SEARCH_API_URL: &str = "https://query2.finance.yahoo.com/v1/finance/search";
+const QUOTE_BATCH_FIELDS: &str = "symbol,longName,shortName,regularMarketPrice,epsTrailingTwelveMonths,earningsTimestamp,earningsTimestampStart,earningsTimestampEnd";
+const QUOTE_BATCH_SIZE: usize = 250;
 
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
 pub use crate::quote_summary::FetchResult;
+
+/// Quote fields used for the first visible portfolio price pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchQuoteEntry {
+    pub symbol: String,
+    pub company_name: Option<String>,
+    pub market_price_cents: i64,
+    pub profitable: Option<bool>,
+    pub next_earnings_epoch: Option<i64>,
+}
+
+/// A valid Yahoo answer can omit some requested symbols or their prices.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchQuoteResult {
+    pub quotes: HashMap<String, BatchQuoteEntry>,
+    pub missing_symbols: Vec<String>,
+}
 
 #[derive(Debug)]
 pub enum ForwardForecastFetchError {
@@ -346,6 +368,17 @@ impl YahooClient {
         Ok(result)
     }
 
+    /// Fetch saved-row prices in bounded batches. The caller can retry missing rows per symbol.
+    pub fn fetch_quotes(&self, symbols: &[String]) -> io::Result<BatchQuoteResult> {
+        let now_epoch_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        fetch_quotes_in_batches(symbols, now_epoch_seconds, |batch| {
+            self.fetch_quote_batch_json(batch)
+        })
+    }
+
     /// Demand-only operational consensus. This must never be folded into the
     /// full-universe quoteSummary module set.
     pub fn fetch_forward_forecast(
@@ -356,7 +389,7 @@ impl YahooClient {
         let display = symbol.trim().to_ascii_uppercase();
         let request_symbol = yahoo_request_symbol(&display);
         let root = self
-            .fetch_quote_summary_modules_json(&request_symbol, FORWARD_FORECAST_MODULES)
+            .fetch_quote_summary_modules_json(&request_symbol, FORWARD_FORECAST_MODULES, true)
             .map_err(ForwardForecastFetchError::Transport)?;
         parse_forward_forecast_evidence(&root, &display, observed_epoch_day)
             .map_err(ForwardForecastFetchError::Provider)
@@ -447,22 +480,18 @@ impl YahooClient {
     }
 
     fn fetch_quote_summary_json(&self, request_symbol: &str) -> io::Result<Value> {
-        self.fetch_quote_summary_modules_json(request_symbol, QUOTE_SUMMARY_MODULES)
+        self.fetch_quote_summary_modules_json(request_symbol, QUOTE_SUMMARY_MODULES, false)
     }
 
     fn fetch_quote_summary_modules_json(
         &self,
         request_symbol: &str,
         modules: &str,
+        formatted: bool,
     ) -> io::Result<Value> {
         let once = || -> io::Result<Value> {
             let crumb = self.session.ensure_crumb(&self.client, USER_AGENT)?;
-            let url = format!(
-                "{QUOTE_SUMMARY_URL}{}?modules={}&crumb={}",
-                urlencoding_minimal(request_symbol),
-                urlencoding_minimal(modules),
-                urlencoding_minimal(&crumb),
-            );
+            let url = build_quote_summary_url(request_symbol, modules, formatted, &crumb);
             let resp = self
                 .client
                 .get(&url)
@@ -511,6 +540,52 @@ impl YahooClient {
                 }
                 Err(e)
             }
+        }
+    }
+
+    fn fetch_quote_batch_json(&self, symbols: &[String]) -> io::Result<Value> {
+        if self.is_rate_limited() {
+            return Err(io::Error::other("HTTP 429 for Yahoo batch quote: cooldown"));
+        }
+        let once = || -> io::Result<Value> {
+            let crumb = self.session.ensure_crumb(&self.client, USER_AGENT)?;
+            let url = build_quote_batch_url(symbols, &crumb);
+            let response = self
+                .client
+                .get(&url)
+                .header("Accept", "application/json,text/plain,*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Origin", "https://finance.yahoo.com")
+                .header("Referer", "https://finance.yahoo.com/")
+                .timeout(Duration::from_secs(12))
+                .send()
+                .map_err(io::Error::other)?;
+            let status = response.status();
+            let body = response.text().map_err(io::Error::other)?;
+            if status.as_u16() == 429 {
+                self.session.mark_rate_limited();
+                return Err(io::Error::other("HTTP 429 for Yahoo batch quote"));
+            }
+            if !status.is_success() {
+                return Err(io::Error::other(format!(
+                    "HTTP {status} for Yahoo batch quote: {}",
+                    body.chars().take(200).collect::<String>()
+                )));
+            }
+            serde_json::from_str(&body).map_err(io::Error::other)
+        };
+        match once() {
+            Ok(value) => {
+                self.session.mark_request_succeeded();
+                Ok(value)
+            }
+            Err(error) if is_auth_error(&error) && !is_rate_limit_error(&error) => {
+                self.session.clear();
+                let value = once()?;
+                self.session.mark_request_succeeded();
+                Ok(value)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -667,6 +742,175 @@ fn urlencoding_minimal(value: &str) -> String {
         }
     }
     out
+}
+
+fn build_quote_summary_url(
+    request_symbol: &str,
+    modules: &str,
+    formatted: bool,
+    crumb: &str,
+) -> String {
+    format!(
+        "{QUOTE_SUMMARY_URL}{}?modules={}&formatted={formatted}&crumb={}",
+        urlencoding_minimal(request_symbol),
+        urlencoding_minimal(modules),
+        urlencoding_minimal(crumb),
+    )
+}
+
+fn build_quote_batch_url(symbols: &[String], crumb: &str) -> String {
+    let request_symbols = symbols
+        .iter()
+        .map(|symbol| yahoo_request_symbol(symbol))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{QUOTE_BATCH_URL}?symbols={}&fields={}&formatted=false&crumb={}",
+        urlencoding_minimal(&request_symbols),
+        urlencoding_minimal(QUOTE_BATCH_FIELDS),
+        urlencoding_minimal(crumb),
+    )
+}
+
+fn fetch_quotes_in_batches<F>(
+    symbols: &[String],
+    now_epoch_seconds: i64,
+    mut fetch_batch: F,
+) -> io::Result<BatchQuoteResult>
+where
+    F: FnMut(&[String]) -> io::Result<Value>,
+{
+    let mut requested = Vec::new();
+    let mut seen = HashSet::new();
+    for symbol in symbols {
+        let display = symbol.trim().to_ascii_uppercase();
+        if !display.is_empty() && seen.insert(display.clone()) {
+            requested.push(display);
+        }
+    }
+
+    let mut result = BatchQuoteResult::default();
+    let mut first_error = None;
+    let mut successful_batches = 0;
+    for batch in requested.chunks(QUOTE_BATCH_SIZE) {
+        let part =
+            fetch_batch(batch).and_then(|root| parse_batch_quotes(&root, batch, now_epoch_seconds));
+        match part {
+            Ok(part) => {
+                successful_batches += 1;
+                result.quotes.extend(part.quotes);
+                result.missing_symbols.extend(part.missing_symbols);
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                result.missing_symbols.extend(batch.iter().cloned());
+            }
+        }
+    }
+
+    if successful_batches == 0 {
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
+    Ok(result)
+}
+
+fn parse_batch_quotes(
+    root: &Value,
+    requested_symbols: &[String],
+    now_epoch_seconds: i64,
+) -> io::Result<BatchQuoteResult> {
+    let response = root
+        .get("quoteResponse")
+        .ok_or_else(|| io::Error::other("Yahoo batch quote has no quoteResponse"))?;
+    if response.get("error").is_some_and(|value| !value.is_null()) {
+        return Err(io::Error::other(format!(
+            "Yahoo batch quote error: {}",
+            response["error"]
+        )));
+    }
+    let rows = response
+        .get("result")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("Yahoo batch quote has no result array"))?;
+
+    let mut app_symbols_by_request: HashMap<String, Vec<String>> = HashMap::new();
+    let mut ordered_symbols = Vec::new();
+    let mut seen = HashSet::new();
+    for symbol in requested_symbols {
+        let display = symbol.trim().to_ascii_uppercase();
+        if display.is_empty() || !seen.insert(display.clone()) {
+            continue;
+        }
+        app_symbols_by_request
+            .entry(yahoo_request_symbol(&display))
+            .or_default()
+            .push(display.clone());
+        ordered_symbols.push(display);
+    }
+
+    let mut quotes = HashMap::new();
+    for row in rows {
+        let Some(request_symbol) = row.get("symbol").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(app_symbols) = app_symbols_by_request.get(request_symbol) else {
+            continue;
+        };
+        let Some(price) = raw_double(row, "regularMarketPrice").and_then(dollars_to_cents) else {
+            continue;
+        };
+        let epochs: Vec<i64> = [
+            "earningsTimestamp",
+            "earningsTimestampStart",
+            "earningsTimestampEnd",
+        ]
+        .iter()
+        .filter_map(|field| row.get(*field))
+        .filter_map(|value| value.get("raw").unwrap_or(value).as_i64())
+        .collect();
+        let next_earnings_epoch = epochs
+            .iter()
+            .filter(|&&epoch| epoch >= now_epoch_seconds)
+            .min()
+            .copied()
+            .or_else(|| epochs.iter().max().copied());
+        for display in app_symbols {
+            let company_name = ["longName", "shortName"]
+                .iter()
+                .filter_map(|field| row.get(*field).and_then(Value::as_str))
+                .map(str::trim)
+                .find(|name| {
+                    !name.is_empty()
+                        && !name.eq_ignore_ascii_case("null")
+                        && !name.eq_ignore_ascii_case(display)
+                })
+                .map(str::to_string);
+            quotes.insert(
+                display.clone(),
+                BatchQuoteEntry {
+                    symbol: display.clone(),
+                    company_name,
+                    market_price_cents: price,
+                    profitable: raw_double(row, "epsTrailingTwelveMonths")
+                        .filter(|value| value.is_finite())
+                        .map(|value| value > 0.0),
+                    next_earnings_epoch,
+                },
+            );
+        }
+    }
+    let missing_symbols = ordered_symbols
+        .into_iter()
+        .filter(|symbol| !quotes.contains_key(symbol))
+        .collect();
+    Ok(BatchQuoteResult {
+        quotes,
+        missing_symbols,
+    })
 }
 
 // ── HTML extraction helpers ────────────────────────────────────────────────────
@@ -891,6 +1135,116 @@ mod quote_html_recovery_tests {
 }
 
 #[cfg(test)]
+mod compact_quote_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn payload(name: &str) -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/android/app/src/test/resources/yahoo/payload-2026-09-25")
+            .join(name);
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("missing fixture {}: {error}", path.display()));
+        serde_json::from_str(&raw).expect("recorded Yahoo response")
+    }
+
+    fn six_symbols() -> Vec<String> {
+        ["AAPL", "MSFT", "JPM", "BRK.B", "TSM", "SPY"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn dashboard_summary_requests_compact_modules_and_bare_numbers() {
+        assert_eq!(
+            build_quote_summary_url("BRK-B", QUOTE_SUMMARY_MODULES, false, "crumb token"),
+            "https://query1.finance.yahoo.com/v10/finance/quoteSummary/BRK-B?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CsummaryProfile%2CrecommendationTrend%2CcalendarEvents&formatted=false&crumb=crumb%20token"
+        );
+        assert_eq!(
+            build_quote_summary_url("AAPL", FORWARD_FORECAST_MODULES, true, "crumb token"),
+            "https://query1.finance.yahoo.com/v10/finance/quoteSummary/AAPL?modules=earningsTrend%2Cprice&formatted=true&crumb=crumb%20token"
+        );
+    }
+
+    #[test]
+    fn batch_request_selects_only_eight_consumed_fields() {
+        assert_eq!(
+            build_quote_batch_url(&six_symbols(), "crumb token"),
+            "https://query1.finance.yahoo.com/v7/finance/quote?symbols=AAPL%2CMSFT%2CJPM%2CBRK-B%2CTSM%2CSPY&fields=symbol%2ClongName%2CshortName%2CregularMarketPrice%2CepsTrailingTwelveMonths%2CearningsTimestamp%2CearningsTimestampStart%2CearningsTimestampEnd&formatted=false&crumb=crumb%20token"
+        );
+    }
+
+    #[test]
+    fn compact_batch_matches_default_for_six_recorded_symbols() {
+        let symbols = six_symbols();
+        let original = parse_batch_quotes(&payload("quotes-default.json"), &symbols, 1_790_000_000)
+            .expect("default response");
+        let compact = parse_batch_quotes(&payload("quotes-fields.json"), &symbols, 1_790_000_000)
+            .expect("compact response");
+        assert_eq!(compact, original);
+        assert!(compact.missing_symbols.is_empty());
+        assert_eq!(compact.quotes["BRK.B"].market_price_cents, 50_548);
+        assert_eq!(
+            compact.quotes["AAPL"].company_name.as_deref(),
+            Some("Apple Inc.")
+        );
+    }
+
+    #[test]
+    fn later_batch_failure_keeps_earlier_quotes_for_chart_fallback() {
+        let mut symbols = vec!["AAPL".to_string()];
+        symbols.extend((1..QUOTE_BATCH_SIZE).map(|index| format!("X{index:03}")));
+        symbols.push("LAST".into());
+        let mut batches = 0;
+        let result = fetch_quotes_in_batches(&symbols, 1_790_000_000, |batch| {
+            batches += 1;
+            if batches == 1 {
+                assert_eq!(batch.len(), QUOTE_BATCH_SIZE);
+                Ok(payload("quotes-fields.json"))
+            } else {
+                assert_eq!(batch, &["LAST"]);
+                Err(io::Error::other("HTTP 429 for Yahoo batch quote"))
+            }
+        })
+        .expect("partial batch result");
+
+        assert_eq!(batches, 2);
+        assert_eq!(result.quotes["AAPL"].market_price_cents, 34_107);
+        assert_eq!(result.missing_symbols.len(), QUOTE_BATCH_SIZE);
+        assert!(result.missing_symbols.contains(&"LAST".to_string()));
+        assert!(!result.missing_symbols.contains(&"AAPL".to_string()));
+    }
+
+    #[test]
+    fn all_failed_batches_remain_an_error_for_the_chart_fallback() {
+        let symbols = six_symbols();
+        assert!(fetch_quotes_in_batches(&symbols, 1_790_000_000, |_| {
+            Err(io::Error::other("HTTP 429 for Yahoo batch quote"))
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn batch_marks_absent_and_unpriced_rows_without_inventing_values() {
+        let mut symbols = six_symbols();
+        symbols.push("MISSING".into());
+        let mut root = payload("quotes-fields.json");
+        root["quoteResponse"]["result"][5]["regularMarketPrice"] = Value::Null;
+        let parsed = parse_batch_quotes(&root, &symbols, 1_790_000_000).expect("answered batch");
+        assert_eq!(parsed.missing_symbols, vec!["SPY", "MISSING"]);
+        assert!(!parsed.quotes.contains_key("SPY"));
+        assert!(!parsed.quotes.contains_key("MISSING"));
+    }
+
+    #[test]
+    fn refused_batch_is_an_error_instead_of_silent_missing_rows() {
+        let refused = serde_json::json!({"finance": {"error": {"description": "refused"}}});
+        assert!(parse_batch_quotes(&refused, &six_symbols(), 1_790_000_000).is_err());
+    }
+}
+
+#[cfg(test)]
 mod list_ready_tests {
     use super::*;
     use crate::engine::{FundamentalSnapshot, MarketSnapshot};
@@ -1029,7 +1383,7 @@ mod list_ready_tests {
             // Warms the session crumb the quote-summary endpoint requires.
             let _ = client.fetch_symbol(symbol);
             let Ok(root) =
-                client.fetch_quote_summary_modules_json(symbol, FORWARD_FORECAST_MODULES)
+                client.fetch_quote_summary_modules_json(symbol, FORWARD_FORECAST_MODULES, true)
             else {
                 eprintln!("{symbol}: fetch fail");
                 continue;
