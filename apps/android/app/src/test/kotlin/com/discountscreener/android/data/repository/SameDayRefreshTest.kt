@@ -37,14 +37,14 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * The same-day contract of a plain refresh, the one the app asks for on its own at launch.
+ * The same-day contract of a nonforced repository refresh. App startup requests a forced refresh.
  *
  * A row whose own quote is less than a day old is kept: it shows as Restored with the time of
  * that quote, it is left out of the refresh count, and it buys no quoteSummary and no chart. The
  * batch price still lands on it, but the batch price is filed apart and never stands in for the
  * quote, so the next day every row is quoted again. A DCF the market moved inside the day is
- * recomputed from the timeseries on file, with no call. The Refresh button, a forced refresh,
- * buys everything again.
+ * recomputed from the timeseries on file, with no call. Startup and the Refresh button request a
+ * forced refresh, which buys everything again.
  */
 @RunWith(RobolectricTestRunner::class)
 class SameDayRefreshTest {
@@ -134,6 +134,30 @@ class SameDayRefreshTest {
         awaitQuiet(yahoo)
 
         assertEquals(first.trackedSymbols().size, yahoo.quoteCalls.get())
+    }
+
+    @Test
+    fun a_same_day_profile_switch_uses_the_manual_refresh_path_for_decision_tags() = runBlocking {
+        val yahoo = SameDayYahoo()
+        val repository = coldLaunch(yahoo)
+        awaitSettled(repository)
+        val qaSymbols = repository.trackedSymbols()
+        now = FIRST_LAUNCH_EPOCH + THREE_HOURS
+
+        repository.selectProfile("dow", ViewFilter(), ChartRange.Year, model)
+        awaitSettled(repository, "dow")
+        val quotesBeforeReturn = yahoo.quoteCalls.get()
+
+        repository.selectProfile(PROFILE, ViewFilter(), ChartRange.Year, model)
+        awaitSettled(repository, PROFILE)
+        assertEquals(qaSymbols.size, yahoo.quoteCalls.get() - quotesBeforeReturn)
+        val switchedTags = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
+            .trackedRows.associate { it.symbol to it.decisionState }
+
+        repository.refreshAll(ViewFilter(), null, ChartRange.Year, model, force = true)
+        awaitSettled(repository)
+        val afterManual = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
+        assertEquals(switchedTags, afterManual.trackedRows.associate { it.symbol to it.decisionState })
     }
 
     /** The batch price lands on every warm row at every launch; if it counted, no row would ever be quoted again. */
@@ -233,6 +257,22 @@ class SameDayRefreshTest {
             snapshot = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
         }
         return snapshot
+    }
+
+    private suspend fun awaitSettled(repository: DefaultDashboardRepository, profile: String = PROFILE): DashboardSnapshot {
+        val deadline = System.currentTimeMillis() + DEADLINE_MILLIS
+        while (true) {
+            val snapshot = repository.currentSnapshot(ViewFilter(), null, ChartRange.Year, model)
+            if (snapshot.currentProfile == profile &&
+                snapshot.startupPhase == DashboardStartupPhase.Ready &&
+                snapshot.refreshTargetSymbols == 0 &&
+                !repository.loadInFlight.value
+            ) return snapshot
+            if (System.currentTimeMillis() >= deadline) {
+                fail("Timed out waiting for $profile; phase=${snapshot.startupPhase}")
+            }
+            delay(POLL_MILLIS)
+        }
     }
 
     /** Waits until every tracked row has a DCF that carries [fingerprint]. */

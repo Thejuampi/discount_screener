@@ -47,6 +47,33 @@ class DashboardBackgroundWorkTest {
     }
 
     @Test
+    fun restore_failure_shows_no_fake_feed_progress() {
+        assertNull(systemFeedProgressLabel(DashboardUiState(
+            startupPhase = DashboardStartupPhase.RestoreFailed,
+            refreshCompletedSymbols = 0,
+            refreshTargetSymbols = 20,
+        )))
+    }
+
+    @Test
+    fun restore_failure_message_is_visible_on_the_dashboard() {
+        composeRule.setContent {
+            DiscountScreenerTheme {
+                DashboardScreen(
+                    state = DashboardUiState(
+                        loading = false,
+                        startupPhase = DashboardStartupPhase.RestoreFailed,
+                        statusMessage = "Could not read saved data. Data is preserved; retry Refresh.",
+                    ),
+                    onAction = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Could not read saved data. Data is preserved; retry Refresh.").assertIsDisplayed()
+    }
+
+    @Test
     fun system_shows_feed_counter_during_refresh() {
         assertEquals("Progress: 5/20", systemFeedProgressLabel(DashboardUiState(
             startupPhase = DashboardStartupPhase.Refreshing,

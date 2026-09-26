@@ -379,12 +379,17 @@ class DashboardViewModel(
     private var detailLoadJob: Job? = null
     private var detailRefreshJob: Job? = null
     private var refreshJob: Job? = null
+    private var nextSnapshotRequestId = 0L
+    private var lastRenderedSnapshotRequestId = 0L
     private val detailSessions = linkedMapOf<String, CachedDetailSession>()
 
     fun dispatch(action: DashboardAction) {
         when (action) {
             DashboardAction.Start -> start()
-            DashboardAction.Refresh -> refresh(force = true)
+            DashboardAction.Refresh -> {
+                if (_state.value.startupPhase == DashboardStartupPhase.RestoreFailed && !started) start()
+                else refresh(force = true)
+            }
             DashboardAction.RefreshDetail -> refreshDetail()
             is DashboardAction.SelectTab -> selectTab(action.tab)
             is DashboardAction.SelectPlanHunt -> _state.value = _state.value.copy(planHunt = action.hunt)
@@ -453,34 +458,68 @@ class DashboardViewModel(
     private fun start() {
         if (started) return
         started = true
+        val bootstrapRequestId = ++nextSnapshotRequestId
         viewModelScope.launch {
             // Restored first: rendering the list under a model the user did not choose and then
             // re-ranking it a moment later is worse than waiting one database read.
-            val preferences = loadScoringPreferences()
+            var scoringPreferencesReadFailed = false
+            val preferences = try {
+                loadScoringPreferences()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                scoringPreferencesReadFailed = true
+                ScoringPreferences()
+            }
             _state.value = _state.value.copy(
                 opportunityScoringModel = preferences.opportunityModel,
                 regimeScoringEnabled = preferences.regimeScoringEnabled,
             )
-            val initial = bootstrapDashboard(
-                currentFilter(),
-                _state.value.detailRoute?.symbol,
-                _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                _state.value.opportunityScoringModel,
-            )
-            render(initial)
+            val initial = try {
+                bootstrapDashboard(
+                    currentFilter(),
+                    _state.value.detailRoute?.symbol,
+                    _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                    _state.value.opportunityScoringModel,
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                showStartupReadFailure()
+                return@launch
+            }
+            renderIfCurrent(initial, bootstrapRequestId)
+            if (initial.startupPhase == DashboardStartupPhase.RestoreFailed) {
+                started = false
+                return@launch
+            }
+            if (scoringPreferencesReadFailed) {
+                showStartupReadFailure()
+                return@launch
+            }
+            try {
+                // Read small saved tables after the first list appears, before refresh writes.
+                _state.value = _state.value.copy(symbolNotes = loadSymbolNotes())
+                applyDiscoverySnapshot(loadDiscoverySnapshot())
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                showStartupReadFailure()
+                return@launch
+            }
             // Collect after restore. A collector that starts on the default chip takes the
             // snapshot mutex in front of bootstrap.
             viewModelScope.launch {
                 observeDashboardUpdates().collect {
+                    val requestId = ++nextSnapshotRequestId
                     val buildMillis = measureTimeMillis {
-                        render(
-                            getDashboardSnapshot(
-                                currentFilter(),
-                                _state.value.detailRoute?.symbol,
-                                _state.value.detailRoute?.chartRange ?: ChartRange.Year,
-                                _state.value.opportunityScoringModel,
-                            ),
+                        val snapshot = getDashboardSnapshot(
+                            currentFilter(),
+                            _state.value.detailRoute?.symbol,
+                            _state.value.detailRoute?.chartRange ?: ChartRange.Year,
+                            _state.value.opportunityScoringModel,
                         )
+                        renderIfCurrent(snapshot, requestId)
                     }
                     // A rebuild reads every row of the profile under the repository's state
                     // mutex, so on the 1 937-symbol universe it costs about a second of a
@@ -501,25 +540,38 @@ class DashboardViewModel(
                     .debounce(2_000L)
                     .collectLatest { loadEstimates() }
             }
-            refresh(force = false)
-            // After the list, never before it. A note changes no row, so the read of one small
-            // table has no business sitting in front of the first screen the user sees.
-            _state.value = _state.value.copy(symbolNotes = loadSymbolNotes())
-            // Load discovery state from DB only — never auto recreate/refresh.
-            applyDiscoverySnapshot(loadDiscoverySnapshot())
+            // Startup and manual refresh must settle decisions from the same provider pass.
+            refresh(force = true)
             loadEstimates()
-        }
-        discoveryProgressJob?.cancel()
-        discoveryProgressJob = viewModelScope.launch {
-            observeDiscoveryProgress().collectLatest {
-                applyDiscoverySnapshot(loadDiscoverySnapshot())
+            discoveryProgressJob?.cancel()
+            discoveryProgressJob = viewModelScope.launch {
+                observeDiscoveryProgress().collectLatest {
+                    try {
+                        applyDiscoverySnapshot(loadDiscoverySnapshot())
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        _state.value = _state.value.copy(statusMessage = "Could not read discovery data.")
+                    }
+                }
             }
         }
+    }
+
+    private fun showStartupReadFailure() {
+        started = false
+        _state.value = _state.value.copy(
+            loading = false,
+            refreshing = false,
+            startupPhase = DashboardStartupPhase.RestoreFailed,
+            statusMessage = "Could not read saved data. Data is preserved; retry Refresh.",
+        )
     }
 
     private fun refresh(force: Boolean) {
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch {
+            val requestId = ++nextSnapshotRequestId
             // A throw here reaches the coroutine handler and takes the process with it, which is a
             // hard exit for a button whose worst honest outcome is "the data did not update".
             // `loadDetailData` already guards its own call this way.
@@ -531,7 +583,7 @@ class DashboardViewModel(
                     _state.value.opportunityScoringModel,
                     force,
                 )
-                render(snapshot)
+                renderIfCurrent(snapshot, requestId)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -550,14 +602,16 @@ class DashboardViewModel(
 
     private fun updateQuery(query: String) {
         _state.value = _state.value.copy(query = query)
+        val requestId = ++nextSnapshotRequestId
         viewModelScope.launch {
-            render(
+            renderIfCurrent(
                 getDashboardSnapshot(
                     currentFilter(),
                     _state.value.detailRoute?.symbol,
                     _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                     _state.value.opportunityScoringModel,
                 ),
+                requestId,
             )
         }
     }
@@ -731,13 +785,15 @@ class DashboardViewModel(
             try {
                 importPortfolioBook.confirm(plan)
                 if (_state.value.importBookPlan !== plan) return@launch
-                render(
+                val requestId = ++nextSnapshotRequestId
+                renderIfCurrent(
                     getDashboardSnapshot(
                         currentFilter(),
                         _state.value.detailRoute?.symbol,
                         _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                         _state.value.opportunityScoringModel,
                     ),
+                    requestId,
                 )
                 _state.value = _state.value.copy(importBookPlan = null, importBookNotice = "Book updated.")
                 if (earningsGateLoaded) {
@@ -1164,6 +1220,7 @@ class DashboardViewModel(
     }
 
     private fun toggleWatchlist(symbol: String) {
+        val requestId = ++nextSnapshotRequestId
         viewModelScope.launch {
             val snapshot = toggleDashboardWatchlist(
                 symbol,
@@ -1172,12 +1229,13 @@ class DashboardViewModel(
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                 _state.value.opportunityScoringModel,
             )
-            render(snapshot)
+            renderIfCurrent(snapshot, requestId)
         }
     }
 
     private fun addSymbols(rawInput: String) {
         if (rawInput.isBlank()) return
+        val requestId = ++nextSnapshotRequestId
         viewModelScope.launch {
             val snapshot = addDashboardSymbols(
                 rawInput,
@@ -1186,11 +1244,12 @@ class DashboardViewModel(
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                 _state.value.opportunityScoringModel,
             )
-            render(snapshot)
+            renderIfCurrent(snapshot, requestId)
         }
     }
 
     private fun selectProfile(profile: String) {
+        val requestId = ++nextSnapshotRequestId
         detailSessions.clear()
         detailRefreshJob?.cancel()
         _state.value = _state.value.copy(
@@ -1225,7 +1284,7 @@ class DashboardViewModel(
                 _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                 _state.value.opportunityScoringModel,
             )
-            render(snapshot)
+            renderIfCurrent(snapshot, requestId)
         }
     }
 
@@ -1237,6 +1296,7 @@ class DashboardViewModel(
 
     private fun loadDetailData(symbol: String) {
         detailLoadJob?.cancel()
+        val requestId = ++nextSnapshotRequestId
         detailLoadJob = viewModelScope.launch {
             try {
                 val snapshot = selectDashboardSymbol(
@@ -1245,7 +1305,7 @@ class DashboardViewModel(
                     _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                     _state.value.opportunityScoringModel,
                 )
-                render(snapshot)
+                renderDetailIfCurrent(snapshot, requestId, symbol)
                 if (_state.value.detailRoute?.symbol == symbol &&
                     _state.value.detailData == null &&
                     _state.value.projectedDetailData == null
@@ -1275,6 +1335,7 @@ class DashboardViewModel(
     private fun refreshDetail() {
         val route = _state.value.detailRoute ?: return
         if (_state.value.detailRefreshing) return
+        val requestId = ++nextSnapshotRequestId
         detailLoadJob?.cancel()
         _state.value = _state.value.copy(detailRefreshing = true, detailNotice = null)
         detailRefreshJob = viewModelScope.launch {
@@ -1286,12 +1347,12 @@ class DashboardViewModel(
                     _state.value.opportunityScoringModel,
                 )
                 if (_state.value.detailRoute?.symbol == route.symbol) {
-                    render(selectDashboardSymbol(
+                    renderDetailIfCurrent(selectDashboardSymbol(
                         route.symbol,
                         currentFilter(),
                         _state.value.detailRoute?.chartRange ?: route.chartRange,
                         _state.value.opportunityScoringModel,
-                    ))
+                    ), requestId, route.symbol)
                     hydrateEarningsCalendar(listOf(route.symbol))
                 }
             } catch (error: CancellationException) {
@@ -1305,7 +1366,7 @@ class DashboardViewModel(
                             _state.value.detailRoute?.chartRange ?: route.chartRange,
                             _state.value.opportunityScoringModel,
                         )
-                    }.getOrNull()?.let(::render)
+                    }.getOrNull()?.let { renderIfCurrent(it, requestId) }
                     _state.value = _state.value.copy(
                         detailNotice = DashboardNotice(
                             title = "Refresh failed",
@@ -1339,15 +1400,17 @@ class DashboardViewModel(
             return
         }
         _state.value = _state.value.copy(opportunityScoringModel = model)
+        val requestId = ++nextSnapshotRequestId
         viewModelScope.launch {
             persistScoringPreferences(currentScoringPreferences())
-            render(
+            renderIfCurrent(
                 getDashboardSnapshot(
                     currentFilter(),
                     _state.value.detailRoute?.symbol,
                     _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                     model,
                 ),
+                requestId,
             )
         }
     }
@@ -1361,15 +1424,17 @@ class DashboardViewModel(
             return
         }
         _state.value = _state.value.copy(regimeScoringEnabled = enabled)
+        val requestId = ++nextSnapshotRequestId
         viewModelScope.launch {
             persistScoringPreferences(currentScoringPreferences())
-            render(
+            renderIfCurrent(
                 getDashboardSnapshot(
                     currentFilter(),
                     _state.value.detailRoute?.symbol,
                     _state.value.detailRoute?.chartRange ?: ChartRange.Year,
                     _state.value.opportunityScoringModel,
                 ),
+                requestId,
             )
         }
     }
@@ -1680,6 +1745,27 @@ class DashboardViewModel(
             ),
         )
         rememberDetailSession(_state.value)
+    }
+
+    private fun renderIfCurrent(snapshot: DashboardSnapshot, requestId: Long): Boolean {
+        if (requestId < lastRenderedSnapshotRequestId) return false
+        lastRenderedSnapshotRequestId = requestId
+        render(snapshot)
+        return true
+    }
+
+    private suspend fun renderDetailIfCurrent(snapshot: DashboardSnapshot, requestId: Long, symbol: String) {
+        if (renderIfCurrent(snapshot, requestId)) return
+        val route = _state.value.detailRoute ?: return
+        if (route.symbol != symbol) return
+        val latestRequestId = ++nextSnapshotRequestId
+        val latest = selectDashboardSymbol(
+            symbol,
+            currentFilter(),
+            route.chartRange,
+            _state.value.opportunityScoringModel,
+        )
+        renderIfCurrent(latest, latestRequestId)
     }
 
     private data class CachedDetailSession(
