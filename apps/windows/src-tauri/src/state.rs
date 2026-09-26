@@ -118,6 +118,8 @@ pub struct AppState {
     pub active_profile: Mutex<String>,
     /// Symbols currently tracked by the feed for `active_profile`.
     pub active_symbols: Mutex<Arc<Vec<String>>>,
+    /// Serializes profile adoption through generation change, state reset, and worker spawn.
+    pub profile_apply_gate: Arc<Mutex<()>>,
     /// When true, launch forced the profile; UI must not switch away.
     pub profile_locked: AtomicBool,
     /// Bumped on each universe switch so stale feed workers exit.
@@ -128,7 +130,7 @@ pub struct AppState {
     /// SEC ticker→CIK map (lazy; filled by EDGAR workers / demand valuation).
     pub edgar_cik_map: Arc<Mutex<Option<HashMap<String, u64>>>>,
     /// Symbols with an in-flight demand-driven valuation (avoid duplicate EDGAR hits).
-    pub valuation_inflight: Arc<Mutex<HashSet<String>>>,
+    pub valuation_inflight: Arc<Mutex<HashSet<(u64, String)>>>,
     /// One bounded Yahoo session for demand-only operating forecasts.
     pub valuation_yahoo: Option<Arc<YahooClient>>,
 }
@@ -207,6 +209,7 @@ impl AppState {
             remote_search_cache: Arc::new(Mutex::new(RemoteSearchCache::new())),
             active_profile: Mutex::new(profile),
             active_symbols: Mutex::new(Arc::new(symbols)),
+            profile_apply_gate: Arc::new(Mutex::new(())),
             profile_locked: AtomicBool::new(locked),
             feed_generation: Arc::new(AtomicU64::new(0)),
             initial_pass_completed_generation: Arc::new(AtomicU64::new(u64::MAX)),

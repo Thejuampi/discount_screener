@@ -1018,17 +1018,29 @@ fn company_facts_cached<F>(cik: u64, fetch: F) -> Result<Arc<serde_json::Value>,
 where
     F: FnOnce() -> Result<serde_json::Value, String>,
 {
+    company_facts_cached_with_clock(cik, Instant::now, fetch)
+}
+
+fn company_facts_cached_with_clock<F, C>(
+    cik: u64,
+    now: C,
+    fetch: F,
+) -> Result<Arc<serde_json::Value>, String>
+where
+    F: FnOnce() -> Result<serde_json::Value, String>,
+    C: Fn() -> Instant,
+{
     let cache = COMPANY_FACTS.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(map) = cache.lock() {
         if let Some(entry) = map.get(&cik) {
-            if entry.at.elapsed() < COMPANY_FACTS_TTL {
+            if now().saturating_duration_since(entry.at) < COMPANY_FACTS_TTL {
                 return Ok(Arc::clone(&entry.facts));
             }
         }
     }
     let facts = Arc::new(fetch()?);
     if let Ok(mut map) = cache.lock() {
-        map.retain(|_, entry| entry.at.elapsed() < COMPANY_FACTS_TTL);
+        map.retain(|_, entry| now().saturating_duration_since(entry.at) < COMPANY_FACTS_TTL);
         if map.len() >= COMPANY_FACTS_CAPACITY {
             let oldest = map
                 .iter()
@@ -1041,7 +1053,7 @@ where
         map.insert(
             cik,
             CachedFacts {
-                at: Instant::now(),
+                at: now(),
                 facts: Arc::clone(&facts),
             },
         );
@@ -1281,18 +1293,29 @@ mod company_facts_cache_tests {
     #[test]
     fn an_entry_older_than_the_ttl_is_fetched_again() {
         let cik = 900_000_004;
-        company_facts_cached(cik, || Ok(serde_json::json!({"facts": {"old": true}})))
-            .expect("first read");
-        if let Ok(mut map) = COMPANY_FACTS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-        {
-            if let Some(entry) = map.get_mut(&cik) {
-                entry.at = Instant::now() - COMPANY_FACTS_TTL - Duration::from_secs(1);
-            }
-        }
-        let fresh = company_facts_cached(cik, || Ok(serde_json::json!({"facts": {"old": false}})))
-            .expect("second read");
+        let start = Instant::now();
+        company_facts_cached_with_clock(
+            cik,
+            || start,
+            || Ok(serde_json::json!({"facts": {"old": true}})),
+        )
+        .expect("first read");
+        let still_fresh = company_facts_cached_with_clock(
+            cik,
+            || start + COMPANY_FACTS_TTL - Duration::from_millis(1),
+            || panic!("entry must stay cached before the TTL"),
+        )
+        .expect("read before TTL");
+        assert_eq!(
+            Some(true),
+            still_fresh.pointer("/facts/old").and_then(|v| v.as_bool())
+        );
+        let fresh = company_facts_cached_with_clock(
+            cik,
+            || start + COMPANY_FACTS_TTL,
+            || Ok(serde_json::json!({"facts": {"old": false}})),
+        )
+        .expect("read at TTL");
         assert_eq!(
             Some(false),
             fresh.pointer("/facts/old").and_then(|v| v.as_bool())
