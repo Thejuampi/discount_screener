@@ -1,0 +1,192 @@
+[
+  {
+    "name": "quotes-default",
+    "url": "https://query1.finance.yahoo.com/v7/finance/quote?symbols=AAPL%2CMSFT%2CJPM%2CBRK-B%2CTSM%2CSPY",
+    "status": 200,
+    "wire_bytes": 3576,
+    "decoded_bytes": 15422,
+    "encoding": "gzip",
+    "elapsed_ms": 114,
+    "sha256": "3e7d8bf3d48c5d826d0ea2ef142f5f948b414c07c9d75a87501ec50bd0fd6103"
+  },
+  {
+    "name": "quotes-fields",
+    "url": "https://query1.finance.yahoo.com/v7/finance/quote?symbols=AAPL%2CMSFT%2CJPM%2CBRK-B%2CTSM%2CSPY&fields=symbol%2ClongName%2CshortName%2CregularMarketPrice%2CepsTrailingTwelveMonths%2CearningsTimestamp%2CearningsTimestampStart%2CearningsTimestampEnd&formatted=false",
+    "status": 200,
+    "wire_bytes": 990,
+    "decoded_bytes": 5281,
+    "encoding": "gzip",
+    "elapsed_ms": 80,
+    "sha256": "5a9baf7c52066e1bf10b47f488fea4baa8416c5411b8349add6ca98707b40305"
+  },
+  {
+    "name": "summary-original-AAPL",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/AAPL?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CassetProfile%2CrecommendationTrend%2CcalendarEvents%2CearningsTrend",
+    "status": 200,
+    "wire_bytes": 5584,
+    "decoded_bytes": 19960,
+    "encoding": "gzip",
+    "elapsed_ms": 70,
+    "sha256": "b34e9f5fa913fd261552509b4b1a1d1b650ab2301d21bba9dd11fa04c1da9c6a"
+  },
+  {
+    "name": "summary-slim-AAPL",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/AAPL?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CsummaryProfile%2CrecommendationTrend%2CcalendarEvents&formatted=false",
+    "status": 200,
+    "wire_bytes": 3011,
+    "decoded_bytes": 7243,
+    "encoding": "gzip",
+    "elapsed_ms": 65,
+    "sha256": "d52b092d0f7139b4a79b45c944b21cb77b4b3c466be693d0ad1024031b52a20b"
+  },
+  {
+    "name": "summary-original-MSFT",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/MSFT?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CassetProfile%2CrecommendationTrend%2CcalendarEvents%2CearningsTrend",
+    "status": 200,
+    "wire_bytes": 5613,
+    "decoded_bytes": 20208,
+    "encoding": "gzip",
+    "elapsed_ms": 71,
+    "sha256": "8888015e87f5ff4a46673697320f9579d282ff63ac0422993d0e01a08ee85175"
+  },
+  {
+    "name": "summary-slim-MSFT",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/MSFT?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CsummaryProfile%2CrecommendationTrend%2CcalendarEvents&formatted=false",
+    "status": 200,
+    "wire_bytes": 3063,
+    "decoded_bytes": 7446,
+    "encoding": "gzip",
+    "elapsed_ms": 68,
+    "sha256": "9c436c18d26686abc7c6fe3c19c9dbf4cd0ead432ebb1dcbf0dc4fdc8731584c"
+  },
+  {
+    "name": "summary-original-JPM",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/JPM?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CassetProfile%2CrecommendationTrend%2CcalendarEvents%2CearningsTrend",
+    "status": 200,
+    "wire_bytes": 5523,
+    "decoded_bytes": 20044,
+    "encoding": "gzip",
+    "elapsed_ms": 83,
+    "sha256": "d6da8096a66ab0c3fce0c02dd40cd6792396e777739acacc9d2db04f81cf9585"
+  },
+  {
+    "name": "summary-slim-JPM",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/JPM?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CsummaryProfile%2CrecommendationTrend%2CcalendarEvents&formatted=false",
+    "status": 200,
+    "wire_bytes": 2918,
+    "decoded_bytes": 7050,
+    "encoding": "gzip",
+    "elapsed_ms": 76,
+    "sha256": "a943c19aed9b7463629b16a56d730c29ac194ed0c69e3adff97180379f206864"
+  },
+  {
+    "name": "summary-original-BRK-B",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/BRK-B?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CassetProfile%2CrecommendationTrend%2CcalendarEvents%2CearningsTrend",
+    "status": 200,
+    "wire_bytes": 5370,
+    "decoded_bytes": 19443,
+    "encoding": "gzip",
+    "elapsed_ms": 97,
+    "sha256": "2e8bc4da0e427cc3ea782558f0d6ac2854c24f196729600dfeb20c5f08fc9a67"
+  },
+  {
+    "name": "summary-slim-BRK-B",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/BRK-B?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CsummaryProfile%2CrecommendationTrend%2CcalendarEvents&formatted=false",
+    "status": 200,
+    "wire_bytes": 3060,
+    "decoded_bytes": 7184,
+    "encoding": "gzip",
+    "elapsed_ms": 64,
+    "sha256": "2133959e3ab2e21255906fcbe946e634635b2b130141c9ae7c81ec5ba5948496"
+  },
+  {
+    "name": "summary-original-TSM",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/TSM?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CassetProfile%2CrecommendationTrend%2CcalendarEvents%2CearningsTrend",
+    "status": 200,
+    "wire_bytes": 5155,
+    "decoded_bytes": 18946,
+    "encoding": "gzip",
+    "elapsed_ms": 68,
+    "sha256": "6d4ea1f63fb77988eda7a2345d6d1736d2d822906131f7127705d59303488776"
+  },
+  {
+    "name": "summary-slim-TSM",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/TSM?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CsummaryProfile%2CrecommendationTrend%2CcalendarEvents&formatted=false",
+    "status": 200,
+    "wire_bytes": 2758,
+    "decoded_bytes": 6589,
+    "encoding": "gzip",
+    "elapsed_ms": 73,
+    "sha256": "79e69d91fdf1b71d61f7c71eabc6c7fedc99d14fa3522e4f4efa3ac5a415a140"
+  },
+  {
+    "name": "summary-original-SPY",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/SPY?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CassetProfile%2CrecommendationTrend%2CcalendarEvents%2CearningsTrend",
+    "status": 200,
+    "wire_bytes": 1953,
+    "decoded_bytes": 5965,
+    "encoding": "gzip",
+    "elapsed_ms": 56,
+    "sha256": "1b16eb3c104cba0e999eb28348034f282f86e8d9ceff0e29eb1a3a8021b6846b"
+  },
+  {
+    "name": "summary-slim-SPY",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/SPY?modules=price%2CfinancialData%2CsummaryDetail%2CdefaultKeyStatistics%2CsummaryProfile%2CrecommendationTrend%2CcalendarEvents&formatted=false",
+    "status": 200,
+    "wire_bytes": 1237,
+    "decoded_bytes": 2980,
+    "encoding": "gzip",
+    "elapsed_ms": 72,
+    "sha256": "1a7006d2fa2fc9225ae9982de456764c9362c9a10bd8d8757b28479e001144bd"
+  },
+  {
+    "name": "spark-ohlcv",
+    "url": "https://query1.finance.yahoo.com/v7/finance/spark?symbols=AAPL%2CMSFT%2CJPM%2CBRK-B%2CTSM%2CSPY&range=1y&interval=1wk&indicators=open%2Chigh%2Clow%2Cclose%2Cvolume&includeTimestamps=true&includePrePost=false",
+    "status": 200,
+    "wire_bytes": 2711,
+    "decoded_bytes": 12705,
+    "encoding": "gzip",
+    "elapsed_ms": 51,
+    "sha256": "a73b53b9cc7ff45f686707d4029d25c7743e9bdb8e2f57fe425ebd3029a192a1"
+  },
+  {
+    "name": "summary-multi",
+    "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/AAPL,MSFT,JPM,BRK-B,TSM,SPY?modules=price%2CfinancialData",
+    "status": 404,
+    "wire_bytes": 133,
+    "decoded_bytes": 133,
+    "encoding": "identity",
+    "elapsed_ms": 67,
+    "sha256": "741613f86949258ac7d443d0f02a7b440bec949e8c72ba6234e53468160624ce"
+  },
+  {
+    "name": "timeseries-single",
+    "url": "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/AAPL?type=annualFreeCashFlow%2CannualTotalRevenue&period1=1600000000&period2=1790381163",
+    "status": 200,
+    "wire_bytes": 1372,
+    "decoded_bytes": 1372,
+    "encoding": "identity",
+    "elapsed_ms": 78,
+    "sha256": "5fada23713dcb6afe62d1dfab24361a45d17c6ccf0be551df6815d93857a198c"
+  },
+  {
+    "name": "timeseries-multi",
+    "url": "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/AAPL,MSFT,JPM,BRK-B,TSM,SPY?type=annualFreeCashFlow%2CannualTotalRevenue&period1=1600000000&period2=1790381163",
+    "status": 200,
+    "wire_bytes": 204,
+    "decoded_bytes": 204,
+    "encoding": "identity",
+    "elapsed_ms": 95,
+    "sha256": "741e06abedff7a2e7b00597facfcfe42c2eb9d2ab794f6c11c746580670dd631"
+  },
+  {
+    "name": "quotes-fundamental-fields",
+    "url": "https://query1.finance.yahoo.com/v7/finance/quote?symbols=AAPL%2CMSFT%2CJPM%2CBRK-B%2CTSM%2CSPY&fields=regularMarketPrice%2CtargetMeanPrice%2CtargetMedianPrice%2CnumberOfAnalystOpinions%2CrecommendationMean%2Csector%2CsectorKey%2Cindustry&formatted=false",
+    "status": 200,
+    "wire_bytes": 769,
+    "decoded_bytes": 4675,
+    "encoding": "gzip",
+    "elapsed_ms": 90,
+    "sha256": "7221f25473767bbceb2b31aa33d7be3bc90e78fa3c1a182ae3ed4348b116ab01"
+  }
+]

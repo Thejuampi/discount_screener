@@ -18,7 +18,9 @@ try {
     if ($hasSdk) {
         # The app suite exceeds the three-minute Gradle kill switch as one task.
         # Each filter runs in its own bounded task and keeps that hang guard useful.
-        Invoke-AndroidGradle -GradleArgs @(':app:testDebugUnitTest', '--tests', 'com.discountscreener.android.data.*', '--tests', 'com.discountscreener.android.presentation.*', '--rerun')
+        Invoke-AndroidGradle -GradleArgs @(':app:testDebugUnitTest', '--tests', 'com.discountscreener.android.data.*', '--tests', 'com.discountscreener.android.presentation.*', '-PloadTimingProbes=exclude', '--rerun')
+        # Wall-clock budgets require one probe at a time, without the rest of the suite competing for CPU.
+        Invoke-AndroidGradle -GradleArgs @(':app:testDebugUnitTest', '-PloadTimingProbes=only', '--max-workers=1', '--rerun')
         Invoke-AndroidGradle -GradleArgs @(':app:testDebugUnitTest', '--tests', 'com.discountscreener.android.ui.*', '--rerun')
         Invoke-AndroidGradle -GradleArgs @(':app:testDebugUnitTest', '--tests', 'com.discountscreener.android.app.*', '--tests', 'com.discountscreener.android.domain.*', '--tests', 'com.discountscreener.android.performance.*', '--tests', 'com.discountscreener.android.StuckTestWatchdogTest', '--rerun')
         Invoke-AndroidGradle -GradleArgs @(':app:assembleDebug')

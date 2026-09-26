@@ -42,6 +42,7 @@ Use this page to find the current source for each concern.
 ## Research And Diagnostics
 
 - [Research](research/)
+- [Yahoo API loading research](research/yahoo-api-loading-2026-09-25.md)
 - [Aggressive V5 evaluation](research/aggressive-v5-evaluation.md)
 - [Scoring evaluation process design](research/scoring-evaluation-process-design.md)
 - [Scoring evaluation validation](research/scoring-evaluation-validation.md)

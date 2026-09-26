@@ -84,9 +84,9 @@ data class YahooSearchQuote(
 /**
  * One row of Yahoo's batch quote endpoint: a symbol's price and the little that travels with it.
  *
- * The endpoint carries no analyst target, no recommendation counts and no sector, so an entry can
- * refresh the price of a row the app already knows and cannot create a row on its own; that is
- * still `quoteSummary`'s job.
+ * The selected fields refresh a row the app already knows. New rows still need quoteSummary
+ * for analyst targets and full fundamentals. Batch quotes can also return sector and industry
+ * labels when requested; the tested target fields remain absent. See the Yahoo loading research.
  */
 data class QuoteBatchEntry(
     val symbol: String,
@@ -146,8 +146,15 @@ private const val QUOTE_PAGE_UPGRADE_INSECURE_REQUESTS = "1"
  * - ROE: `financialData.returnOnEquity` only (reported; no synthesis)
  */
 internal const val QUOTE_SUMMARY_MODULES =
-    "price,financialData,summaryDetail,defaultKeyStatistics,assetProfile,recommendationTrend," +
-        "calendarEvents,earningsTrend"
+    "price,financialData,summaryDetail,defaultKeyStatistics,summaryProfile,recommendationTrend,calendarEvents"
+
+/** Consensus owns earningsTrend. Dashboard loading does not consume it. */
+internal const val CONSENSUS_MODULES = "earningsTrend"
+
+/** Fields consumed by parseQuoteBatch and the repository's cached-row price refresh. */
+internal const val QUOTE_BATCH_FIELDS =
+    "symbol,longName,shortName,regularMarketPrice,epsTrailingTwelveMonths," +
+        "earningsTimestamp,earningsTimestampStart,earningsTimestampEnd"
 
 internal const val REPORTED_QUARTER_MODULES = "earningsHistory,incomeStatementHistoryQuarterly"
 
@@ -256,7 +263,7 @@ open class YahooFinanceClient(
         currentCoroutineContext().ensureActive()
         var quoteSummaryNotFound = false
         var quoteContext = try {
-            val root = fetchQuoteSummaryJson(requestSymbol)
+            val root = fetchQuoteSummaryJson(requestSymbol, formatted = false)
             parseQuoteSummary(
                 root = root,
                 symbol = symbol,
@@ -394,6 +401,8 @@ open class YahooFinanceClient(
             val crumb = session.ensureCrumb()
             val url = QUOTE_BATCH_URL.toHttpUrl().newBuilder()
                 .addQueryParameter("symbols", appSymbolByRequestSymbol.keys.joinToString(","))
+                .addQueryParameter("fields", QUOTE_BATCH_FIELDS)
+                .addQueryParameter("formatted", "false")
                 .addQueryParameter("crumb", crumb)
                 .build()
             val request = Request.Builder()
@@ -418,12 +427,14 @@ open class YahooFinanceClient(
     private suspend fun fetchQuoteSummaryJson(
         requestSymbol: String,
         modules: String = QUOTE_SUMMARY_MODULES,
+        formatted: Boolean = true,
     ): JsonObject {
         suspend fun once(): JsonObject {
             val crumb = session.ensureCrumb()
             val url = QUOTE_SUMMARY_URL.toHttpUrl().newBuilder()
                 .addPathSegment(requestSymbol)
                 .addQueryParameter("modules", modules)
+                .addQueryParameter("formatted", formatted.toString())
                 .addQueryParameter("crumb", crumb)
                 .build()
             val request = Request.Builder()
@@ -574,7 +585,7 @@ open class YahooFinanceClient(
         symbol: String,
         period: String = CURRENT_QUARTER,
     ): ConsensusEstimate? = withContext(Dispatchers.IO) {
-        consensusOf(fetchQuoteSummaryJson(yahooRequestSymbol(symbol)), period)
+        consensusOf(fetchQuoteSummaryJson(yahooRequestSymbol(symbol), CONSENSUS_MODULES), period)
     }
 
     /**
@@ -909,7 +920,7 @@ internal fun parseQuoteSummary(
     val statistics = result.child("defaultKeyStatistics")
     val recommendationTrend = result["recommendationTrend"]?.jsonObject
     val price = result.child("price")
-    val assetProfile = result["assetProfile"]?.jsonObject
+    val assetProfile = result["summaryProfile"] as? JsonObject ?: result["assetProfile"] as? JsonObject
     val calendarEvents = result["calendarEvents"]?.jsonObject
     val companyName = listOfNotNull(
         price.string("longName"),
@@ -999,7 +1010,7 @@ private fun nextEarningsEpochOf(calendarEvents: JsonObject?, nowEpochSeconds: Lo
         ?.get("earnings")?.jsonObject
         ?.get("earningsDate")?.jsonArray
         .orEmpty()
-        .mapNotNull { entry -> entry.jsonObject["raw"]?.jsonPrimitive?.longOrNull }
+        .mapNotNull { entry -> entry.rawPrimitiveOrNull()?.longOrNull }
     return nextEarningsEpochOf(epochs, nowEpochSeconds)
 }
 
@@ -1504,7 +1515,14 @@ private fun JsonObject?.stringValue(name: String): String? =
     this?.get(name)?.jsonPrimitive?.contentOrNull
 
 private fun JsonObject?.rawDouble(name: String): Double? =
-    this?.get(name)?.jsonObject?.get("raw")?.jsonPrimitive?.plainDoubleOrNull()
+    this?.get(name)?.rawPrimitiveOrNull()?.plainDoubleOrNull()
+
+/** Yahoo returns bare values with formatted=false and wrapped values in older saved responses. */
+private fun JsonElement.rawPrimitiveOrNull(): JsonPrimitive? = when (this) {
+    is JsonObject -> this["raw"] as? JsonPrimitive
+    is JsonPrimitive -> this
+    else -> null
+}
 
 private fun JsonObject?.rawInt(name: String): Int? =
     rawDouble(name)?.takeIf(Double::isFinite)?.roundToLong()?.toInt()
