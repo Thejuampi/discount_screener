@@ -24,6 +24,7 @@ mod fibonacci;
 pub mod forward_earnings_multiple;
 #[cfg(test)]
 mod forward_earnings_multiple_contract;
+pub mod android_chart;
 pub mod headless;
 mod index_estimates;
 pub mod issuer_identity;

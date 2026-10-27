@@ -33,6 +33,14 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // Headless V3 parity contract: the test reads these, so they must key the build cache.
+    inputs.file(rootProject.projectDir.resolve("../../shared/contracts/opportunity-v3-headless-fixture.json"))
+    inputs.file(rootProject.projectDir.resolve("../../shared/contracts/opportunity-v3-headless-golden.json"))
+    providers.environmentVariable("HEADLESS_GOLDEN_WRITE").orNull?.let {
+        environment("HEADLESS_GOLDEN_WRITE", it)
+        outputs.upToDateWhen { false }
+        outputs.cacheIf { false }
+    }
     // Manual harnesses gate on -D properties; forward them so they reach the test JVM.
     // providers.systemProperty is a tracked configuration-cache input, so a new -D on the
     // command line invalidates the cached configuration instead of being silently ignored.
