@@ -59,6 +59,183 @@ pub struct SnapshotRow {
     /// Kotlin forecast target: (`preferredForecastFairValueCents`, `targetAnalystCount`).
     #[serde(default)]
     android_target: Option<(Option<i64>, Option<u32>)>,
+    /// Sanitized Street fields the Opps-screen projection reads (`SymbolDetail`).
+    #[serde(default)]
+    android_street: Option<AndroidStreet>,
+    /// Android DCF state facts for the projection; `None` = no DCF for the symbol.
+    #[serde(default)]
+    android_dcf: Option<AndroidDcfFacts>,
+}
+
+/// `ReportingEngine.sanitizeExternalSignal` fields read by `ScreenDataProjectionEngine`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct AndroidStreet {
+    pub fair: i64,
+    pub low: Option<i64>,
+    pub high: Option<i64>,
+    /// Weighted fair clamped into [low, high]; kept only if > 0.
+    pub weighted: Option<i64>,
+    /// Kept only with `weighted`.
+    pub weighted_count: Option<u32>,
+    pub opinions: Option<u32>,
+    pub age: u64,
+}
+
+impl AndroidStreet {
+    pub fn from_signal(x: &crate::engine::ExternalValuationSignal) -> Self {
+        let weighted = android_clamped_weighted_fair(x);
+        Self {
+            fair: x.fair_value_cents,
+            low: x.low_fair_value_cents,
+            high: x.high_fair_value_cents,
+            weighted,
+            weighted_count: weighted.and(x.weighted_analyst_count),
+            opinions: x.analyst_opinion_count,
+            age: x.age_seconds,
+        }
+    }
+
+    /// `ValuationJudgmentPolicy.streetComplete`: range ordered and positive, coverage
+    /// sufficient, fresh, available. Returns the Street base (`weighted ?: consensus`).
+    pub fn usable_base(&self) -> Option<i64> {
+        let base = self.weighted.unwrap_or(self.fair);
+        let (low, high) = (self.low.unwrap_or(0), self.high.unwrap_or(0));
+        let ordered = low > 0 && base > 0 && high > 0 && low <= base && base <= high;
+        let coverage = self.weighted_count.or(self.opinions).unwrap_or(0) > 0;
+        let fresh = self.age <= ANDROID_SIGNAL_MAX_AGE_SECONDS;
+        (ordered && coverage && fresh).then_some(base)
+    }
+}
+
+/// Android DCF identity value as the projection sees it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AndroidIdentity {
+    /// No computed identity (refused, unavailable, or no DCF).
+    None,
+    /// Computed identity base value (cents).
+    Value(i64),
+    /// Android computes an identity value headless does not reproduce
+    /// (live residual-income / FCFF DCF). Only matters when Street is unusable.
+    Unknown,
+}
+
+/// The `DcfAnalysis` facts `ScreenDataProjectionEngine` branches on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AndroidDcfFacts {
+    /// `resolverState == ProviderUncertain`.
+    pub provider_uncertain: bool,
+    /// `resolverState == RestoredOnly`.
+    pub restored_only: bool,
+    /// `isSourceFreeDcf`: source null/Unknown, or LegacySourceFreePayload provenance/reason.
+    pub source_free: bool,
+    pub identity: AndroidIdentity,
+}
+
+impl AndroidDcfFacts {
+    /// From a Kotlin `DcfAnalysis` JSON object (fixture injection / recorded requests).
+    pub fn from_kotlin_json(v: &serde_json::Value) -> Self {
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str());
+        let source = s("source");
+        // Kotlin defaults: resolverState = RestoredOnly when source == null, else Selected;
+        // provenance.fallbackReason / providerReasons carry LegacySourceFreePayload when null.
+        let resolver = s("resolverState")
+            .or(s("resolver_state"))
+            .unwrap_or(if source.is_none() {
+                "RestoredOnly"
+            } else {
+                "Selected"
+            });
+        let legacy = "LegacySourceFreePayload";
+        let prov = v.get("provenance");
+        let fallback = prov
+            .and_then(|p| p.get("fallbackReason").or(p.get("fallback_reason")))
+            .and_then(|x| x.as_str());
+        let reasons = v.get("providerReasons").or(v.get("provider_reasons"));
+        let reason_legacy = match reasons.and_then(|r| r.as_array()) {
+            Some(a) => a
+                .iter()
+                .any(|r| r.get("code").and_then(|c| c.as_str()) == Some(legacy)),
+            None => source.is_none(),
+        };
+        let fallback_legacy = match prov {
+            Some(_) => fallback == Some(legacy),
+            None => source.is_none(),
+        };
+        let source_free = source.is_none_or(|x| x == "Unknown") || reason_legacy || fallback_legacy;
+        let i = |k: &str| v.get(k).and_then(|x| x.as_i64());
+        let base = i("baseIntrinsicValueCents")
+            .or(i("base_intrinsic_value_cents"))
+            .unwrap_or(0);
+        let model = s("model").unwrap_or("None");
+        let unavailable = s("valuationUnavailableReason")
+            .or(s("valuation_unavailable_reason"))
+            .is_some();
+        let identity = if model != "None" && !unavailable && base > 0 {
+            AndroidIdentity::Value(base)
+        } else {
+            AndroidIdentity::None
+        };
+        Self {
+            provider_uncertain: resolver == "ProviderUncertain",
+            restored_only: resolver == "RestoredOnly",
+            source_free,
+            identity,
+        }
+    }
+
+    /// `ResidualFromDrivers.compute` with SEC off reaches `ResolverState.Selected`
+    /// (DcfAnalysisEngine.residualIncome preconditions). Its analysis keeps the default
+    /// source-free provenance (`DcfAnalysis(source = null)` then `.copy(source = Yahoo)`),
+    /// so the projection treats it as source-unknown.
+    fn residual_selected(f: &crate::engine::FundamentalSnapshot, price_cents: i64) -> bool {
+        let shares = f.shares_outstanding.unwrap_or(0) > 0;
+        let bvps = match f.book_value_per_share_cents.filter(|b| *b > 0) {
+            Some(b) => b,
+            None => match (
+                price_cents > 0,
+                f.price_to_book_hundredths.filter(|p| *p > 0),
+            ) {
+                (true, Some(pb)) => {
+                    ((price_cents as f64 / 100.0) / (pb as f64 / 100.0) * 100.0).round() as i64
+                }
+                _ => 0,
+            },
+        };
+        let roe = f.return_on_equity_bps.is_some_and(|r| r > 0 && r < 10_000);
+        let retention = f.retention_bps.is_some_and(|r| (0..=10_000).contains(&r));
+        shares && bvps > 0 && roe && retention
+    }
+
+    /// The DCF state Android settles on after a bulk load (`enrichSymbol`, SEC off).
+    /// `operating_identity`: what an operating name's DCF contributes (live: an FCFF value
+    /// headless does not reproduce → `Some(Unknown)`; recorded fixture: no DCF → `None`).
+    pub fn bulk_load(
+        class: Option<crate::dcf_model::BusinessClass>,
+        f: Option<&crate::engine::FundamentalSnapshot>,
+        price_cents: i64,
+        operating_identity: Option<AndroidIdentity>,
+    ) -> Option<Self> {
+        use crate::dcf_model::BusinessClass::*;
+        let facts = |source_free, identity| Self {
+            provider_uncertain: false,
+            restored_only: false,
+            source_free,
+            identity,
+        };
+        match class? {
+            // terminalClassificationAnalysis: source Unknown, model None.
+            Unclassified | NotEligible => Some(facts(true, AndroidIdentity::None)),
+            FinancialServices => {
+                if Self::residual_selected(f?, price_cents) {
+                    Some(facts(true, AndroidIdentity::Unknown))
+                } else {
+                    // missingDrivers: SecEdgar Unavailable, model None.
+                    Some(facts(false, AndroidIdentity::None))
+                }
+            }
+            OperatingNonFinancial => operating_identity.map(|i| facts(false, i)),
+        }
+    }
 }
 
 /// Serializable copy of the exact input the V3 projection consumes.
@@ -79,14 +256,20 @@ impl OpportunitySnapshot {
         profile: &str,
         year: &std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>,
     ) -> Self {
-        let (classes, externals) = {
+        let (classes, externals, funds) = {
             let s = screener.lock().unwrap();
+            let funds = s.fundamentals.clone();
             let classes: std::collections::HashMap<String, crate::dcf_model::BusinessClass> = s
                 .fundamentals
                 .iter()
                 .map(|(sym, f)| (sym.clone(), android_class(sym, f)))
                 .collect();
-            type Ext = ((i64, u64), Option<u32>, (Option<i64>, Option<u32>));
+            type Ext = (
+                (i64, u64),
+                Option<u32>,
+                (Option<i64>, Option<u32>),
+                AndroidStreet,
+            );
             let externals: std::collections::HashMap<String, Ext> = s
                 .signals
                 .iter()
@@ -100,11 +283,12 @@ impl OpportunitySnapshot {
                             (x.fair_value_cents, x.age_seconds),
                             android_analyst_count(x),
                             android_forecast_target(x),
+                            AndroidStreet::from_signal(x),
                         ),
                     )
                 })
                 .collect();
-            (classes, externals)
+            (classes, externals, funds)
         };
         let projection = capture_opportunity_projection(screener);
         let rows = projection
@@ -122,6 +306,13 @@ impl OpportunitySnapshot {
                 external: externals.get(&i.row.symbol).map(|e| e.0),
                 external_analysts: externals.get(&i.row.symbol).and_then(|e| e.1),
                 android_target: externals.get(&i.row.symbol).map(|e| e.2),
+                android_street: externals.get(&i.row.symbol).map(|e| e.3.clone()),
+                android_dcf: AndroidDcfFacts::bulk_load(
+                    classes.get(&i.row.symbol).copied(),
+                    funds.get(&i.row.symbol),
+                    i.row.market_price_cents,
+                    Some(AndroidIdentity::Unknown),
+                ),
                 row: i.row,
             })
             .collect();
@@ -256,6 +447,12 @@ pub struct RankedRow {
     pub technical: Option<i32>,
     pub forecast: Option<i32>,
     pub regime: Option<i32>,
+    /// Android Opps-screen trust signal (android semantics only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_signal: Option<String>,
+    /// Set when the on-screen value needs a DCF identity value headless does not compute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_gap: Option<String>,
 }
 
 /// Short-side setup label from the (already short-oriented) Short V3 composite.
@@ -306,6 +503,8 @@ pub fn to_ranked(rows: &[OpportunityRow], model: ScoringModel) -> Vec<RankedRow>
             technical: r.technical_score,
             forecast: r.forecast_score,
             regime: r.regime_score,
+            trust_signal: None,
+            projection_gap: None,
         })
         .collect()
 }
@@ -320,17 +519,19 @@ pub fn android_to_ranked(rows: &[AndroidRow]) -> Vec<RankedRow> {
             sector: r.sector.clone(),
             composite_score: r.composite_score,
             setup_score: r.composite_score,
-            setup_label: r.decision.clone(),
-            decision: r.decision.clone(),
+            setup_label: r.decision.clone().unwrap_or_default(),
+            decision: r.decision.clone().unwrap_or_default(),
             confidence: Some(r.confidence.clone()),
             price: r.price_cents as f64 / 100.0,
-            target: (r.intrinsic_cents > 0).then(|| r.intrinsic_cents as f64 / 100.0),
-            gap_pct: Some(r.gap_bps as f64 / 100.0),
-            upside_pct: Some(r.upside_bps as f64 / 100.0),
+            target: r.anchor_cents.map(|c| c as f64 / 100.0),
+            gap_pct: r.gap_bps.map(|b| b as f64 / 100.0),
+            upside_pct: r.upside_bps.map(|b| b as f64 / 100.0),
             fundamentals: r.fundamentals,
             technical: r.technical,
             forecast: r.forecast,
             regime: None,
+            trust_signal: r.trust_signal.clone(),
+            projection_gap: r.projection_gap.clone(),
         })
         .collect()
 }
@@ -405,7 +606,9 @@ pub fn android_class(
     )
 }
 
-/// One Android Opportunities row (V3, context off).
+/// One Android Opportunities row (V3, context off) as the Opps screen shows it:
+/// `OpportunityEngine.buildRows` order and scores, with confidence / gap / upside /
+/// trust / decision from `ScreenDataProjectionEngine.projectedOpportunityRow`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AndroidRow {
     pub symbol: String,
@@ -416,13 +619,166 @@ pub struct AndroidRow {
     pub fundamentals: Option<i32>,
     pub technical: Option<i32>,
     pub forecast: Option<i32>,
-    pub decision: String,
+    /// Projected decision (`Act` / `Watch` / `Avoid`); `None` = no badge on screen.
+    pub decision: Option<String>,
+    /// Projected confidence (`high` / `provisional` / `low`).
     pub confidence: String,
     pub price_cents: i64,
+    /// buildRows intrinsic value (the row's own fair value).
     pub intrinsic_cents: i64,
-    pub gap_bps: i32,
-    pub upside_bps: i32,
+    /// Projected anchor value (judgment primary); `None` = no anchor.
+    pub anchor_cents: Option<i64>,
+    /// `street_weighted` / `street_consensus` / `identity` / `unavailable`.
+    pub anchor: String,
+    /// Projected discount / upside vs the anchor, clamped to ±100000 bps.
+    pub gap_bps: Option<i32>,
+    pub upside_bps: Option<i32>,
+    /// `ProjectedTrustSignalKind` name.
+    pub trust_signal: Option<String>,
+    /// buildRows values (what the sort uses).
+    pub row_confidence: String,
+    pub row_gap_bps: i32,
+    pub row_upside_bps: i32,
+    /// Set when Android's on-screen value depends on a DCF identity value headless
+    /// does not compute (Street unusable + live residual/FCFF DCF).
+    pub projection_gap: Option<String>,
     pub fundamentals_signals: Vec<String>,
+}
+
+/// `quant_lens.row_upside_min_bps` / `row_upside_max_bps` (valuation-policy.yaml).
+pub const ANDROID_ROW_UPSIDE_LIMIT_BPS: i32 = 100_000;
+
+/// Output of [`android_project_row`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct AndroidProjection {
+    pub confidence: Option<crate::engine::ConfidenceBand>,
+    pub anchor_cents: Option<i64>,
+    pub anchor: &'static str,
+    pub gap_bps: Option<i32>,
+    pub upside_bps: Option<i32>,
+    pub trust_signal: Option<&'static str>,
+    pub decision: Option<&'static str>,
+    pub projection_gap: Option<&'static str>,
+}
+
+/// Kotlin `checkedGapBps`: (fair - market) * 10000 / fair, fair > 0.
+fn android_checked_gap_bps(price: i64, fair: i64) -> Option<i32> {
+    if fair <= 0 {
+        return None;
+    }
+    let v = (fair as i128 - price as i128) * 10_000 / fair as i128;
+    Some(v.clamp(i32::MIN as i128, i32::MAX as i128) as i32)
+}
+
+fn android_lower(c: crate::engine::ConfidenceBand) -> crate::engine::ConfidenceBand {
+    use crate::engine::ConfidenceBand::*;
+    match c {
+        High => Provisional,
+        Provisional | Low => Low,
+    }
+}
+
+/// Port of `ScreenDataProjectionEngine.projectedOpportunityRow` for an Opps row built
+/// after a cold load (every symbol Live, no provider issues, Consensus statistic):
+/// `namedRowValuation` (ValuationJudgmentAssembler/Policy: Street if `streetComplete`,
+/// else refuse/Identity), `projectedConfidence`, `trustSignal`, `opportunityDecision`.
+pub fn android_project_row(
+    row_confidence: crate::engine::ConfidenceBand,
+    price_cents: i64,
+    composite: i32,
+    street: Option<&AndroidStreet>,
+    dcf: Option<&AndroidDcfFacts>,
+) -> AndroidProjection {
+    use crate::engine::ConfidenceBand::*;
+    let lower = dcf.is_some_and(|d| d.provider_uncertain || d.restored_only || d.source_free);
+    let confidence = if lower {
+        android_lower(row_confidence)
+    } else {
+        row_confidence
+    };
+    let street_base = street.and_then(|s| s.usable_base());
+    let mut projection_gap = None;
+    // (anchor value, label, analyst coverage for the anchor role)
+    let (anchor_cents, anchor, analyst_role_count): (
+        Option<i64>,
+        &'static str,
+        Option<Option<u32>>,
+    ) = match (street_base, street) {
+        (Some(base), Some(s)) => {
+            if s.weighted.is_some_and(|w| w > 0) {
+                (
+                    Some(base),
+                    "street_weighted",
+                    Some(s.weighted_count.or(s.opinions)),
+                )
+            } else {
+                (Some(base), "street_consensus", Some(s.opinions))
+            }
+        }
+        _ => match dcf.map(|d| d.identity) {
+            Some(AndroidIdentity::Value(v)) => (Some(v), "identity", None),
+            Some(AndroidIdentity::Unknown) => {
+                projection_gap = Some("identity_value_not_computed_headless");
+                (None, "identity", None)
+            }
+            _ => (None, "unavailable", None),
+        },
+    };
+    let clamp = |v: i32| v.clamp(-ANDROID_ROW_UPSIDE_LIMIT_BPS, ANDROID_ROW_UPSIDE_LIMIT_BPS);
+    let gap_bps = anchor_cents
+        .and_then(|a| android_checked_gap_bps(price_cents, a))
+        .map(clamp);
+    let upside_bps = anchor_cents
+        .and_then(|a| android_upside_bps(price_cents, a))
+        .map(clamp);
+    let trust_signal = if dcf.is_some_and(|d| d.provider_uncertain) {
+        Some("SourceUncertain")
+    } else if dcf.is_some_and(|d| d.source_free) {
+        Some("SourceUnknown")
+    } else if anchor == "identity" {
+        let valid = street.is_some_and(|s| {
+            s.weighted.is_some_and(|w| w > 0)
+                || s.fair > 0
+                || s.low.is_some_and(|l| l > 0)
+                || s.high.is_some_and(|h| h > 0)
+        });
+        Some(if valid {
+            "ModelValue"
+        } else {
+            "NoAnalystTarget"
+        })
+    } else {
+        match analyst_role_count {
+            Some(Some(1..=2)) => Some("ThinCoverage"),
+            Some(Some(0) | None) => Some("CoverageUnknown"),
+            _ => None,
+        }
+    };
+    let decision = match (upside_bps, projection_gap) {
+        // Kotlin: `projectedUpsideBps(...) ?: return null`.
+        (None, None) => None,
+        // Identity value unknown: only the confidence gate is decidable.
+        (None, Some(_)) => (confidence == Low).then_some("Avoid"),
+        (Some(up), _) => Some(if confidence == Low || up <= 0 || composite < 0 {
+            "Avoid"
+        } else if trust_signal.is_some() {
+            "Watch"
+        } else if confidence == High && composite >= 30 {
+            "Act"
+        } else {
+            "Watch"
+        }),
+    };
+    AndroidProjection {
+        confidence: Some(confidence),
+        anchor_cents,
+        anchor,
+        gap_bps,
+        upside_bps,
+        trust_signal,
+        decision,
+        projection_gap,
+    }
 }
 
 fn confidence_rank(c: crate::engine::ConfidenceBand) -> u8 {
@@ -450,30 +806,6 @@ pub fn android_upside_bps(price: i64, fair: i64) -> Option<i32> {
     }
     let v = (fair as i128 - price as i128) * 10_000 / price as i128;
     Some(v.clamp(i32::MIN as i128, i32::MAX as i128) as i32)
-}
-
-/// Port of `app/.../OpportunityDecision.kt` (trust note never set headless).
-pub fn android_decision(
-    confidence: crate::engine::ConfidenceBand,
-    upside_bps: Option<i32>,
-    score: i32,
-    trust_note: bool,
-) -> &'static str {
-    use crate::engine::ConfidenceBand::*;
-    if confidence == Low {
-        return "Avoid";
-    }
-    let Some(up) = upside_bps else { return "Watch" };
-    if up <= 0 || score < 0 {
-        return "Avoid";
-    }
-    if trust_note {
-        return "Watch";
-    }
-    if confidence == High && score >= 30 {
-        return "Act";
-    }
-    "Watch"
 }
 
 /// Android `OpportunityEngine.buildRows` for AggressiveV3, regime scoring off:
@@ -591,6 +923,13 @@ pub fn rank_android_v3(
             let composite = composite_score_v3_android(f, t, fc, row.beta_millis);
             let coverage = [f, t, fc].iter().filter(|x| x.is_some()).count() as u8;
             let upside = android_upside_bps(row.market_price_cents, row.intrinsic_value_cents);
+            let p = android_project_row(
+                row.confidence,
+                row.market_price_cents,
+                composite,
+                r.android_street.as_ref(),
+                r.android_dcf.as_ref(),
+            );
             (
                 AndroidRow {
                     symbol: row.symbol.clone(),
@@ -601,13 +940,20 @@ pub fn rank_android_v3(
                     fundamentals: f,
                     technical: t,
                     forecast: fc,
-                    decision: android_decision(row.confidence, upside, composite, false)
+                    decision: p.decision.map(str::to_string),
+                    confidence: confidence_label(p.confidence.unwrap_or(row.confidence))
                         .to_string(),
-                    confidence: confidence_label(row.confidence).to_string(),
                     price_cents: row.market_price_cents,
                     intrinsic_cents: row.intrinsic_value_cents,
-                    gap_bps: row.gap_bps.unwrap_or(0),
-                    upside_bps: upside.unwrap_or(0),
+                    anchor_cents: p.anchor_cents,
+                    anchor: p.anchor.to_string(),
+                    gap_bps: p.gap_bps,
+                    upside_bps: p.upside_bps,
+                    trust_signal: p.trust_signal.map(str::to_string),
+                    row_confidence: confidence_label(row.confidence).to_string(),
+                    row_gap_bps: row.gap_bps.unwrap_or(0),
+                    row_upside_bps: upside.unwrap_or(0),
+                    projection_gap: p.projection_gap.map(str::to_string),
                     fundamentals_signals: sig,
                 },
                 confidence_rank(row.confidence),
@@ -619,7 +965,7 @@ pub fn rank_android_v3(
             .cmp(&a.composite_score)
             .then(b.coverage.cmp(&a.coverage))
             .then(bc.cmp(ac))
-            .then(b.upside_bps.cmp(&a.upside_bps))
+            .then(b.row_upside_bps.cmp(&a.row_upside_bps))
             .then(a.symbol.cmp(&b.symbol))
     });
     rows.into_iter().map(|(r, _)| r).collect()
@@ -1078,7 +1424,34 @@ mod android_parity_tests {
                 year.insert(sym, crate::android_chart::build_summary(&candles));
             }
         }
-        let snap = OpportunitySnapshot::capture_with_year(&screener, "fixture", &year);
+        let mut snap = OpportunitySnapshot::capture_with_year(&screener, "fixture", &year);
+        // Recorded inputs carry no operating DCF (no timeseries); an injected `dcf`
+        // replaces the bulk-load state.
+        let cases: std::collections::HashMap<&str, &Value> = fx["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| (c["snapshot"]["symbol"].as_str().unwrap(), c))
+            .collect();
+        for r in &mut snap.rows {
+            let case = cases[r.row.symbol.as_str()];
+            r.android_dcf = if !case["dcf"].is_null() {
+                Some(AndroidDcfFacts::from_kotlin_json(&case["dcf"]))
+            } else {
+                let fund = screener
+                    .lock()
+                    .unwrap()
+                    .fundamentals
+                    .get(&r.row.symbol)
+                    .cloned();
+                AndroidDcfFacts::bulk_load(
+                    r.business_class,
+                    fund.as_ref(),
+                    r.row.market_price_cents,
+                    None,
+                )
+            };
+        }
         rank_android_v3(&snap, None)
     }
 
@@ -1091,6 +1464,7 @@ mod android_parity_tests {
         let rows = rank_fixture();
         let want = golden["rows"].as_array().unwrap();
         let mut diffs = Vec::new();
+        let mut gaps = 0;
         if rows.len() != want.len() {
             diffs.push(format!("row count {} vs golden {}", rows.len(), want.len()));
         }
@@ -1103,14 +1477,31 @@ mod android_parity_tests {
                 diffs.push(format!("{}: ranked by Rust, absent in Kotlin", r.symbol));
                 continue;
             };
+            let cap = |c: &str| match c {
+                "high" => "High",
+                "low" => "Low",
+                _ => "Provisional",
+            };
             let got = serde_json::json!({
                 "rank": i + 1, "compositeScore": r.composite_score,
                 "coverageCount": r.coverage, "fundamentalsScore": r.fundamentals,
                 "technicalScore": r.technical, "forecastScore": r.forecast,
-                "confidence": match r.confidence.as_str() { "high" => "High", "low" => "Low", _ => "Provisional" },
-                "gapBps": r.gap_bps, "upsideBps": r.upside_bps, "decision": r.decision,
+                "confidence": cap(&r.row_confidence),
+                "gapBps": r.row_gap_bps, "upsideBps": r.row_upside_bps,
+                "projectedConfidence": cap(&r.confidence),
+                "projectedGapBps": r.gap_bps, "projectedUpsideBps": r.upside_bps,
+                "trustSignal": r.trust_signal, "decision": r.decision,
             });
             for (k, v) in got.as_object().unwrap() {
+                // Known, flagged gap: Android's identity value (live residual / FCFF DCF)
+                // is not computed headless; only the decision's confidence gate is.
+                if r.projection_gap.is_some()
+                    && matches!(k.as_str(), "projectedGapBps" | "projectedUpsideBps")
+                    && v.is_null()
+                {
+                    gaps += 1;
+                    continue;
+                }
                 if g.get(k) != Some(v) {
                     diffs.push(format!("{}: {k} rust={v} kotlin={}", r.symbol, g[k]));
                 }
@@ -1127,6 +1518,8 @@ mod android_parity_tests {
             "Android parity diffs:\n{}",
             diffs.join("\n")
         );
+        // Exactly FXRI (residual identity anchor behind a stale Street) is skipped.
+        assert_eq!(gaps, 2, "unexpected identity-gap field count");
     }
 
     /// Mutation guard: the golden must catch a one-point coverage-bonus change
@@ -1196,15 +1589,84 @@ mod android_parity_tests {
     }
 
     #[test]
-    fn android_decision_gates() {
+    fn projection_screen_cases_in_golden() {
+        let golden: Value = serde_json::from_slice(
+            &std::fs::read(contracts().join("opportunity-v3-headless-golden.json")).unwrap(),
+        )
+        .unwrap();
+        let row = |s: &str| {
+            golden["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["symbol"] == s)
+                .cloned()
+                .unwrap()
+        };
+        // ProviderUncertain DCF at composite >= 30: High -> Provisional, Watch not Act.
+        let pu = row("FXPU");
+        assert!(pu["compositeScore"].as_i64().unwrap() >= 30);
+        assert_eq!(pu["confidence"], "High");
+        assert_eq!(pu["projectedConfidence"], "Provisional");
+        assert_eq!(pu["trustSignal"], "SourceUncertain");
+        assert_eq!(pu["decision"], "Watch");
+        let rf = row("FXRF");
+        assert!(rf["compositeScore"].as_i64().unwrap() >= 30);
+        assert_eq!(rf["trustSignal"], "SourceUnknown");
+        assert_eq!(rf["decision"], "Watch");
+        assert_eq!(row("FX12")["decision"], "Act");
+    }
+
+    #[test]
+    fn android_projection_gates() {
         use crate::engine::ConfidenceBand::*;
-        assert_eq!(android_decision(Low, Some(5000), 90, false), "Avoid");
-        assert_eq!(android_decision(High, None, 40, false), "Watch");
-        assert_eq!(android_decision(High, Some(0), 40, false), "Avoid");
-        assert_eq!(android_decision(High, Some(100), -1, false), "Avoid");
-        assert_eq!(android_decision(High, Some(100), 40, true), "Watch");
-        assert_eq!(android_decision(High, Some(100), 30, false), "Act");
-        assert_eq!(android_decision(High, Some(100), 29, false), "Watch");
-        assert_eq!(android_decision(Provisional, Some(100), 80, false), "Watch");
+        let street = AndroidStreet {
+            fair: 15_000,
+            low: Some(12_000),
+            high: Some(20_000),
+            weighted: None,
+            weighted_count: None,
+            opinions: Some(10),
+            age: 0,
+        };
+        let pu = AndroidDcfFacts {
+            provider_uncertain: true,
+            restored_only: false,
+            source_free: false,
+            identity: AndroidIdentity::None,
+        };
+        let p = |c, comp, s: Option<&AndroidStreet>, d: Option<&AndroidDcfFacts>| {
+            android_project_row(c, 10_000, comp, s, d)
+        };
+        assert_eq!(p(High, 30, Some(&street), None).decision, Some("Act"));
+        assert_eq!(p(High, 29, Some(&street), None).decision, Some("Watch"));
+        let x = p(High, 45, Some(&street), Some(&pu));
+        assert_eq!(
+            (x.confidence, x.trust_signal, x.decision),
+            (Some(Provisional), Some("SourceUncertain"), Some("Watch"))
+        );
+        assert_eq!(p(Low, 45, Some(&street), None).decision, Some("Avoid"));
+        assert_eq!(p(High, -1, Some(&street), None).decision, Some("Avoid"));
+        let thin = AndroidStreet {
+            opinions: Some(2),
+            ..street.clone()
+        };
+        assert_eq!(
+            p(High, 45, Some(&thin), None).trust_signal,
+            Some("ThinCoverage")
+        );
+        let stale = AndroidStreet {
+            age: 31,
+            ..street.clone()
+        };
+        assert_eq!(p(Low, 45, Some(&stale), None).decision, None);
+        let x = p(High, 45, Some(&street), None);
+        assert_eq!((x.gap_bps, x.upside_bps), (Some(3333), Some(5000)));
+        let huge = AndroidStreet {
+            fair: 10_000_000,
+            high: Some(20_000_000),
+            ..street
+        };
+        assert_eq!(p(High, 45, Some(&huge), None).upside_bps, Some(100_000));
     }
 }

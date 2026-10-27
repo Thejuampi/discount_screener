@@ -52,10 +52,13 @@ class State {
     val timeseries = mutableMapOf<String, FundamentalTimeseries>()
     val refreshedAt = mutableMapOf<String, Long>()
     val raw = mutableMapOf<String, ProviderFetchResult>()
+    var symbols: List<String> = emptyList()
+    var nowSec: Long = 0
 }
 
 fun main() = runBlocking {
     val outDir = File(System.getenv("PARITY_OUT") ?: "/tmp/android-jvm-parity").apply { mkdirs() }
+    System.getenv("PARITY_REPLAY")?.let { replay(File(it), outDir); return@runBlocking }
     val profile = File("apps/android/app/src/main/assets/profiles/sp500.txt")
     val universe = LinkedHashSet(profile.readLines().map(String::trim).filter(String::isNotEmpty)).toList()
     val limit = System.getenv("PARITY_LIMIT")?.toInt()
@@ -87,8 +90,12 @@ fun main() = runBlocking {
     fun bclass(f: FundamentalSnapshot) = DcfAnalysisEngine.classifyBusiness(f.sectorName, f.industryName, f.sectorKey, f.industryKey, symbol = f.symbol)
     fun financial(f: FundamentalSnapshot) = bclass(f) == BusinessClass.FinancialServices
     fun admit(sym: String, a: DcfAnalysis, f: FundamentalSnapshot?) {
-        // DefaultDashboardRepository.admitDcfAnalysisLocked, class gates.
-        if (f != null && a.resolverState != ResolverState.NotEligible) {
+        // DefaultDashboardRepository.admitDcfAnalysisLocked: terminal/restored states are kept as-is,
+        // then policy-version and class gates.
+        val terminal = a.resolverState == ResolverState.NotEligible || a.resolverState == ResolverState.Unavailable ||
+            a.resolverState == ResolverState.ProviderUncertain || a.resolverState == ResolverState.RestoredOnly
+        if (!terminal && !DcfAnalysisEngine.isCurrentPolicy(a)) { s.dcf.remove(sym); return }
+        if (f != null && !terminal) {
             val c = bclass(f)
             if (c == BusinessClass.Unclassified || c == BusinessClass.NotEligible) { s.dcf.remove(sym); return }
             if (a.model == ValuationModel.FcffWacc && c == BusinessClass.FinancialServices) { s.dcf.remove(sym); return }
@@ -190,6 +197,51 @@ fun main() = runBlocking {
         log("enrichment pass $pass/$PASSES: dcf=${s.dcf.size} retryLeft=${pending.size}")
     }
 
+    val nowSec = now()
+    s.symbols = symbols
+    s.nowSec = nowSec
+    rankProjectWrite(s, outDir)
+    writeFixture(s, outDir)
+    log("done started=$started out=$outDir")
+}
+
+private val enc = Json { encodeDefaults = true }
+private val lenient = Json { ignoreUnknownKeys = true }
+
+/**
+ * Offline: rebuild State from a recorded fixture (inputs + the DCF state the live run settled on)
+ * and run the same buildRows -> ScreenReplay.project path. No network.
+ */
+fun replay(fixtureFile: File, outDir: File) {
+    val fx = Json.parseToJsonElement(fixtureFile.readText()).jsonObject
+    val s = State()
+    s.nowSec = fx.getValue("capturedAtEpochSeconds").jsonPrimitive.long
+    val syms = mutableListOf<String>()
+    fx.getValue("symbols").jsonArray.forEach { el ->
+        val c = el.jsonObject
+        val snap = lenient.decodeFromJsonElement(MarketSnapshot.serializer(), c.getValue("snapshot"))
+        val sym = snap.symbol
+        syms += sym
+        s.engine.ingestSnapshot(snap)
+        snap.companyName?.let { s.names[sym] = it }
+        s.refreshedAt[sym] = s.nowSec
+        c["external"]?.takeIf { it !is JsonNull }?.let { s.engine.ingestExternal(lenient.decodeFromJsonElement(ExternalValuationSignal.serializer(), it)) }
+        c["fundamentals"]?.takeIf { it !is JsonNull }?.let { s.engine.ingestFundamentals(lenient.decodeFromJsonElement(FundamentalSnapshot.serializer(), it)) }
+        c["dcf"]?.takeIf { it !is JsonNull }?.let { s.dcf[sym] = lenient.decodeFromJsonElement(DcfAnalysis.serializer(), it) }
+        val candles = c["yearCandles"]?.jsonArray?.map { lenient.decodeFromJsonElement(HistoricalCandle.serializer(), it) }.orEmpty()
+        if (candles.isNotEmpty()) {
+            s.candles[sym] = candles
+            s.summaries.getOrPut(sym) { linkedMapOf() }[ChartRange.Year] = ChartAnalysis.buildSummary(ChartRange.Year, candles, s.nowSec)
+        }
+    }
+    s.symbols = syms
+    rankProjectWrite(s, outDir)
+    log("replay done symbols=${syms.size} out=$outDir")
+}
+
+fun rankProjectWrite(s: State, outDir: File) {
+    val symbols = s.symbols
+    val nowSec = s.nowSec
     // ---- snapshotLocked: rank, then project
     val rows = OpportunityEngine.buildRows(
         s.engine,
@@ -210,7 +262,6 @@ fun main() = runBlocking {
     val tracked = symbols
     val detailSymbols = (tracked + candidates.map { it.symbol } + s.dcf.keys).distinct()
     val details = detailSymbols.mapNotNull { sym -> s.engine.detail(sym)?.let { sym to it } }.toMap()
-    val nowSec = now()
     val request = ScreenDataProjectionRequest(
         profile = ProjectionProfileFacts(currentProfile = "sp500"),
         route = ProjectionRoute(ViewFilter(), null, ChartRange.Year, 0, OpportunityScoringModel.AggressiveV3),
@@ -243,16 +294,21 @@ fun main() = runBlocking {
                 put("rowGapBps", r.gapBps); put("rowUpsideBps", r.upsideBps)
                 put("projectedGapBps", p.gapBps); put("projectedUpsideBps", p.upsideBps)
                 put("anchorCents", p.fairValueAnchor.valueCents); put("anchorSource", p.fairValueAnchor.toString().take(160))
-                put("trustSignal", p.trustSignal?.toString())
-                put("decision", p.decision?.toString())
+                put("trustSignal", p.trustSignal?.kind?.name)
+                put("decision", p.decision?.name)
                 put("judgmentPrimaryCents", p.valuationJudgment?.primaryCents)
             })
         }
     }
     File(outDir, "opps.json").writeText(Json { prettyPrint = true }.encodeToString(JsonArray.serializer(), opps))
+    val counts = projected.opportunityRows.groupingBy { it.decision?.toString() ?: "null" }.eachCount()
+    log("opps=${projected.opportunityRows.size} decisions=$counts")
+}
 
-    // raw inputs, headless-v3 fixture format
-    val enc = Json { encodeDefaults = true }
+/** Raw inputs plus the settled DCF state, headless-v3 fixture format (replayable with PARITY_REPLAY). */
+fun writeFixture(s: State, outDir: File) {
+    val symbols = s.symbols
+    val nowSec = s.nowSec
     val fixture = buildJsonObject {
         put("capturedAtEpochSeconds", nowSec)
         putJsonArray("symbols") {
@@ -265,12 +321,11 @@ fun main() = runBlocking {
                         if (snap.companyName.isNullOrBlank() && name != null) snap.copy(companyName = name) else snap))
                     r.externalSignal?.let { put("external", enc.encodeToJsonElement(ExternalValuationSignal.serializer(), it)) }
                     s.engine.detail(sym)?.fundamentals?.let { put("fundamentals", enc.encodeToJsonElement(FundamentalSnapshot.serializer(), it)) }
+                    s.dcf[sym]?.let { put("dcf", enc.encodeToJsonElement(DcfAnalysis.serializer(), it)) }
                     putJsonArray("yearCandles") { s.candles[sym].orEmpty().forEach { add(enc.encodeToJsonElement(HistoricalCandle.serializer(), it)) } }
                 })
             }
         }
     }
     File(outDir, "fixture.json").writeText(fixture.toString())
-    val counts = projected.opportunityRows.groupingBy { it.decision?.toString() ?: "null" }.eachCount()
-    log("done started=$started opps=${projected.opportunityRows.size} decisions=$counts out=$outDir")
 }

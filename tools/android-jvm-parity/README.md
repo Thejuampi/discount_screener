@@ -31,3 +31,25 @@ Rust Yahoo parser's saturating cast produces live.
 Known gap: symbols with no analyst target get no snapshot from `fetchSymbol`. The app then
 builds a chart-based fallback snapshot, which this driver skips. Such symbols cannot qualify
 for Opps, so the list is unaffected.
+
+## Field-by-field diff against headless
+
+`opps.json` is the `ScreenReplay.project` Opps list (what the screen shows): order, scores,
+row and projected confidence/gap/upside, trust signal, decision. `fixture.json` also records
+the DCF state each symbol settled on (`dcf`), so the run can be replayed offline:
+
+    # Offline replay (no network): Kotlin buildRows + projection on recorded inputs
+    PARITY_REPLAY=shared/contracts/android-jvm-parity-recorded.json PARITY_OUT=/tmp/replay \
+      JAVA_HOME=... apps/android/gradlew -p tools/android-jvm-parity --no-configuration-cache run
+    # Rank the same inputs in Rust and diff every field (exit 1 on any difference)
+    python3 tools/android-jvm-parity/diff_headless.py replay \
+      shared/contracts/android-jvm-parity-recorded.json /tmp/replay/opps.json
+
+    # Live: diff against a headless daemon that fetched its own data
+    curl -s "127.0.0.1:7981/ranking?model=v3&semantics=android&top=1000" > /tmp/vh.json
+    python3 tools/android-jvm-parity/diff_headless.py live /tmp/android-jvm-parity/opps.json /tmp/vh.json
+
+CI (`android-jvm-parity` job) runs the offline replay and diff on the committed recorded set.
+Headless flags rows whose on-screen value needs an Android DCF identity value it does not
+compute (Street unusable and a live residual/FCFF DCF) with `projection_gap`; the diff
+counts those separately instead of failing.

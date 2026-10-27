@@ -606,6 +606,8 @@ mod tests {
             technical: None,
             forecast: None,
             regime: None,
+            trust_signal: None,
+            projection_gap: None,
         };
         let t = render_table(&[mk("APT21794-USD"), mk("A")]);
         let pos: Vec<usize> = t

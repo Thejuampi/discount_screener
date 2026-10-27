@@ -1,12 +1,29 @@
 {
     "contract": "opportunity-v3-headless-golden",
-    "generatedBy": "apps/android/core HeadlessV3ParityGoldenTest (Kotlin OpportunityEngine)",
+    "generatedBy": "apps/android/core HeadlessV3ParityGoldenTest (Kotlin OpportunityEngine + ScreenDataProjectionEngine)",
     "model": "AggressiveV3",
     "regimeScoringEnabled": false,
-    "inputSymbols": 58,
+    "inputSymbols": 61,
     "rows": [
         {
             "rank": 1,
+            "symbol": "FXRF",
+            "compositeScore": 52,
+            "coverageCount": 3,
+            "fundamentalsScore": 37,
+            "technicalScore": 42,
+            "forecastScore": 47,
+            "confidence": "High",
+            "gapBps": 2999,
+            "upsideBps": 4285,
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": 2999,
+            "projectedUpsideBps": 4285,
+            "trustSignal": "SourceUnknown",
+            "decision": "Watch"
+        },
+        {
+            "rank": 2,
             "symbol": "FX12",
             "compositeScore": 49,
             "coverageCount": 3,
@@ -16,10 +33,14 @@
             "confidence": "High",
             "gapBps": 2999,
             "upsideBps": 4285,
+            "projectedConfidence": "High",
+            "projectedGapBps": 2999,
+            "projectedUpsideBps": 4285,
+            "trustSignal": null,
             "decision": "Act"
         },
         {
-            "rank": 2,
+            "rank": 3,
             "symbol": "FXAA",
             "compositeScore": 49,
             "coverageCount": 3,
@@ -29,10 +50,31 @@
             "confidence": "High",
             "gapBps": 2999,
             "upsideBps": 4285,
+            "projectedConfidence": "High",
+            "projectedGapBps": 2999,
+            "projectedUpsideBps": 4285,
+            "trustSignal": null,
             "decision": "Act"
         },
         {
-            "rank": 3,
+            "rank": 4,
+            "symbol": "FXPU",
+            "compositeScore": 49,
+            "coverageCount": 3,
+            "fundamentalsScore": 29,
+            "technicalScore": 42,
+            "forecastScore": 47,
+            "confidence": "High",
+            "gapBps": 2999,
+            "upsideBps": 4285,
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": 2999,
+            "projectedUpsideBps": 4285,
+            "trustSignal": "SourceUncertain",
+            "decision": "Watch"
+        },
+        {
+            "rank": 5,
             "symbol": "FXW4",
             "compositeScore": 47,
             "coverageCount": 3,
@@ -42,10 +84,14 @@
             "confidence": "High",
             "gapBps": 2999,
             "upsideBps": 4285,
+            "projectedConfidence": "High",
+            "projectedGapBps": 4166,
+            "projectedUpsideBps": 7142,
+            "trustSignal": null,
             "decision": "Act"
         },
         {
-            "rank": 4,
+            "rank": 6,
             "symbol": "FXW1",
             "compositeScore": 44,
             "coverageCount": 3,
@@ -55,10 +101,31 @@
             "confidence": "High",
             "gapBps": 2999,
             "upsideBps": 4285,
+            "projectedConfidence": "High",
+            "projectedGapBps": 2999,
+            "projectedUpsideBps": 4285,
+            "trustSignal": null,
             "decision": "Act"
         },
         {
-            "rank": 5,
+            "rank": 7,
+            "symbol": "FXRI",
+            "compositeScore": 44,
+            "coverageCount": 3,
+            "fundamentalsScore": 37,
+            "technicalScore": 42,
+            "forecastScore": 25,
+            "confidence": "Low",
+            "gapBps": 2999,
+            "upsideBps": 4285,
+            "projectedConfidence": "Low",
+            "projectedGapBps": 4447,
+            "projectedUpsideBps": 8009,
+            "trustSignal": "SourceUnknown",
+            "decision": "Avoid"
+        },
+        {
+            "rank": 8,
             "symbol": "FX25",
             "compositeScore": 41,
             "coverageCount": 3,
@@ -68,10 +135,14 @@
             "confidence": "High",
             "gapBps": 4499,
             "upsideBps": 8181,
+            "projectedConfidence": "High",
+            "projectedGapBps": 4499,
+            "projectedUpsideBps": 8181,
+            "trustSignal": null,
             "decision": "Act"
         },
         {
-            "rank": 6,
+            "rank": 9,
             "symbol": "FXW2",
             "compositeScore": 40,
             "coverageCount": 2,
@@ -81,10 +152,14 @@
             "confidence": "Provisional",
             "gapBps": 2999,
             "upsideBps": 4285,
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": 2999,
+            "projectedUpsideBps": 4285,
+            "trustSignal": "ThinCoverage",
             "decision": "Watch"
         },
         {
-            "rank": 7,
+            "rank": 10,
             "symbol": "FXW3",
             "compositeScore": 40,
             "coverageCount": 2,
@@ -94,10 +169,14 @@
             "confidence": "Provisional",
             "gapBps": 2999,
             "upsideBps": 4285,
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": 2999,
+            "projectedUpsideBps": 4285,
+            "trustSignal": "ThinCoverage",
             "decision": "Watch"
         },
         {
-            "rank": 8,
+            "rank": 11,
             "symbol": "FXW5",
             "compositeScore": 40,
             "coverageCount": 2,
@@ -107,10 +186,14 @@
             "confidence": "Provisional",
             "gapBps": 2999,
             "upsideBps": 4285,
-            "decision": "Watch"
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         },
         {
-            "rank": 9,
+            "rank": 12,
             "symbol": "FX30",
             "compositeScore": 31,
             "coverageCount": 3,
@@ -120,10 +203,14 @@
             "confidence": "Low",
             "gapBps": 2999,
             "upsideBps": 4285,
-            "decision": "Avoid"
+            "projectedConfidence": "Low",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         },
         {
-            "rank": 10,
+            "rank": 13,
             "symbol": "FX40",
             "compositeScore": 29,
             "coverageCount": 2,
@@ -133,10 +220,14 @@
             "confidence": "High",
             "gapBps": 2999,
             "upsideBps": 4285,
+            "projectedConfidence": "High",
+            "projectedGapBps": 2999,
+            "projectedUpsideBps": 4285,
+            "trustSignal": null,
             "decision": "Watch"
         },
         {
-            "rank": 11,
+            "rank": 14,
             "symbol": "FX15",
             "compositeScore": 28,
             "coverageCount": 3,
@@ -146,10 +237,14 @@
             "confidence": "Low",
             "gapBps": 2999,
             "upsideBps": 4285,
-            "decision": "Avoid"
+            "projectedConfidence": "Low",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         },
         {
-            "rank": 12,
+            "rank": 15,
             "symbol": "FX07",
             "compositeScore": 17,
             "coverageCount": 3,
@@ -159,10 +254,14 @@
             "confidence": "High",
             "gapBps": 2199,
             "upsideBps": 2820,
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": 2199,
+            "projectedUpsideBps": 2820,
+            "trustSignal": "SourceUnknown",
             "decision": "Watch"
         },
         {
-            "rank": 13,
+            "rank": 16,
             "symbol": "FXKB",
             "compositeScore": 16,
             "coverageCount": 2,
@@ -172,10 +271,14 @@
             "confidence": "High",
             "gapBps": 2199,
             "upsideBps": 2820,
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": 2199,
+            "projectedUpsideBps": 2820,
+            "trustSignal": "SourceUnknown",
             "decision": "Watch"
         },
         {
-            "rank": 14,
+            "rank": 17,
             "symbol": "FXKA",
             "compositeScore": 16,
             "coverageCount": 2,
@@ -185,10 +288,14 @@
             "confidence": "Provisional",
             "gapBps": 2999,
             "upsideBps": 4285,
-            "decision": "Watch"
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         },
         {
-            "rank": 15,
+            "rank": 18,
             "symbol": "FX36",
             "compositeScore": 15,
             "coverageCount": 3,
@@ -198,10 +305,14 @@
             "confidence": "Low",
             "gapBps": 2199,
             "upsideBps": 2820,
-            "decision": "Avoid"
+            "projectedConfidence": "Low",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": "SourceUnknown",
+            "decision": null
         },
         {
-            "rank": 16,
+            "rank": 19,
             "symbol": "FX33",
             "compositeScore": 6,
             "coverageCount": 2,
@@ -211,10 +322,14 @@
             "confidence": "Provisional",
             "gapBps": 4499,
             "upsideBps": 8181,
-            "decision": "Watch"
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         },
         {
-            "rank": 17,
+            "rank": 20,
             "symbol": "FX44",
             "compositeScore": 4,
             "coverageCount": 3,
@@ -224,10 +339,14 @@
             "confidence": "High",
             "gapBps": 4499,
             "upsideBps": 8181,
+            "projectedConfidence": "High",
+            "projectedGapBps": 4499,
+            "projectedUpsideBps": 8181,
+            "trustSignal": null,
             "decision": "Watch"
         },
         {
-            "rank": 18,
+            "rank": 21,
             "symbol": "FX46",
             "compositeScore": 4,
             "coverageCount": 3,
@@ -237,10 +356,14 @@
             "confidence": "High",
             "gapBps": 2199,
             "upsideBps": 2820,
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": 2199,
+            "projectedUpsideBps": 2820,
+            "trustSignal": "SourceUnknown",
             "decision": "Watch"
         },
         {
-            "rank": 19,
+            "rank": 22,
             "symbol": "FXCB",
             "compositeScore": 4,
             "coverageCount": 3,
@@ -250,10 +373,14 @@
             "confidence": "Low",
             "gapBps": 4499,
             "upsideBps": 8181,
-            "decision": "Avoid"
+            "projectedConfidence": "Low",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         },
         {
-            "rank": 20,
+            "rank": 23,
             "symbol": "FXCA",
             "compositeScore": 4,
             "coverageCount": 2,
@@ -263,10 +390,14 @@
             "confidence": "High",
             "gapBps": 3000,
             "upsideBps": 4285,
+            "projectedConfidence": "High",
+            "projectedGapBps": 3000,
+            "projectedUpsideBps": 4285,
+            "trustSignal": null,
             "decision": "Watch"
         },
         {
-            "rank": 21,
+            "rank": 24,
             "symbol": "FX31",
             "compositeScore": 3,
             "coverageCount": 2,
@@ -276,10 +407,14 @@
             "confidence": "Low",
             "gapBps": 2199,
             "upsideBps": 2820,
-            "decision": "Avoid"
+            "projectedConfidence": "Low",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         },
         {
-            "rank": 22,
+            "rank": 25,
             "symbol": "FX39",
             "compositeScore": -6,
             "coverageCount": 2,
@@ -289,10 +424,14 @@
             "confidence": "Provisional",
             "gapBps": 2199,
             "upsideBps": 2820,
-            "decision": "Avoid"
+            "projectedConfidence": "Provisional",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         },
         {
-            "rank": 23,
+            "rank": 26,
             "symbol": "FX23",
             "compositeScore": -21,
             "coverageCount": 3,
@@ -302,10 +441,14 @@
             "confidence": "High",
             "gapBps": 2000,
             "upsideBps": 2500,
+            "projectedConfidence": "High",
+            "projectedGapBps": 2000,
+            "projectedUpsideBps": 2500,
+            "trustSignal": null,
             "decision": "Avoid"
         },
         {
-            "rank": 24,
+            "rank": 27,
             "symbol": "FX19",
             "compositeScore": -52,
             "coverageCount": 2,
@@ -315,7 +458,11 @@
             "confidence": "Low",
             "gapBps": 2199,
             "upsideBps": 2820,
-            "decision": "Avoid"
+            "projectedConfidence": "Low",
+            "projectedGapBps": null,
+            "projectedUpsideBps": null,
+            "trustSignal": null,
+            "decision": null
         }
     ]
 }
