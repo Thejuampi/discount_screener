@@ -14,6 +14,12 @@ Contents:
   FXCA/FXCB   equal composite, different coverage (higher coverage = FXCB, so
               dropping the coverage key reorders them)
   FXKA/FXKB   equal composite+coverage, different confidence (higher = FXKB)
+  FXPU        injected ProviderUncertain DCF
+  FXRF/FXRI   residual-income financial (live Street / stale Street -> residual identity anchor)
+  FXRB        bank residual with the through-cycle ROE lift, stale Street
+  FXIW        High + identity anchor + composite >= 30 -> Watch (trust gate)
+  FXRO        injected RestoredOnly DCF -> confidence one step down
+  FXIF/FXIP/FXIU/FXIC  identityComplete refusals (wide fan, illegal pair, unavailable, Unclassified)
 
 The tie pairs are picked from a seeded candidate pool scored by the Rust
 Android-semantics path (`cargo test ... dump_fixture_ranking -- --ignored`);
@@ -187,6 +193,29 @@ fin = dict(sectorName="Financial Services", sectorKey="financial-services", indu
 r = renamed(base, "FXRF"); r["fundamentals"].update(fin); rows.append(r)
 # Same with a stale street: no Street anchor, the residual identity value becomes the anchor.
 r = renamed(base, "FXRI"); r["fundamentals"].update(fin); r["external"]["ageSeconds"] = 31; rows.append(r)
+
+# Same residual inputs on a Banks - Diversified name with a low ROE (bank through-cycle lift).
+r = renamed(base, "FXRB"); r["fundamentals"].update(fin, industryName="Banks - Diversified",
+    industryKey="banks-diversified", returnOnEquityBps=900); r["external"]["ageSeconds"] = 31; rows.append(r)
+# Injected operating DCF, fully sourced (not source-free) -> identity anchor behind a stale Street.
+op = dict(bearIntrinsicValueCents=0, baseIntrinsicValueCents=0, bullIntrinsicValueCents=0, waccBps=900,
+          baseGrowthBps=300, netDebtDollars=0, source="YahooFinance", resolverState="Selected",
+          businessClass="OperatingNonFinancial", model="FcffWacc",
+          provenance=dict(source="YahooFinance", providerState="Live"), providerReasons=[])
+def opdcf(bear, base_, bull, **kw):
+    d = dict(op, bearIntrinsicValueCents=bear, baseIntrinsicValueCents=base_, bullIntrinsicValueCents=bull); d.update(kw); return d
+px = base["snapshot"]["marketPriceCents"]
+# High + identity anchor + composite >= 30: the trust gate (ModelValue) keeps it at Watch, never Act.
+# Street fresh (row confidence High) but out of order (low > high), so streetComplete fails.
+r = renamed(base, "FXIW"); r["external"].update(lowFairValueCents=r["external"]["highFairValueCents"] + 1); r["dcf"] = opdcf(px, px * 3 // 2, px * 2); rows.append(r)
+# RestoredOnly (recovered, not live): one confidence step down.
+r = renamed(base, "FXRO"); r["dcf"] = opdcf(px, px * 3 // 2, px * 2, resolverState="RestoredOnly"); rows.append(r)
+# identityComplete refusals behind a stale Street -> no anchor:
+# fan wider than 12000 bps; illegal class/model pair; unavailable reason; Unclassified class.
+r = renamed(base, "FXIF"); r["external"]["ageSeconds"] = 31; r["dcf"] = opdcf(px // 2, px, px * 2); rows.append(r)
+r = renamed(base, "FXIP"); r["external"]["ageSeconds"] = 31; r["dcf"] = opdcf(px, px * 3 // 2, px * 2, model="ResidualIncomeEquity"); rows.append(r)
+r = renamed(base, "FXIU"); r["external"]["ageSeconds"] = 31; r["dcf"] = opdcf(px, px * 3 // 2, px * 2, valuationUnavailableReason="stale"); rows.append(r)
+r = renamed(base, "FXIC"); r["external"]["ageSeconds"] = 31; r["dcf"] = opdcf(px, px * 3 // 2, px * 2, businessClass="Unclassified"); rows.append(r)
 
 json.dump(doc(rows),
           open("shared/contracts/opportunity-v3-headless-fixture.json", "w"), indent=1)
