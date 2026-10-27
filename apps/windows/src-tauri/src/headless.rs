@@ -90,6 +90,9 @@ impl OpportunitySnapshot {
             let externals: std::collections::HashMap<String, Ext> = s
                 .signals
                 .iter()
+                // Kotlin `ReportingEngine.ingestExternal` drops fair <= 0 signals
+                // entirely (status Missing, no forecast target).
+                .filter(|(_, x)| android_accepts_signal(x))
                 .map(|(sym, x)| {
                     (
                         sym.clone(),
@@ -491,6 +494,11 @@ pub fn android_analyst_count(x: &crate::engine::ExternalValuationSignal) -> Opti
     weighted.or(x.analyst_opinion_count)
 }
 
+/// Kotlin `ReportingEngine.ingestExternal`: `if (fairValueCents <= 0) return`.
+pub fn android_accepts_signal(x: &crate::engine::ExternalValuationSignal) -> bool {
+    x.fair_value_cents > 0
+}
+
 /// Kotlin `OpportunityEngine.preferredForecastFairValueCents` / `targetAnalystCount`.
 pub fn android_forecast_target(
     x: &crate::engine::ExternalValuationSignal,
@@ -500,12 +508,18 @@ pub fn android_forecast_target(
             Some(w),
             x.weighted_analyst_count.or(x.analyst_opinion_count),
         ),
-        None if x.fair_value_cents > 0 => (Some(x.fair_value_cents), x.analyst_opinion_count),
-        None => (None, None),
+        // Signals with fair <= 0 never reach here (see `android_accepts_signal`).
+        None => (Some(x.fair_value_cents), x.analyst_opinion_count),
     }
 }
 
 /// Android `ReportingEngine` external-signal max age (seconds).
+///
+/// Live data: signal age is always 0. Every production constructor stamps
+/// `age_seconds: 0` at fetch time (Android `YahooFinanceClient.kt`, Rust
+/// `quote_summary.rs` / `commands.rs`) and neither app ever ages a stored
+/// signal, so this Stale gate never fires live in either app. It only
+/// matters for injected signals; the shared fixture covers ages 0/5/30/31/3600.
 pub const ANDROID_SIGNAL_MAX_AGE_SECONDS: u64 = 30;
 
 /// Re-derive qualification / external status / confidence with Android's
@@ -948,6 +962,26 @@ mod tests {
         assert!(desktop.len() > 501);
         // The ranking filter uses the same list as the feed.
         assert_eq!(android_universe("sp500").unwrap(), sp);
+    }
+
+    #[test]
+    fn android_forecast_target_matches_kotlin() {
+        let mut x: crate::engine::ExternalValuationSignal = serde_json::from_value(
+            serde_json::json!({"symbol": "Z", "fair_value_cents": 0, "age_seconds": 0,
+                               "analyst_opinion_count": 4}),
+        )
+        .unwrap();
+        // Kotlin ingestExternal ignores fair <= 0; Rust must too.
+        assert!(!android_accepts_signal(&x));
+        x.fair_value_cents = -5;
+        assert!(!android_accepts_signal(&x));
+        // Weighted fair outside [low, high] is clamped and wins over the plain one.
+        x.fair_value_cents = 10_000;
+        x.weighted_fair_value_cents = Some(20_000);
+        x.weighted_analyst_count = Some(7);
+        x.low_fair_value_cents = Some(8_000);
+        x.high_fair_value_cents = Some(12_000);
+        assert_eq!(android_forecast_target(&x), (Some(12_000), Some(7)));
     }
 
     #[test]

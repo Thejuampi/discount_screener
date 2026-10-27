@@ -38,8 +38,8 @@ Profiles: `sp500`, `dow`, `russell`, `merval`, `nikkei`, `europe`, `asia`, `qa` 
 * State: `history.sqlite` + `feed.log` (same as the app) and
   `opportunity_snapshot.json` (frozen scoring input, atomic write). After a
   restart the daemon serves the persisted snapshot until the live feed fills.
-* Signal age: the Android and Rust Yahoo clients both stamp signals with age 0
-  at fetch time and never age them, so the 30 s Stale gate does not fire on live
+* **Signal age is always 0 in live data.** The Android and Rust Yahoo clients both stamp signals with age 0
+  at fetch time and never age them (nothing assigns a non-zero age outside tests), so the 30 s Stale gate does not fire on live
   data in either app; it only matters for injected/replayed signals (the fixture
   covers ages 0/5/30/31/3600).
 * HTTP, std only, default `127.0.0.1:7979`. Non-loopback `--addr` is refused
@@ -75,3 +75,9 @@ Parity is enforced by a shared contract: `shared/contracts/opportunity-v3-headle
 (`HeadlessV3ParityGoldenTest`, `HEADLESS_GOLDEN_WRITE=1` regenerates
 `opportunity-v3-headless-golden.json`) and by Rust (`headless::android_parity_tests`),
 which feeds the fixture through the real `ScreenerState` ingest and compares every row.
+
+## Packaging
+
+`profiles.rs` compiles in Android's `apps/android/app/src/main/assets/profiles/*.txt`
+with `include_str!` paths outside the crate, so the crate only builds inside this
+monorepo; it is marked `publish = false` and `cargo package` is not supported.

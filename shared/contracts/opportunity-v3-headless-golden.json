@@ -3,7 +3,7 @@
     "generatedBy": "apps/android/core HeadlessV3ParityGoldenTest (Kotlin OpportunityEngine)",
     "model": "AggressiveV3",
     "regimeScoringEnabled": false,
-    "inputSymbols": 56,
+    "inputSymbols": 58,
     "rows": [
         {
             "rank": 1,
@@ -33,6 +33,19 @@
         },
         {
             "rank": 3,
+            "symbol": "FXW4",
+            "compositeScore": 47,
+            "coverageCount": 3,
+            "fundamentalsScore": 29,
+            "technicalScore": 42,
+            "forecastScore": 42,
+            "confidence": "High",
+            "gapBps": 2999,
+            "upsideBps": 4285,
+            "decision": "Act"
+        },
+        {
+            "rank": 4,
             "symbol": "FXW1",
             "compositeScore": 44,
             "coverageCount": 3,
@@ -45,7 +58,7 @@
             "decision": "Act"
         },
         {
-            "rank": 4,
+            "rank": 5,
             "symbol": "FX25",
             "compositeScore": 41,
             "coverageCount": 3,
@@ -58,7 +71,7 @@
             "decision": "Act"
         },
         {
-            "rank": 5,
+            "rank": 6,
             "symbol": "FXW2",
             "compositeScore": 40,
             "coverageCount": 2,
@@ -71,7 +84,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 6,
+            "rank": 7,
             "symbol": "FXW3",
             "compositeScore": 40,
             "coverageCount": 2,
@@ -84,7 +97,20 @@
             "decision": "Watch"
         },
         {
-            "rank": 7,
+            "rank": 8,
+            "symbol": "FXW5",
+            "compositeScore": 40,
+            "coverageCount": 2,
+            "fundamentalsScore": 29,
+            "technicalScore": 42,
+            "forecastScore": null,
+            "confidence": "Provisional",
+            "gapBps": 2999,
+            "upsideBps": 4285,
+            "decision": "Watch"
+        },
+        {
+            "rank": 9,
             "symbol": "FX30",
             "compositeScore": 31,
             "coverageCount": 3,
@@ -97,7 +123,7 @@
             "decision": "Avoid"
         },
         {
-            "rank": 8,
+            "rank": 10,
             "symbol": "FX40",
             "compositeScore": 29,
             "coverageCount": 2,
@@ -110,7 +136,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 9,
+            "rank": 11,
             "symbol": "FX15",
             "compositeScore": 28,
             "coverageCount": 3,
@@ -123,7 +149,7 @@
             "decision": "Avoid"
         },
         {
-            "rank": 10,
+            "rank": 12,
             "symbol": "FX07",
             "compositeScore": 17,
             "coverageCount": 3,
@@ -136,7 +162,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 11,
+            "rank": 13,
             "symbol": "FXKB",
             "compositeScore": 16,
             "coverageCount": 2,
@@ -149,7 +175,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 12,
+            "rank": 14,
             "symbol": "FXKA",
             "compositeScore": 16,
             "coverageCount": 2,
@@ -162,7 +188,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 13,
+            "rank": 15,
             "symbol": "FX36",
             "compositeScore": 15,
             "coverageCount": 3,
@@ -175,7 +201,7 @@
             "decision": "Avoid"
         },
         {
-            "rank": 14,
+            "rank": 16,
             "symbol": "FX33",
             "compositeScore": 6,
             "coverageCount": 2,
@@ -188,7 +214,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 15,
+            "rank": 17,
             "symbol": "FX44",
             "compositeScore": 4,
             "coverageCount": 3,
@@ -201,7 +227,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 16,
+            "rank": 18,
             "symbol": "FX46",
             "compositeScore": 4,
             "coverageCount": 3,
@@ -214,7 +240,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 17,
+            "rank": 19,
             "symbol": "FXCB",
             "compositeScore": 4,
             "coverageCount": 3,
@@ -227,7 +253,7 @@
             "decision": "Avoid"
         },
         {
-            "rank": 18,
+            "rank": 20,
             "symbol": "FXCA",
             "compositeScore": 4,
             "coverageCount": 2,
@@ -240,7 +266,7 @@
             "decision": "Watch"
         },
         {
-            "rank": 19,
+            "rank": 21,
             "symbol": "FX31",
             "compositeScore": 3,
             "coverageCount": 2,
@@ -253,7 +279,7 @@
             "decision": "Avoid"
         },
         {
-            "rank": 20,
+            "rank": 22,
             "symbol": "FX39",
             "compositeScore": -6,
             "coverageCount": 2,
@@ -266,7 +292,7 @@
             "decision": "Avoid"
         },
         {
-            "rank": 21,
+            "rank": 23,
             "symbol": "FX23",
             "compositeScore": -21,
             "coverageCount": 3,
@@ -279,7 +305,7 @@
             "decision": "Avoid"
         },
         {
-            "rank": 22,
+            "rank": 24,
             "symbol": "FX19",
             "compositeScore": -52,
             "coverageCount": 2,

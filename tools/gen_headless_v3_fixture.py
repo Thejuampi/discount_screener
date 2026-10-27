@@ -9,6 +9,8 @@ Contents:
   FX00..FX47  random rows (gap, profitability, signal age 0..3600 s, missing data)
   FXAA        exact twin of FX12          -> full tie, decided by symbol
   FXW1..FXW3  weightedAnalystCount ?: analystOpinionCount confidence fallback
+  FXW4        weighted fair != plain fair and outside [low, high] -> clamped
+  FXW5        plain external fair value 0 (Kotlin still treats it as a target)
   FXCA/FXCB   equal composite, different coverage (higher coverage = FXCB, so
               dropping the coverage key reorders them)
   FXKA/FXKB   equal composite+coverage, different confidence (higher = FXKB)
@@ -16,7 +18,9 @@ Contents:
 The tie pairs are picked from a seeded candidate pool scored by the Rust
 Android-semantics path (`cargo test ... dump_fixture_ranking -- --ignored`);
 picking only chooses inputs, Kotlin still produces every expected value.
-Run from the repo root: python3 tools/gen_headless_v3_fixture.py
+Requirements: run from the repository root (relative paths) with `cargo` on
+PATH (it builds and runs the Rust test crate to score the pool):
+    python3 tools/gen_headless_v3_fixture.py
 """
 import json, os, random, subprocess, tempfile
 
@@ -115,6 +119,13 @@ for sym, opinions, weighted, wfair in (("FXW1", 2, 5, True), ("FXW2", 5, 2, True
     if wfair:
         r["external"].update(w_ok)
     rows.append(r)
+r = renamed(base, "FXW4")  # weighted fair 1.5x plain, clamped to high = 1.2x
+r["external"].update(analystOpinionCount=6, weightedAnalystCount=6, weightedFairValueCents=int(fair * 1.5),
+                     lowFairValueCents=int(fair * 0.9), highFairValueCents=int(fair * 1.2))
+rows.append(r)
+r = renamed(base, "FXW5")  # plain fair 0, no weighted
+r["external"].update(fairValueCents=0, analystOpinionCount=6)
+rows.append(r)
 
 def doc(rows):
     return dict(contract="opportunity-v3-headless-fixture", version=2,
