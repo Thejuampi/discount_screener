@@ -1,6 +1,7 @@
 //! `vantage-headless` — V3 pricing-engine daemon + thin CLI client.
 //!
-//!   vantage-headless serve  [--profile sp500] [--addr 127.0.0.1:7979] [--allow-remote]
+//!   vantage-headless serve  [--profile sp500] [--semantics android|tauri]
+//!                           [--addr 127.0.0.1:7979] [--allow-remote]
 //!                           [--data-dir DIR] [--market-context]
 //!   vantage-headless rank   [--model v3|v2|short] [--semantics android|tauri]
 //!                           [--top N] [--json] [--addr ..]
@@ -16,18 +17,18 @@
 //! Market context ("Contexto de mercado") is OFF by default.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use discount_screener_windows_lib::headless::ScoringModel;
 use discount_screener_windows_lib::headless::{
     android_to_ranked, parse_model, rank_snapshot, to_ranked, EngineConfig, HeadlessEngine,
     OpportunitySnapshot, RankedRow, Semantics,
 };
-use discount_screener_windows_lib::headless::ScoringModel;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7979";
 const MAX_CONNECTIONS: usize = 16;
@@ -78,7 +79,8 @@ fn parse_opts(args: &[String]) -> Opts {
 fn usage() -> &'static str {
     "usage: vantage-headless <serve|rank|status|parity|persist|rank-snapshot> [options]\n\
      common: --addr HOST:PORT   (default 127.0.0.1:7979)\n\
-     serve:  --profile sp500|dow|merval|... --data-dir DIR [--market-context] [--allow-remote]\n\
+     serve:  --profile sp500|dow|merval|... --semantics android|tauri (feed universe; default android)\n\
+     \x20       --data-dir DIR [--market-context] [--allow-remote]\n\
      \x20       (non-loopback --addr is refused unless --allow-remote)\n\
      rank:   --model v3|v2|short --semantics android|tauri (default android) --top N [--json]\n\
      \x20       android = Long V3 as the Android app ranks it (qualified rows, Act/Watch/Avoid)\n\
@@ -158,7 +160,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let model = parse_model(&model)?;
             let rows = match (Semantics::parse(&semantics)?, model) {
                 (Semantics::Android, ScoringModel::AggressiveV3) => {
-                    let u = discount_screener_windows_lib::headless::android_universe(&snap.profile);
+                    let u =
+                        discount_screener_windows_lib::headless::android_universe(&snap.profile);
                     android_to_ranked(&discount_screener_windows_lib::headless::rank_android_v3(
                         &snap,
                         u.as_deref(),
@@ -208,7 +211,16 @@ fn render_table(rows: &[RankedRow]) -> String {
         })
         .collect();
     let head = [
-        "#", "SYMBOL", "SCORE", "SETUP", "CONF", "PRICE", "TARGET", "GAP%", "F·T·C·R", "SECTOR",
+        "#",
+        "SYMBOL",
+        "SCORE",
+        "SETUP",
+        "CONF",
+        "PRICE",
+        "TARGET",
+        "GAP%",
+        "F·T·C·R",
+        "SECTOR",
     ];
     // Column widths from the data (chars, not bytes: "—" and "·" are multibyte).
     let mut w: Vec<usize> = head.iter().map(|h| h.chars().count()).collect();
@@ -217,7 +229,9 @@ fn render_table(rows: &[RankedRow]) -> String {
             w[i] = w[i].max(c.chars().count());
         }
     }
-    let left = [false, true, false, true, true, false, false, false, false, true];
+    let left = [
+        false, true, false, true, true, false, false, false, false, true,
+    ];
     let line = |vals: Vec<&str>| {
         let mut out = String::new();
         for (i, v) in vals.iter().enumerate() {
@@ -251,7 +265,11 @@ fn http_req(addr: &str, method: &str, path: &str) -> Result<String, String> {
     let mut s = TcpStream::connect(addr)
         .map_err(|e| format!("connect {addr}: {e} (is `vantage-headless serve` running?)"))?;
     s.set_read_timeout(Some(Duration::from_secs(120))).ok();
-    write!(s, "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n").map_err(|e| e.to_string())?;
+    write!(
+        s,
+        "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n"
+    )
+    .map_err(|e| e.to_string())?;
     let mut buf = String::new();
     s.read_to_string(&mut buf).map_err(|e| e.to_string())?;
     let (head, body) = buf.split_once("\r\n\r\n").ok_or("malformed response")?;
@@ -273,17 +291,28 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
         .map(PathBuf::from)
         .unwrap_or_else(default_data_dir);
     let market_context = o.flags.contains_key("market-context");
-    check_bind_addr(addr, o.flags.contains_key("allow-remote"))?;
+    let allow_remote = o.flags.contains_key("allow-remote");
+    check_bind_addr(addr, allow_remote)?;
+    // Feed universe: android (default) loads exactly Android's profile list;
+    // tauri loads the desktop composition (+ ETFs + crypto).
+    let android_feed = Semantics::parse(
+        o.flags
+            .get("semantics")
+            .map(String::as_str)
+            .unwrap_or("android"),
+    )? == Semantics::Android;
     let engine = HeadlessEngine::start(EngineConfig {
         data_dir: data_dir.clone(),
         profile,
         market_context,
-        fetch_year_charts: true,
+        fetch_year_charts: android_feed,
+        android_universe: android_feed,
     })?;
     let listener = TcpListener::bind(addr).map_err(|e| format!("bind {addr}: {e}"))?;
     eprintln!(
-        "vantage-headless: profile={} context={} data={} listening on http://{addr}",
+        "vantage-headless: profile={} semantics={} context={} data={} listening on http://{addr}",
         engine.profile(),
+        if android_feed { "android" } else { "tauri" },
         if market_context { "on" } else { "off" },
         data_dir.display()
     );
@@ -302,13 +331,17 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
         let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
         if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
             active.fetch_sub(1, Ordering::SeqCst);
-            let _ = respond(&mut stream, "503 Service Unavailable", "too many connections");
+            let _ = respond(
+                &mut stream,
+                "503 Service Unavailable",
+                "too many connections",
+            );
             continue;
         }
         let engine = Arc::clone(&engine);
         let active = Arc::clone(&active);
         std::thread::spawn(move || {
-            handle(stream, &engine);
+            handle(stream, &engine, allow_remote);
             active.fetch_sub(1, Ordering::SeqCst);
         });
     }
@@ -349,16 +382,94 @@ fn default_data_dir() -> PathBuf {
         .join("vantage-headless")
 }
 
-fn handle(mut stream: TcpStream, engine: &HeadlessEngine) {
-    let mut line = String::new();
-    if BufReader::new(&stream).read_line(&mut line).is_err() {
-        let _ = respond(&mut stream, "408 Request Timeout", "timeout");
-        return;
+/// Request head as read from the socket.
+struct Head {
+    method: String,
+    target: String,
+    host: Option<String>,
+}
+
+/// Read the request line and headers under ONE deadline for the whole head
+/// (a slow client trickling bytes cannot hold a slot past `READ_TIMEOUT`).
+fn read_head(mut stream: &TcpStream) -> Result<Head, &'static str> {
+    let deadline = std::time::Instant::now() + READ_TIMEOUT;
+    let mut buf = Vec::with_capacity(512);
+    let mut chunk = [0u8; 512];
+    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && !buf.windows(2).any(|w| w == b"\n\n") {
+        let left = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or("timeout")?;
+        stream.set_read_timeout(Some(left)).map_err(|_| "io")?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => return Err("timeout"),
+        }
+        if buf.len() > 16 * 1024 {
+            return Err("request head too large");
+        }
     }
-    let mut parts = line.split_whitespace();
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines();
+    let first = lines
+        .next()
+        .filter(|l| !l.is_empty())
+        .ok_or("empty request")?;
+    let mut parts = first.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
-    let (status, body) = route(engine, &method, &target);
+    let host = lines.take_while(|l| !l.is_empty()).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("host")
+            .then(|| v.trim().to_string())
+    });
+    Ok(Head {
+        method,
+        target,
+        host,
+    })
+}
+
+/// DNS-rebinding guard: on a loopback daemon only loopback Host names are accepted.
+fn host_allowed(host: Option<&str>, allow_remote: bool) -> bool {
+    if allow_remote {
+        return true;
+    }
+    let Some(h) = host else { return false };
+    let name = if let Some(rest) = h.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        h.rsplit_once(':').map(|(n, _)| n).unwrap_or(h)
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
+}
+
+fn handle(mut stream: TcpStream, engine: &HeadlessEngine, allow_remote: bool) {
+    let head = match read_head(&stream) {
+        Ok(h) => h,
+        Err("timeout") => {
+            let _ = respond(&mut stream, "408 Request Timeout", "timeout");
+            return;
+        }
+        Err(e) => {
+            let _ = respond(&mut stream, "400 Bad Request", e);
+            return;
+        }
+    };
+    if !host_allowed(head.host.as_deref(), allow_remote) {
+        let _ = respond(
+            &mut stream,
+            "421 Misdirected Request",
+            "Host must be a loopback name",
+        );
+        return;
+    }
+    let (status, body) = route(engine, &head.method, &head.target);
     let _ = respond(&mut stream, status, &body);
 }
 
@@ -370,7 +481,10 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         .collect();
     let expected = if path == "/persist" { "POST" } else { "GET" };
     if method != expected {
-        return ("405 Method Not Allowed", format!("{path} requires {expected}"));
+        return (
+            "405 Method Not Allowed",
+            format!("{path} requires {expected}"),
+        );
     }
     let result: Result<serde_json::Value, String> = (|| match path {
         "/status" => Ok(serde_json::to_value(engine.status()).unwrap()),
@@ -379,7 +493,9 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
             let model = parse_model(q.get("model").copied().unwrap_or("v3"))?;
             let semantics = Semantics::parse(q.get("semantics").copied().unwrap_or("android"))?;
             let top: usize = match q.get("top") {
-                Some(t) => t.parse().map_err(|_| format!("bad top '{t}' (expected a positive integer)"))?,
+                Some(t) => t
+                    .parse()
+                    .map_err(|_| format!("bad top '{t}' (expected a positive integer)"))?,
                 None => usize::MAX,
             };
             let (all, source, used) = match (semantics, model) {
@@ -430,6 +546,39 @@ mod tests {
     }
 
     #[test]
+    fn host_header_must_be_loopback() {
+        assert!(host_allowed(Some("127.0.0.1:7979"), false));
+        assert!(host_allowed(Some("localhost"), false));
+        assert!(host_allowed(Some("[::1]:7979"), false));
+        assert!(!host_allowed(Some("evil.example:7979"), false));
+        assert!(!host_allowed(None, false));
+        assert!(host_allowed(Some("evil.example"), true));
+    }
+
+    #[test]
+    fn whole_head_shares_one_deadline() {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            // Trickle a header byte well inside each per-read timeout, never finishing.
+            for _ in 0..40 {
+                if c.write_all(b"X").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let (s, _) = l.accept().unwrap();
+        let start = std::time::Instant::now();
+        assert!(read_head(&s).is_err());
+        assert!(start.elapsed() < READ_TIMEOUT + Duration::from_secs(2));
+        drop(s);
+        t.join().unwrap();
+    }
+
+    #[test]
     fn help_is_local() {
         // No daemon is listening; these must not try to connect.
         assert!(run(vec!["rank".into(), "--help".into()]).is_ok());
@@ -464,7 +613,9 @@ mod tests {
             .map(|l| l.chars().collect::<Vec<_>>())
             .map(|c| {
                 let s: String = c.iter().collect();
-                s.find("+5").map(|b| s[..b].chars().count()).unwrap_or(usize::MAX)
+                s.find("+5")
+                    .map(|b| s[..b].chars().count())
+                    .unwrap_or(usize::MAX)
             })
             .skip(1)
             .collect();

@@ -90,6 +90,57 @@ pub fn resolve_profile_name(raw_profile: &str) -> Option<&'static str> {
     }
 }
 
+/// Android's profile lists, compiled in from the Android app assets so the
+/// headless Android-semantics feed loads exactly what
+/// `ProfileCatalog.loadProfile` loads (trimmed, non-blank lines, in file order).
+const ANDROID_PROFILE_ASSETS: &[(&str, &str)] = &[
+    (
+        "sp500",
+        include_str!("../../../android/app/src/main/assets/profiles/sp500.txt"),
+    ),
+    (
+        "dow",
+        include_str!("../../../android/app/src/main/assets/profiles/dow.txt"),
+    ),
+    (
+        "russell",
+        include_str!("../../../android/app/src/main/assets/profiles/russell.txt"),
+    ),
+    (
+        "merval",
+        include_str!("../../../android/app/src/main/assets/profiles/merval.txt"),
+    ),
+    (
+        "nikkei",
+        include_str!("../../../android/app/src/main/assets/profiles/nikkei.txt"),
+    ),
+    (
+        "europe",
+        include_str!("../../../android/app/src/main/assets/profiles/europe.txt"),
+    ),
+    (
+        "asia",
+        include_str!("../../../android/app/src/main/assets/profiles/asia.txt"),
+    ),
+];
+
+/// Android `ProfileCatalog.loadProfile(name)` (+ the repository's `.distinct()`).
+/// `None` for profiles Android has no static asset for (e.g. `qa`).
+pub fn android_profile_symbols(raw_profile: &str) -> Option<Vec<String>> {
+    let canonical = resolve_profile_name(raw_profile)?;
+    let (_, text) = ANDROID_PROFILE_ASSETS
+        .iter()
+        .find(|(n, _)| *n == canonical)?;
+    let mut seen = std::collections::HashSet::new();
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && seen.insert(l.to_string()))
+            .map(String::from)
+            .collect(),
+    )
+}
+
 pub fn profile_symbols(raw_profile: &str) -> Option<Vec<String>> {
     let canonical = resolve_profile_name(raw_profile)?;
     let symbols = match canonical {

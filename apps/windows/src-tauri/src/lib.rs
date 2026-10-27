@@ -1,6 +1,7 @@
 mod analyst_forecasts;
 pub mod analyst_method_import;
 pub mod analyst_method_service;
+pub mod android_chart;
 mod chart_patterns;
 mod commands;
 mod congress;
@@ -24,7 +25,6 @@ mod fibonacci;
 pub mod forward_earnings_multiple;
 #[cfg(test)]
 mod forward_earnings_multiple_contract;
-pub mod android_chart;
 pub mod headless;
 mod index_estimates;
 pub mod issuer_identity;

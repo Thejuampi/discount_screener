@@ -1745,7 +1745,42 @@ fn with_current_profile_generation<T>(
     })
 }
 
+/// Headless-only (Android semantics): same feed as [`apply_universe_profile`],
+/// but the membership is exactly what Android's `ProfileCatalog.loadProfile`
+/// loads (`sp500` = the 501 S&P equities, no ETFs or crypto). The Tauri GUI
+/// never calls this; its default (`compose_universe`) is unchanged.
+pub(crate) fn apply_universe_profile_android(
+    raw_name: &str,
+    state: &AppState,
+) -> Result<(), String> {
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        apply_universe_profile_serial_with(raw_name, state, resolve_android_membership)
+    })
+}
+
+/// Android feed membership: the profile list itself (no ETF/crypto composition).
+pub(crate) fn resolve_android_membership(
+    requested: &str,
+    db: &crate::db::Db,
+) -> Result<crate::profiles::ResolvedProfile, String> {
+    let mut resolved = resolve_profile_membership(requested, db)?;
+    if resolved.name != "qa" {
+        if let Some(base) = crate::profiles::android_profile_symbols(&resolved.name) {
+            resolved.symbols = base;
+        }
+    }
+    Ok(resolved)
+}
+
 fn apply_universe_profile_serial(raw_name: &str, state: &AppState) -> Result<(), String> {
+    apply_universe_profile_serial_with(raw_name, state, resolve_profile_membership)
+}
+
+fn apply_universe_profile_serial_with(
+    raw_name: &str,
+    state: &AppState,
+    resolve: impl FnOnce(&str, &crate::db::Db) -> Result<crate::profiles::ResolvedProfile, String>,
+) -> Result<(), String> {
     let requested = resolve_profile_name(raw_name)
         .ok_or_else(|| format!("unknown universe profile: {raw_name}"))?
         .to_string();
@@ -1760,7 +1795,7 @@ fn apply_universe_profile_serial(raw_name: &str, state: &AppState) -> Result<(),
         }
     }
 
-    let resolved = resolve_profile_membership(&requested, &state.db)?;
+    let resolved = resolve(&requested, &state.db)?;
     if resolved.name == "qa" && resolved.symbols.len() > QA_MAX_SYMBOLS {
         return Err(format!(
             "qa membership exceeded hard cap: {} > {QA_MAX_SYMBOLS}",

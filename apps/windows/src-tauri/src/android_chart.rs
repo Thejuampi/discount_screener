@@ -166,8 +166,14 @@ pub fn build_summary(candles: &[HistoricalCandle]) -> AndroidChartSummary {
             .zip(&wilder)
             .map(|(w, c)| (w * 0.65 + c * 0.35).clamp(0.0, 100.0))
             .collect();
-        let smoothed: Vec<f64> = ema(&sig, 5).into_iter().map(|x| x.clamp(0.0, 100.0)).collect();
-        (wilder.last().copied(), derivative(&smoothed).last().copied())
+        let smoothed: Vec<f64> = ema(&sig, 5)
+            .into_iter()
+            .map(|x| x.clamp(0.0, 100.0))
+            .collect();
+        (
+            wilder.last().copied(),
+            derivative(&smoothed).last().copied(),
+        )
     };
     AndroidChartSummary {
         candle_count: candles.len(),
@@ -196,18 +202,31 @@ pub fn score_technicals_v3(summary: Option<&AndroidChartSummary>) -> Option<i32>
     };
     let b = V3_TECH_TREND_DELTA_BOUND;
     if let Some(e20) = s.ema20_cents.filter(|e| *e > 0) {
-        add(V3_TECH_TREND_PRICE_20_WEIGHT, smooth_ramp((close - e20) as f64 / e20 as f64, -b, b));
+        add(
+            V3_TECH_TREND_PRICE_20_WEIGHT,
+            smooth_ramp((close - e20) as f64 / e20 as f64, -b, b),
+        );
     }
     if let (Some(e20), Some(e50)) = (s.ema20_cents, s.ema50_cents.filter(|e| *e > 0)) {
-        add(V3_TECH_TREND_20_50_WEIGHT, smooth_ramp((e20 - e50) as f64 / e50 as f64, -b, b));
+        add(
+            V3_TECH_TREND_20_50_WEIGHT,
+            smooth_ramp((e20 - e50) as f64 / e50 as f64, -b, b),
+        );
     }
     if let (Some(e50), Some(e200)) = (s.ema50_cents, s.ema200_cents.filter(|e| *e > 0)) {
-        add(V3_TECH_TREND_50_200_WEIGHT, smooth_ramp((e50 - e200) as f64 / e200 as f64, -b, b));
+        add(
+            V3_TECH_TREND_50_200_WEIGHT,
+            smooth_ramp((e50 - e200) as f64 / e200 as f64, -b, b),
+        );
     }
     if let Some(h) = s.histogram_cents.filter(|_| close > 0) {
         add(
             V3_TECH_HISTOGRAM_WEIGHT,
-            smooth_ramp(h as f64 / close as f64, -V3_TECH_HISTOGRAM_BOUND, V3_TECH_HISTOGRAM_BOUND),
+            smooth_ramp(
+                h as f64 / close as f64,
+                -V3_TECH_HISTOGRAM_BOUND,
+                V3_TECH_HISTOGRAM_BOUND,
+            ),
         );
     }
     if let (Some(m), Some(sg)) = (s.macd_cents, s.signal_cents) {
@@ -219,16 +238,25 @@ pub fn score_technicals_v3(summary: Option<&AndroidChartSummary>) -> Option<i32>
             .latest_rsi_slope
             .map(|x| smooth_ramp(x, -V3_TECH_RSI_SLOPE_BOUND, V3_TECH_RSI_SLOPE_BOUND))
             .unwrap_or(0.0);
-        add(V3_TECH_RSI_WEIGHT, (0.65 * level + 0.35 * slope).clamp(-1.0, 1.0));
+        add(
+            V3_TECH_RSI_WEIGHT,
+            (0.65 * level + 0.35 * slope).clamp(-1.0, 1.0),
+        );
     }
     if let Some(v) = s.volume_ratio_hundredths {
         add(
             V3_TECH_VOLUME_WEIGHT,
-            smooth_ramp(v as f64, V3_TECH_VOLUME_RATIO_LOW, V3_TECH_VOLUME_RATIO_HIGH),
+            smooth_ramp(
+                v as f64,
+                V3_TECH_VOLUME_RATIO_LOW,
+                V3_TECH_VOLUME_RATIO_HIGH,
+            ),
         );
     }
     if ev == 0.0 {
         return None;
     }
-    Some(kotlin_round(((sum / V3_TECHNICALS_FULL_WEIGHT) * 100.0).clamp(-100.0, 100.0)))
+    Some(kotlin_round(
+        ((sum / V3_TECHNICALS_FULL_WEIGHT) * 100.0).clamp(-100.0, 100.0),
+    ))
 }

@@ -122,13 +122,23 @@ class HeadlessV3ParityGoldenTest {
         decision = decisionFor(this),
     )
 
-    /** Verbatim gates of `apps/android/app/.../OpportunityDecision.kt` (no trust note in core). */
-    private fun decisionFor(row: OpportunityRow): String = when {
-        row.confidence == ConfidenceBand.Low -> "Avoid"
-        row.upsideBps <= 0 -> "Avoid"
-        row.compositeScore < 0 -> "Avoid"
-        row.confidence == ConfidenceBand.High && row.compositeScore >= 30 -> "Act"
-        else -> "Watch"
+    /**
+     * Gate order of `apps/android/app/.../OpportunityDecision.kt::explainOpportunityDecision`.
+     * That file lives in the Android app module (needs the Android SDK), which `:core` tests cannot
+     * depend on, so the order is restated here; the score cuts come from the same core source the
+     * app uses (`OpportunityEngine.avoidBelowScore` / `actAtOrAboveScore`). Core rows always name an
+     * upside and carry no trust note, so those two gates cannot fire here.
+     */
+    private fun decisionFor(row: OpportunityRow): String {
+        val model = OpportunityScoringModel.AggressiveV3
+        return when {
+            row.confidence == ConfidenceBand.Low -> "Avoid"
+            row.upsideBps <= 0 -> "Avoid"
+            row.compositeScore < OpportunityEngine.avoidBelowScore(model) -> "Avoid"
+            row.confidence == ConfidenceBand.High &&
+                row.compositeScore >= OpportunityEngine.actAtOrAboveScore(model) -> "Act"
+            else -> "Watch"
+        }
     }
 
     private fun find(name: String): Path {

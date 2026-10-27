@@ -38,10 +38,16 @@ Profiles: `sp500`, `dow`, `russell`, `merval`, `nikkei`, `europe`, `asia`, `qa` 
 * State: `history.sqlite` + `feed.log` (same as the app) and
   `opportunity_snapshot.json` (frozen scoring input, atomic write). After a
   restart the daemon serves the persisted snapshot until the live feed fills.
+* Signal age: the Android and Rust Yahoo clients both stamp signals with age 0
+  at fetch time and never age them, so the 30 s Stale gate does not fire on live
+  data in either app; it only matters for injected/replayed signals (the fixture
+  covers ages 0/5/30/31/3600).
 * HTTP, std only, default `127.0.0.1:7979`. Non-loopback `--addr` is refused
   unless `--allow-remote` (there is no auth). `GET /status`,
   `GET /ranking?model=&semantics=&top=` (bad `top` → 400), `GET /parity?model=`,
-  `POST /persist` (GET → 405). 5 s read/write timeout, max 16 concurrent
+  `POST /persist` (GET → 405). Without `--allow-remote` the Host header must be a
+  loopback name (DNS-rebinding guard, else 421). One 5 s deadline for the whole
+  request head (408), 5 s write timeout, max 16 concurrent
   connections (503 beyond).
 
 ## Android semantics (default for Long V3)
@@ -53,10 +59,11 @@ always use desktop semantics (the response says `"semantics":"tauri"`).
 
 | Aspect | Android (headless default) | Desktop / Tauri |
 |---|---|---|
-| Universe | S&P 500 equities only (501, `DEFAULT_LIVE_SYMBOLS`) | + ETFs and crypto (572) |
+| Universe (feed) | exactly Android's `assets/profiles/<p>.txt` (sp500 = 501, incl. `BRK-B`), compiled in; `serve --semantics android` (default) loads only these | + ETFs and crypto (572); `serve --semantics tauri` |
 | Rows ranked | qualified only: profitable && gap ≥ 2000 bps | all rows |
 | External signal | Stale > 30 s; Supportive iff gap(price, fair) ≥ 2000 | desktop thresholds |
-| Confidence | not qualified/Stale/Divergent → Low; Supportive & ≥3 analysts → High; else Provisional | desktop |
+| Confidence | not qualified/Stale/Divergent → Low; Supportive & ≥3 analysts (`weightedAnalystCount ?: analystOpinionCount`) → High; else Provisional | desktop |
+| Forecast target | clamped weighted fair ?: external fair, weighted count ?: opinions | snapshot intrinsic, opinions |
 | Decision | Low→Avoid; no upside→Watch; upside ≤0 or score <0→Avoid; trust note→Watch; High & ≥30→Act; else Watch | setup labels |
 | Technicals | `ChartAnalysis.buildSummary` port on the 1y/1wk chart (`src/android_chart.rs`) | desktop chart summary |
 | Fundamentals | `aggressiveV3FundamentalsScore` port (class exemptions, FCF/OCF yield vote, conv. silencing, coverage flag) | `score_fundamentals_v3` |

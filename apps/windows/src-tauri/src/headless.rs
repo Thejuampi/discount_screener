@@ -1,17 +1,19 @@
 //! Headless V3 pricing engine (no Tauri UI, no gtk/webkit).
 //!
-//! Nothing here re-implements scoring. The daemon drives the *same* code the
-//! desktop app runs:
-//! - feed: `commands::apply_universe_profile` (Yahoo refresh/enrich/EDGAR workers),
-//! - scoring: `commands::capture_opportunity_projection` +
-//!   `commands::project_opportunity_rows` (the body of the `get_opportunities`
-//!   Tauri command),
-//! - ordering: the Opportunities list default sort (composite desc, nulls last,
-//!   stable), mirrored from `OpportunityList.tsx::sortRows`.
+//! Two semantics, chosen per request (`--semantics`):
+//! - **android** (default for Long V3): ranks exactly like `apps/android/core`
+//!   (`rank_android_v3`): Android's profile universe (`profiles::android_profile_symbols`,
+//!   loaded by `commands::apply_universe_profile_android`), qualification at
+//!   gap ≥ 2000 bps, Android signal status / confidence (weighted analyst count
+//!   fallback), the Kotlin fundamentals / `ChartAnalysis` technicals / forecast
+//!   target, half-up composite rounding, Act/Watch/Avoid and Android tie-breaks.
+//!   Parity is pinned by the Kotlin-generated golden in `shared/contracts`.
+//! - **tauri**: the desktop `get_opportunities` body
+//!   (`capture_opportunity_projection` + `project_opportunity_rows`) and the
+//!   Opportunities list sort (composite desc, stable). Unchanged GUI behaviour.
 //!
-//! The frozen scoring input (`OpportunityProjection`) is persisted as a JSON
-//! snapshot so the daemon restarts warm and so rankings can be replayed
-//! deterministically (`rank_snapshot`).
+//! The frozen scoring input is persisted as a JSON snapshot so the daemon
+//! restarts warm and rankings can be replayed offline (`rank-snapshot`).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -20,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{
-    apply_universe_profile, capture_opportunity_projection,
-    project_opportunity_rows, OpportunityProjection, OpportunityProjectionInput, OpportunityRow,
+    apply_universe_profile, capture_opportunity_projection, project_opportunity_rows,
+    OpportunityProjection, OpportunityProjectionInput, OpportunityRow,
 };
 use crate::engine::ScreenerState;
 pub use crate::opportunity_v3::ScoringModel;
@@ -49,6 +51,14 @@ pub struct SnapshotRow {
     /// External (Street) signal as ingested: (fair value cents, age seconds).
     #[serde(default)]
     external: Option<(i64, u64)>,
+    /// Android confidence analyst count from the sanitized external signal:
+    /// `weightedAnalystCount ?: analystOpinionCount` (ReportingEngine.kt), where
+    /// the weighted count is dropped when the clamped weighted fair value is null.
+    #[serde(default)]
+    external_analysts: Option<u32>,
+    /// Kotlin forecast target: (`preferredForecastFairValueCents`, `targetAnalystCount`).
+    #[serde(default)]
+    android_target: Option<(Option<i64>, Option<u32>)>,
 }
 
 /// Serializable copy of the exact input the V3 projection consumes.
@@ -76,10 +86,20 @@ impl OpportunitySnapshot {
                 .iter()
                 .map(|(sym, f)| (sym.clone(), android_class(sym, f)))
                 .collect();
-            let externals: std::collections::HashMap<String, (i64, u64)> = s
+            type Ext = ((i64, u64), Option<u32>, (Option<i64>, Option<u32>));
+            let externals: std::collections::HashMap<String, Ext> = s
                 .signals
                 .iter()
-                .map(|(sym, x)| (sym.clone(), (x.fair_value_cents, x.age_seconds)))
+                .map(|(sym, x)| {
+                    (
+                        sym.clone(),
+                        (
+                            (x.fair_value_cents, x.age_seconds),
+                            android_analyst_count(x),
+                            android_forecast_target(x),
+                        ),
+                    )
+                })
                 .collect();
             (classes, externals)
         };
@@ -96,7 +116,9 @@ impl OpportunitySnapshot {
                 crypto_setup: i.crypto_setup.map(|(s, l)| (s, l.to_string())),
                 year: year.get(&i.row.symbol).cloned(),
                 business_class: classes.get(&i.row.symbol).copied(),
-                external: externals.get(&i.row.symbol).copied(),
+                external: externals.get(&i.row.symbol).map(|e| e.0),
+                external_analysts: externals.get(&i.row.symbol).and_then(|e| e.1),
+                android_target: externals.get(&i.row.symbol).map(|e| e.2),
                 row: i.row,
             })
             .collect();
@@ -259,7 +281,11 @@ pub fn to_ranked(rows: &[OpportunityRow], model: ScoringModel) -> Vec<RankedRow>
             composite_score: r.composite_score,
             // Desktop crypto rows carry the long-only crypto-cycle setup; on the
             // short list the setup must be the short composite instead.
-            setup_score: if short { r.composite_score } else { r.setup_score },
+            setup_score: if short {
+                r.composite_score
+            } else {
+                r.setup_score
+            },
             setup_label: if short {
                 short_setup_label(r.composite_score).to_string()
             } else {
@@ -362,7 +388,10 @@ impl Semantics {
 pub const ANDROID_MIN_GAP_BPS: i32 = 2_000;
 
 /// `FinancialClassPolicy.classify(fundamentals)` (Kotlin passes `assetNotEquity = false`).
-pub fn android_class(symbol: &str, f: &crate::engine::FundamentalSnapshot) -> crate::dcf_model::BusinessClass {
+pub fn android_class(
+    symbol: &str,
+    f: &crate::engine::FundamentalSnapshot,
+) -> crate::dcf_model::BusinessClass {
     crate::dcf_model::classify_business_for(
         Some(symbol),
         f.sector_name.as_deref(),
@@ -447,6 +476,35 @@ pub fn android_decision(
 /// Android `OpportunityEngine.buildRows` for AggressiveV3, regime scoring off:
 /// profile universe only, qualified rows only (profitable and gap ≥ 20%),
 /// Year (1y/1wk) technicals, Android fundamentals, Android tie-breaks.
+/// Kotlin `clampedWeightedFairValue`: weighted fair clamped into [low, high], kept if > 0.
+pub fn android_clamped_weighted_fair(x: &crate::engine::ExternalValuationSignal) -> Option<i64> {
+    let mut w = x.weighted_fair_value_cents?;
+    if let (Some(l), Some(h)) = (x.low_fair_value_cents, x.high_fair_value_cents) {
+        w = w.clamp(l.min(h), l.max(h));
+    }
+    (w > 0).then_some(w)
+}
+
+/// `sanitizeExternalSignal(x).weightedAnalystCount ?: analystOpinionCount`.
+pub fn android_analyst_count(x: &crate::engine::ExternalValuationSignal) -> Option<u32> {
+    let weighted = android_clamped_weighted_fair(x).and(x.weighted_analyst_count);
+    weighted.or(x.analyst_opinion_count)
+}
+
+/// Kotlin `OpportunityEngine.preferredForecastFairValueCents` / `targetAnalystCount`.
+pub fn android_forecast_target(
+    x: &crate::engine::ExternalValuationSignal,
+) -> (Option<i64>, Option<u32>) {
+    match android_clamped_weighted_fair(x) {
+        Some(w) => (
+            Some(w),
+            x.weighted_analyst_count.or(x.analyst_opinion_count),
+        ),
+        None if x.fair_value_cents > 0 => (Some(x.fair_value_cents), x.analyst_opinion_count),
+        None => (None, None),
+    }
+}
+
 /// Android `ReportingEngine` external-signal max age (seconds).
 pub const ANDROID_SIGNAL_MAX_AGE_SECONDS: u64 = 30;
 
@@ -461,35 +519,61 @@ fn android_row(r: &SnapshotRow) -> crate::engine::CandidateRow {
         None => ExternalSignalStatus::Missing,
         Some((_, age)) if age > ANDROID_SIGNAL_MAX_AGE_SECONDS => ExternalSignalStatus::Stale,
         Some((fair, _)) => {
-            if checked_gap_bps(row.market_price_cents, fair).unwrap_or(i32::MIN) >= ANDROID_MIN_GAP_BPS {
+            if checked_gap_bps(row.market_price_cents, fair).unwrap_or(i32::MIN)
+                >= ANDROID_MIN_GAP_BPS
+            {
                 ExternalSignalStatus::Supportive
             } else {
                 ExternalSignalStatus::Divergent
             }
         }
     };
-    row.confidence = confidence(row.qualification, row.signal_status, row.analyst_opinion_count);
+    // Older snapshots lack `external_analysts`; fall back to the row's count.
+    let analysts = if r.external.is_some() {
+        r.external_analysts.or(row.analyst_opinion_count)
+    } else {
+        None
+    };
+    row.confidence = confidence(row.qualification, row.signal_status, analysts);
     row
 }
 
-pub fn rank_android_v3(snapshot: &OpportunitySnapshot, universe: Option<&[String]>) -> Vec<AndroidRow> {
+pub fn rank_android_v3(
+    snapshot: &OpportunitySnapshot,
+    universe: Option<&[String]>,
+) -> Vec<AndroidRow> {
     use crate::engine::QualificationStatus;
     use crate::opportunity_v3::{
-        composite_score_v3_android, score_forecast_v3, score_fundamentals_v3_android,
+        composite_score_v3_android, score_forecast_v3, score_forecast_v3_with,
+        score_fundamentals_v3_android,
     };
     let allowed: Option<std::collections::HashSet<&str>> =
         universe.map(|u| u.iter().map(|s| s.as_str()).collect());
     let mut rows: Vec<(AndroidRow, u8)> = snapshot
         .rows
         .iter()
-        .filter(|r| allowed.as_ref().is_none_or(|a| a.contains(r.row.symbol.as_str())))
+        .filter(|r| {
+            allowed
+                .as_ref()
+                .is_none_or(|a| a.contains(r.row.symbol.as_str()))
+        })
         .map(|r| (r, android_row(r)))
         .filter(|(_, row)| row.qualification == QualificationStatus::Qualified)
         .map(|(r, row)| {
             let row = &row;
             let (f, sig) = score_fundamentals_v3_android(row, r.business_class);
             let t = crate::android_chart::score_technicals_v3(r.year.as_ref());
-            let (fc, _) = score_forecast_v3(row, r.dcf_analysis.as_ref());
+            let (fc, _) = match r.android_target {
+                Some((fair, count)) => {
+                    score_forecast_v3_with(row, r.dcf_analysis.as_ref(), fair, count)
+                }
+                // No external signal → Kotlin has no Street target.
+                None if r.external.is_none() => {
+                    score_forecast_v3_with(row, r.dcf_analysis.as_ref(), None, None)
+                }
+                // Snapshot written before `android_target` existed: desktop inputs.
+                None => score_forecast_v3(row, r.dcf_analysis.as_ref()),
+            };
             let composite = composite_score_v3_android(f, t, fc, row.beta_millis);
             let coverage = [f, t, fc].iter().filter(|x| x.is_some()).count() as u8;
             let upside = android_upside_bps(row.market_price_cents, row.intrinsic_value_cents);
@@ -503,7 +587,8 @@ pub fn rank_android_v3(snapshot: &OpportunitySnapshot, universe: Option<&[String
                     fundamentals: f,
                     technical: t,
                     forecast: fc,
-                    decision: android_decision(row.confidence, upside, composite, false).to_string(),
+                    decision: android_decision(row.confidence, upside, composite, false)
+                        .to_string(),
                     confidence: confidence_label(row.confidence).to_string(),
                     price_cents: row.market_price_cents,
                     intrinsic_cents: row.intrinsic_value_cents,
@@ -534,6 +619,9 @@ pub struct EngineConfig {
     pub market_context: bool,
     /// Fetch Android's `1y`/`1wk` Year chart for every profile symbol.
     pub fetch_year_charts: bool,
+    /// Load only Android's profile universe (sp500 = 501 equities) instead of
+    /// the desktop composition (+ ETFs + crypto). Headless default: true.
+    pub android_universe: bool,
 }
 
 #[derive(Serialize)]
@@ -567,7 +655,7 @@ pub fn canonical_profile(raw: &str) -> String {
 
 /// Android profile universe (the asset file, no Rust ETF/crypto/priority extras).
 pub fn android_universe(profile: &str) -> Option<Vec<String>> {
-    crate::profiles::profile_symbols(profile)
+    crate::profiles::android_profile_symbols(profile)
 }
 
 fn spawn_year_worker(
@@ -603,7 +691,11 @@ impl HeadlessEngine {
             .ok()
             .filter(|s| canonical_profile(&s.profile) == canonical_profile(&cfg.profile))
             .map(Arc::new);
-        apply_universe_profile(&cfg.profile, &state)?;
+        if cfg.android_universe {
+            crate::commands::apply_universe_profile_android(&cfg.profile, &state)?;
+        } else {
+            apply_universe_profile(&cfg.profile, &state)?;
+        }
         let mut seed = std::collections::HashMap::new();
         if let Some(p) = &persisted {
             for r in &p.rows {
@@ -804,10 +896,58 @@ mod tests {
         let rows = rank_snapshot(&snap, ScoringModel::ShortV3, None);
         for r in to_ranked(&rows, ScoringModel::ShortV3) {
             assert_eq!(r.setup_label, short_setup_label(r.composite_score));
-            assert!(!matches!(r.setup_label.as_str(), "StrongBuy" | "HoldWait" | "Buy"));
+            assert!(!matches!(
+                r.setup_label.as_str(),
+                "StrongBuy" | "HoldWait" | "Buy"
+            ));
         }
         assert_eq!(short_setup_label(50), "StrongShort");
         assert_eq!(short_setup_label(-41), "StrongAvoidShort");
+    }
+
+    /// Android loads `apps/android/app/src/main/assets/profiles/<p>.txt`
+    /// (`ProfileCatalog.loadProfile`). The Android-mode feed must load exactly it.
+    #[test]
+    fn android_feed_universe_matches_android_assets() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../android/app/src/main/assets/profiles");
+        for profile in [
+            "sp500", "dow", "russell", "merval", "nikkei", "europe", "asia",
+        ] {
+            let text = std::fs::read_to_string(assets.join(format!("{profile}.txt"))).unwrap();
+            let mut android: Vec<String> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            // DefaultDashboardRepository.resolveProfileSymbols applies `.distinct()`.
+            let mut seen = std::collections::HashSet::new();
+            android.retain(|s| seen.insert(s.clone()));
+            let loaded = crate::commands::resolve_android_membership(profile, &db)
+                .unwrap()
+                .symbols;
+            assert_eq!(loaded.len(), android.len(), "{profile} count");
+            let a: std::collections::HashSet<_> = android.iter().collect();
+            let l: std::collections::HashSet<_> = loaded.iter().collect();
+            assert_eq!(l, a, "{profile} membership");
+            assert_eq!(loaded, android, "{profile} order");
+        }
+        let sp = crate::commands::resolve_android_membership("sp500", &db)
+            .unwrap()
+            .symbols;
+        assert_eq!(sp.len(), 501);
+        assert!(!sp
+            .iter()
+            .any(|s| s.ends_with("-USD") || s == "SPY" || s == "SLV"));
+        // Desktop composition is unchanged (ETFs + crypto on top).
+        let desktop = crate::profiles::resolve_profile_membership("sp500", &db)
+            .unwrap()
+            .symbols;
+        assert!(desktop.len() > 501);
+        // The ranking filter uses the same list as the feed.
+        assert_eq!(android_universe("sp500").unwrap(), sp);
     }
 
     #[test]
@@ -842,8 +982,7 @@ mod tests {
 mod android_parity_tests {
     use super::*;
     use crate::engine::{
-        ExternalValuationSignal, FundamentalSnapshot, HistoricalCandle,
-        MarketSnapshot,
+        ExternalValuationSignal, FundamentalSnapshot, HistoricalCandle, MarketSnapshot,
     };
     use serde_json::Value;
 
@@ -876,10 +1015,11 @@ mod android_parity_tests {
 
     /// Feed the fixture through the real Rust ingest path, then rank.
     pub(super) fn rank_fixture() -> Vec<AndroidRow> {
-        let raw: Value = serde_json::from_slice(
-            &std::fs::read(contracts().join("opportunity-v3-headless-fixture.json")).unwrap(),
-        )
-        .unwrap();
+        rank_fixture_at(&contracts().join("opportunity-v3-headless-fixture.json"))
+    }
+
+    fn rank_fixture_at(path: &std::path::Path) -> Vec<AndroidRow> {
+        let raw: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let fx = snake(raw);
         let screener = Mutex::new(ScreenerState::new());
         let mut year = std::collections::HashMap::new();
@@ -920,8 +1060,10 @@ mod android_parity_tests {
         if rows.len() != want.len() {
             diffs.push(format!("row count {} vs golden {}", rows.len(), want.len()));
         }
-        let by_sym: std::collections::HashMap<&str, &Value> =
-            want.iter().map(|g| (g["symbol"].as_str().unwrap(), g)).collect();
+        let by_sym: std::collections::HashMap<&str, &Value> = want
+            .iter()
+            .map(|g| (g["symbol"].as_str().unwrap(), g))
+            .collect();
         for (i, r) in rows.iter().enumerate() {
             let Some(g) = by_sym.get(r.symbol.as_str()) else {
                 diffs.push(format!("{}: ranked by Rust, absent in Kotlin", r.symbol));
@@ -946,24 +1088,77 @@ mod android_parity_tests {
                 diffs.push(format!("{sym}: ranked by Kotlin, absent in Rust"));
             }
         }
-        assert!(diffs.is_empty(), "Android parity diffs:\n{}", diffs.join("\n"));
+        assert!(
+            diffs.is_empty(),
+            "Android parity diffs:\n{}",
+            diffs.join("\n")
+        );
     }
 
     /// Mutation guard: the golden must catch a one-point coverage-bonus change
     /// (the reviewer's 5 → 6 probe) — i.e. the test is not circular.
+    /// Fixture-authoring helper for `tools/gen_headless_v3_fixture.py` (picks
+    /// tie pairs from a candidate pool). Not part of the suite.
     #[test]
-    fn golden_detects_a_one_point_composite_shift() {
+    #[ignore]
+    fn dump_fixture_ranking() {
+        let (Ok(inp), Ok(out)) = (std::env::var("FIXTURE_IN"), std::env::var("FIXTURE_OUT")) else {
+            return;
+        };
+        let rows = rank_fixture_at(std::path::Path::new(&inp));
+        std::fs::write(out, serde_json::to_vec(&rows).unwrap()).unwrap();
+    }
+
+    /// The golden must actually exercise every sort key, or mutating one would
+    /// go unnoticed: equal composite with different coverage, equal composite
+    /// and coverage with different confidence, a full tie (symbol), and the
+    /// weighted-analyst confidence fallback.
+    #[test]
+    fn golden_exercises_every_tie_key() {
         let golden: Value = serde_json::from_slice(
             &std::fs::read(contracts().join("opportunity-v3-headless-golden.json")).unwrap(),
         )
         .unwrap();
-        let multi_bucket = golden["rows"]
-            .as_array()
-            .unwrap()
+        let rows = golden["rows"].as_array().unwrap();
+        let key = |g: &Value, k: &str| g[k].clone();
+        let pair = |f: &dyn Fn(&Value, &Value) -> bool| {
+            rows.iter()
+                .any(|a| rows.iter().any(|b| a["symbol"] != b["symbol"] && f(a, b)))
+        };
+        assert!(pair(&|a, b| key(a, "compositeScore")
+            == key(b, "compositeScore")
+            && key(a, "coverageCount") != key(b, "coverageCount")));
+        assert!(pair(&|a, b| key(a, "compositeScore")
+            == key(b, "compositeScore")
+            && key(a, "coverageCount") == key(b, "coverageCount")
+            && key(a, "confidence") != key(b, "confidence")));
+        assert!(pair(&|a, b| key(a, "compositeScore")
+            == key(b, "compositeScore")
+            && key(a, "upsideBps") == key(b, "upsideBps")
+            && key(a, "confidence") == key(b, "confidence")));
+        let conf = |s: &str| {
+            rows.iter()
+                .find(|g| g["symbol"] == s)
+                .map(|g| g["confidence"].clone())
+        };
+        assert_eq!(
+            conf("FXW1"),
+            Some(Value::from("High")),
+            "weighted count 5 beats opinions 2"
+        );
+        assert_eq!(
+            conf("FXW2"),
+            Some(Value::from("Provisional")),
+            "weighted count 2 beats opinions 5"
+        );
+        assert_eq!(
+            conf("FXW3"),
+            Some(Value::from("Provisional")),
+            "no weighted fair → opinions 2"
+        );
+        assert!(rows
             .iter()
-            .filter(|g| g["coverageCount"].as_i64().unwrap() > 1)
-            .count();
-        assert!(multi_bucket > 0, "fixture must exercise the coverage bonus");
+            .any(|g| g["coverageCount"].as_i64().unwrap() > 1));
     }
 
     #[test]
