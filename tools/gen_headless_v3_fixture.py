@@ -10,7 +10,7 @@ Contents:
   FXAA        exact twin of FX12          -> full tie, decided by symbol
   FXW1..FXW3  weightedAnalystCount ?: analystOpinionCount confidence fallback
   FXW4        weighted fair != plain fair and outside [low, high] -> clamped
-  FXW5        plain external fair value 0 (Kotlin still treats it as a target)
+  FXW5        plain external fair value 0 (Kotlin ingestExternal drops the signal -> Provisional/Watch, no target)
   FXCA/FXCB   equal composite, different coverage (higher coverage = FXCB, so
               dropping the coverage key reorders them)
   FXKA/FXKB   equal composite+coverage, different confidence (higher = FXKB)
