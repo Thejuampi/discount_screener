@@ -50,6 +50,11 @@ the DCF state each symbol settled on (`dcf`), so the run can be replayed offline
     python3 tools/android-jvm-parity/diff_headless.py live /tmp/android-jvm-parity/opps.json /tmp/vh.json
 
 CI (`android-jvm-parity` job) runs the offline replay and diff on the committed recorded set.
-Headless flags rows whose on-screen value needs an Android DCF identity value it does not
-compute (Street unusable and a live residual/FCFF DCF) with `projection_gap`; the diff
-counts those separately instead of failing.
+The recorded set includes one injected `ProviderUncertain` DCF (EXE) so the SourceUncertain
+path is exercised. Headless computes the residual-income identity value for financials itself
+(port of `DcfAnalysisEngine.residualIncome` + `ResidualPathPolicy`, checked by FXRI/FXRB in the
+golden). It still flags with `projection_gap` the rows whose on-screen value needs a live FCFF
+DCF it does not compute (operating name, Street unusable, live mode only); the diff counts
+those separately instead of failing. Live headless runs the residual DCF with the bootstrap
+`MarketParams` (rf 430 bps), while the app uses its FRED/TNX risk-free rate, so live
+residual identity values can differ when Street is unusable.

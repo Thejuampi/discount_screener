@@ -131,6 +131,202 @@ pub struct AndroidDcfFacts {
     pub identity: AndroidIdentity,
 }
 
+/// Kotlin `ValuationJudgmentPolicy.legalPair` (class refuse included: Unclassified /
+/// NotEligible are never a legal identity).
+fn android_legal_pair(class: &str, model: &str) -> bool {
+    match class {
+        "OperatingNonFinancial" => model == "FcffWacc" || model == "ComponentSum",
+        "FinancialServices" => model == "ResidualIncomeEquity",
+        _ => false,
+    }
+}
+
+/// Kotlin `ValuationDecisionPolicy.scenarioWidthBps`: round-half-up (bull-bear)*10000/base.
+fn android_scenario_width_bps((bear, base, bull): (i64, i64, i64)) -> Option<i64> {
+    if bear <= 0 || base <= 0 || bull <= 0 || bear > base || base > bull {
+        return None;
+    }
+    let n = (bull as i128 - bear as i128) * 10_000;
+    i64::try_from((n + base as i128 / 2) / base as i128).ok()
+}
+
+/// `ValuationJudgmentPolicy.IDENTITY_USABLE_MAX_WIDTH_BPS` (valuation-policy.yaml).
+const ANDROID_IDENTITY_USABLE_MAX_WIDTH_BPS: i64 = 12_000;
+
+/// Kotlin `identityFanUnusable` negated.
+fn android_identity_fan_usable(fan: (i64, i64, i64)) -> bool {
+    android_scenario_width_bps(fan).is_some_and(|w| w <= ANDROID_IDENTITY_USABLE_MAX_WIDTH_BPS)
+}
+
+/// Port of Kotlin `DcfAnalysisEngine.residualIncome` (with `ResidualPathPolicy` and
+/// `ResidualIncomeMath`) as `ResidualFromDrivers.compute` runs it on a bulk load (SEC off,
+/// no timeseries). Returns the (bear, base, bull) per-share cents, or `None` where Kotlin
+/// throws (→ `missingDrivers`). Android semantics only; Tauri keeps `dcf_model::residual_income`.
+pub fn android_residual_fan(
+    f: &crate::engine::FundamentalSnapshot,
+    price_cents: i64,
+    market: &crate::dcf_model::MarketParams,
+) -> Option<(i64, i64, i64)> {
+    // valuation-policy.yaml: dcf.*, residual_path.*, residual_income.*
+    const COE_SCENARIO_BAND_BPS: i32 = 75;
+    const ROE_BEAR_HAIRCUT_BPS: i32 = 300;
+    const ROE_BULL_BOOST_BPS: i32 = 200;
+    const ROE_BULL_CAP_BPS: i32 = 9_000;
+    const MIN_EQUITY_SPREAD_OVER_RF_BPS: i32 = 50;
+    let shares = f.shares_outstanding.filter(|s| *s > 0)? as f64;
+    let bvps = match f.book_value_per_share_cents.filter(|b| *b > 0) {
+        Some(b) => b,
+        None => {
+            let price = (price_cents > 0).then_some(price_cents as f64 / 100.0)?;
+            let pb = f.price_to_book_hundredths.filter(|p| *p > 0)? as f64 / 100.0;
+            let v = price / pb;
+            if !v.is_finite() || v <= 0.0 {
+                return None;
+            }
+            (v * 100.0).round() as i64
+        }
+    };
+    let book0 = (bvps as f64 / 100.0) * shares;
+    if !book0.is_finite() || book0 <= 0.0 {
+        return None;
+    }
+    let roe0 = f.return_on_equity_bps.filter(|r| *r > 0 && *r < 10_000)?;
+    let retention_bps = f.retention_bps.filter(|r| (0..=10_000).contains(r))?;
+    let re_raw = crate::dcf_model::resolve_cost_of_equity(f, market)
+        .ok()?
+        .cost_of_equity_bps;
+    let path = android_residual_path(
+        roe0,
+        re_raw,
+        f.industry_name.as_deref(),
+        f.sector_name.as_deref(),
+    );
+    let re_base = (re_raw + path.discount_adjust_bps).max(market.rf_bps + 50);
+    let retention = retention_bps as f64 / 10_000.0;
+    let bear_re = re_base + COE_SCENARIO_BAND_BPS;
+    let bull_re =
+        (re_base - COE_SCENARIO_BAND_BPS).max(market.rf_bps + MIN_EQUITY_SPREAD_OVER_RF_BPS);
+    let g = market.stable_growth_bps();
+    let sc = |roe: i32, re: i32, ret: f64| {
+        android_ri_value_per_share_cents(
+            book0,
+            shares,
+            roe,
+            re,
+            ret,
+            path.fade_years,
+            android_long_run_roe_bps(roe, re, path.franchise_spread_bps),
+            g,
+        )
+    };
+    let start = path.starting_roe_bps;
+    let bear = sc(
+        (start - ROE_BEAR_HAIRCUT_BPS).max(100),
+        bear_re,
+        retention * 0.9,
+    )?;
+    let base = sc(start, re_base, retention)?;
+    let bull = sc(
+        (start + ROE_BULL_BOOST_BPS).min(ROE_BULL_CAP_BPS),
+        bull_re,
+        retention.min(0.85),
+    )?;
+    Some((bear, base, bull))
+}
+
+struct AndroidResidualPath {
+    starting_roe_bps: i32,
+    franchise_spread_bps: i32,
+    fade_years: i32,
+    discount_adjust_bps: i32,
+}
+
+/// Kotlin `ResidualPathPolicy.resolve` (residual-path/4-care-quality-roe).
+fn android_residual_path(
+    roe0: i32,
+    coe: i32,
+    industry: Option<&str>,
+    sector: Option<&str>,
+) -> AndroidResidualPath {
+    let text = format!("{} {}", industry.unwrap_or(""), sector.unwrap_or("")).to_lowercase();
+    let mut p = AndroidResidualPath {
+        starting_roe_bps: roe0,
+        franchise_spread_bps: 500,
+        fade_years: 5,
+        discount_adjust_bps: 0,
+    };
+    if text.contains("bank") {
+        if roe0 < 1_300 && roe0 < coe {
+            p.starting_roe_bps = 1_300.min(roe0 + 400);
+        }
+        p.franchise_spread_bps = 600;
+        if roe0 >= 1_400 {
+            p.discount_adjust_bps = -70;
+        }
+    } else if text.contains("insurance") || text.contains("insur") {
+        p.franchise_spread_bps = 120;
+    } else if text.contains("healthcare plan")
+        || text.contains("health care plan")
+        || text.contains("managed care")
+    {
+        p.franchise_spread_bps = if roe0 < 2_000 { 350 } else { 2_000 };
+        p.fade_years = 1;
+    }
+    p
+}
+
+/// Kotlin `ResidualIncomeMath.longRunRoeBps`.
+fn android_long_run_roe_bps(roe0: i32, coe: i32, spread: i32) -> i32 {
+    if roe0 <= coe {
+        coe
+    } else {
+        roe0.min(coe + spread)
+    }
+}
+
+/// Kotlin `ResidualIncomeMath.valuePerShareCents` (RESIDUAL_GORDON_EPSILON_BPS = 50).
+#[allow(clippy::too_many_arguments)]
+fn android_ri_value_per_share_cents(
+    book0: f64,
+    shares: f64,
+    roe0_bps: i32,
+    coe_bps: i32,
+    retention: f64,
+    fade_years: i32,
+    long_run_roe_bps: i32,
+    stable_growth_bps: i32,
+) -> Option<i64> {
+    if book0 <= 0.0 || shares <= 0.0 || coe_bps <= 0 || fade_years <= 0 {
+        return None;
+    }
+    let re = coe_bps as f64 / 10_000.0;
+    let roe0 = roe0_bps as f64 / 10_000.0;
+    let roe_stable = long_run_roe_bps as f64 / 10_000.0;
+    let mut book = book0;
+    let mut pv = 0.0;
+    for t in 1..=fade_years {
+        let w = t as f64 / fade_years as f64;
+        let roe_t = roe0 * (1.0 - w) + roe_stable * w;
+        pv += (roe_t - re) * book / (1.0 + re).powi(t);
+        book *= 1.0 + roe_t * retention;
+        if !book.is_finite() || book <= 0.0 {
+            return None;
+        }
+    }
+    if long_run_roe_bps > coe_bps {
+        let g = stable_growth_bps.min((coe_bps - 50).max(0)) as f64 / 10_000.0;
+        if g >= re {
+            return None;
+        }
+        pv += (roe_stable - re) * book / (re - g) / (1.0 + re).powi(fade_years);
+    }
+    let equity = book0 + pv;
+    if !equity.is_finite() || equity <= 0.0 {
+        return None;
+    }
+    Some(((equity / shares) * 100.0).round() as i64)
+}
+
 impl AndroidDcfFacts {
     /// From a Kotlin `DcfAnalysis` JSON object (fixture injection / recorded requests).
     pub fn from_kotlin_json(v: &serde_json::Value) -> Self {
@@ -169,12 +365,29 @@ impl AndroidDcfFacts {
         let model = s("model").unwrap_or("None");
         let unavailable = s("valuationUnavailableReason")
             .or(s("valuation_unavailable_reason"))
-            .is_some();
-        let identity = if model != "None" && !unavailable && base > 0 {
-            AndroidIdentity::Value(base)
-        } else {
-            AndroidIdentity::None
-        };
+            .is_some_and(|r| !r.trim().is_empty());
+        // Kotlin `DcfAnalysis.businessClass` defaults to OperatingNonFinancial.
+        let class = s("businessClass")
+            .or(s("business_class"))
+            .unwrap_or("OperatingNonFinancial");
+        let fan = (
+            i("bearIntrinsicValueCents")
+                .or(i("bear_intrinsic_value_cents"))
+                .unwrap_or(0),
+            base,
+            i("bullIntrinsicValueCents")
+                .or(i("bull_intrinsic_value_cents"))
+                .unwrap_or(0),
+        );
+        // ValuationJudgmentAssembler.isComputedIdentity, then
+        // ValuationJudgmentPolicy.identityComplete (class refuse, legalPair, fan width).
+        let computed = model != "None" && !unavailable && base > 0;
+        let identity =
+            if computed && android_legal_pair(class, model) && android_identity_fan_usable(fan) {
+                AndroidIdentity::Value(base)
+            } else {
+                AndroidIdentity::None
+            };
         Self {
             provider_uncertain: resolver == "ProviderUncertain",
             restored_only: resolver == "RestoredOnly",
@@ -183,57 +396,54 @@ impl AndroidDcfFacts {
         }
     }
 
-    /// `ResidualFromDrivers.compute` with SEC off reaches `ResolverState.Selected`
-    /// (DcfAnalysisEngine.residualIncome preconditions). Its analysis keeps the default
-    /// source-free provenance (`DcfAnalysis(source = null)` then `.copy(source = Yahoo)`),
-    /// so the projection treats it as source-unknown.
-    fn residual_selected(f: &crate::engine::FundamentalSnapshot, price_cents: i64) -> bool {
-        let shares = f.shares_outstanding.unwrap_or(0) > 0;
-        let bvps = match f.book_value_per_share_cents.filter(|b| *b > 0) {
-            Some(b) => b,
-            None => match (
-                price_cents > 0,
-                f.price_to_book_hundredths.filter(|p| *p > 0),
-            ) {
-                (true, Some(pb)) => {
-                    ((price_cents as f64 / 100.0) / (pb as f64 / 100.0) * 100.0).round() as i64
-                }
-                _ => 0,
-            },
-        };
-        let roe = f.return_on_equity_bps.is_some_and(|r| r > 0 && r < 10_000);
-        let retention = f.retention_bps.is_some_and(|r| (0..=10_000).contains(&r));
-        shares && bvps > 0 && roe && retention
-    }
-
     /// The DCF state Android settles on after a bulk load (`enrichSymbol`, SEC off).
     /// `operating_identity`: what an operating name's DCF contributes (live: an FCFF value
     /// headless does not reproduce → `Some(Unknown)`; recorded fixture: no DCF → `None`).
+    /// `restored_only`: the analysis was recovered from persisted state, not resolved live
+    /// this session (Kotlin `ResolverState.RestoredOnly`), as when the daemon serves its
+    /// persisted snapshot. Terminal classification states are rebuilt, never restored.
+    /// `market`: the `MarketParams` the residual-income DCF runs with.
     pub fn bulk_load(
         class: Option<crate::dcf_model::BusinessClass>,
         f: Option<&crate::engine::FundamentalSnapshot>,
         price_cents: i64,
         operating_identity: Option<AndroidIdentity>,
+        restored_only: bool,
+        market: &crate::dcf_model::MarketParams,
     ) -> Option<Self> {
         use crate::dcf_model::BusinessClass::*;
-        let facts = |source_free, identity| Self {
+        let facts = |source_free, identity, restored| Self {
             provider_uncertain: false,
-            restored_only: false,
+            restored_only: restored,
             source_free,
             identity,
         };
         match class? {
             // terminalClassificationAnalysis: source Unknown, model None.
-            Unclassified | NotEligible => Some(facts(true, AndroidIdentity::None)),
-            FinancialServices => {
-                if Self::residual_selected(f?, price_cents) {
-                    Some(facts(true, AndroidIdentity::Unknown))
-                } else {
-                    // missingDrivers: SecEdgar Unavailable, model None.
-                    Some(facts(false, AndroidIdentity::None))
-                }
-            }
-            OperatingNonFinancial => operating_identity.map(|i| facts(false, i)),
+            Unclassified | NotEligible => Some(facts(true, AndroidIdentity::None, false)),
+            // ResidualFromDrivers.compute: Selected with the default source-free provenance
+            // (`DcfAnalysis(source = null)` then `.copy(source = Yahoo)`); otherwise
+            // missingDrivers (SecEdgar Unavailable, model None).
+            FinancialServices => Some(match android_residual_fan(f?, price_cents, market) {
+                Some(fan) => facts(
+                    true,
+                    if android_identity_fan_usable(fan) {
+                        AndroidIdentity::Value(fan.1)
+                    } else {
+                        AndroidIdentity::None
+                    },
+                    restored_only,
+                ),
+                None => facts(false, AndroidIdentity::None, false),
+            }),
+            OperatingNonFinancial => operating_identity.map(|i| facts(false, i, restored_only)),
+        }
+    }
+
+    /// Mark a persisted snapshot's computed DCF states as restored (not live this session).
+    pub fn mark_restored(&mut self) {
+        if self.identity != AndroidIdentity::None {
+            self.restored_only = true;
         }
     }
 }
@@ -312,6 +522,8 @@ impl OpportunitySnapshot {
                     funds.get(&i.row.symbol),
                     i.row.market_price_cents,
                     Some(AndroidIdentity::Unknown),
+                    false,
+                    &crate::dcf_model::MarketParams::default_usd(),
                 ),
                 row: i.row,
             })
@@ -1050,7 +1262,15 @@ impl HeadlessEngine {
         let persisted = OpportunitySnapshot::load(&cfg.data_dir.join(SNAPSHOT_FILE))
             .ok()
             .filter(|s| canonical_profile(&s.profile) == canonical_profile(&cfg.profile))
-            .map(Arc::new);
+            .map(|mut s| {
+                // Recovered from disk, not resolved live this session: RestoredOnly.
+                for r in &mut s.rows {
+                    if let Some(d) = &mut r.android_dcf {
+                        d.mark_restored();
+                    }
+                }
+                Arc::new(s)
+            });
         if cfg.android_universe {
             crate::commands::apply_universe_profile_android(&cfg.profile, &state)?;
         } else {
@@ -1449,6 +1669,8 @@ mod android_parity_tests {
                     fund.as_ref(),
                     r.row.market_price_cents,
                     None,
+                    false,
+                    &crate::dcf_model::MarketParams::default_usd(),
                 )
             };
         }
@@ -1518,8 +1740,8 @@ mod android_parity_tests {
             "Android parity diffs:\n{}",
             diffs.join("\n")
         );
-        // Exactly FXRI (residual identity anchor behind a stale Street) is skipped.
-        assert_eq!(gaps, 2, "unexpected identity-gap field count");
+        // The residual identity value is computed headless (FXRI, FXRB): nothing is skipped.
+        assert_eq!(gaps, 0, "unexpected identity-gap field count");
     }
 
     /// Mutation guard: the golden must catch a one-point coverage-bonus change
@@ -1615,6 +1837,155 @@ mod android_parity_tests {
         assert_eq!(rf["trustSignal"], "SourceUnknown");
         assert_eq!(rf["decision"], "Watch");
         assert_eq!(row("FX12")["decision"], "Act");
+    }
+
+    #[test]
+    fn android_decision_boundaries_and_trust_gate() {
+        use crate::engine::ConfidenceBand::*;
+        let street = AndroidStreet {
+            fair: 15_000,
+            low: Some(12_000),
+            high: Some(20_000),
+            weighted: None,
+            weighted_count: None,
+            opinions: Some(10),
+            age: 0,
+        };
+        // Avoid gate is `composite < 0`: 0 is not Avoid, -1 is.
+        let p = |comp| android_project_row(High, 10_000, comp, Some(&street), None).decision;
+        assert_eq!(p(0), Some("Watch"));
+        assert_eq!(p(-1), Some("Avoid"));
+        // High + identity anchor (Street unusable) + composite >= 30: trust gate -> Watch.
+        let unusable = AndroidStreet {
+            low: Some(25_000),
+            ..street.clone()
+        };
+        let sourced = AndroidDcfFacts {
+            provider_uncertain: false,
+            restored_only: false,
+            source_free: false,
+            identity: AndroidIdentity::Value(15_000),
+        };
+        let x = android_project_row(High, 10_000, 45, Some(&unusable), Some(&sourced));
+        assert_eq!(
+            (x.confidence, x.anchor, x.trust_signal, x.decision),
+            (Some(High), "identity", Some("ModelValue"), Some("Watch"))
+        );
+        let x = android_project_row(High, 10_000, 45, None, Some(&sourced));
+        assert_eq!(x.trust_signal, Some("NoAnalystTarget"));
+        assert_eq!(x.decision, Some("Watch"));
+        // RestoredOnly lowers confidence one step, without a trust signal.
+        let restored = AndroidDcfFacts {
+            restored_only: true,
+            ..sourced.clone()
+        };
+        let x = android_project_row(High, 10_000, 45, Some(&street), Some(&restored));
+        assert_eq!(
+            (x.confidence, x.trust_signal, x.decision),
+            (Some(Provisional), None, Some("Watch"))
+        );
+    }
+
+    #[test]
+    fn android_restored_only_is_plumbed() {
+        use crate::dcf_model::{BusinessClass::*, MarketParams};
+        let mp = MarketParams::default_usd();
+        let op = |restored| {
+            AndroidDcfFacts::bulk_load(
+                Some(OperatingNonFinancial),
+                None,
+                10_000,
+                Some(AndroidIdentity::Value(12_000)),
+                restored,
+                &mp,
+            )
+            .unwrap()
+        };
+        assert!(!op(false).restored_only);
+        assert!(op(true).restored_only);
+        // Terminal classification states are rebuilt, never restored.
+        let t = AndroidDcfFacts::bulk_load(Some(NotEligible), None, 10_000, None, true, &mp);
+        assert!(!t.unwrap().restored_only);
+        // A persisted snapshot's computed DCF is marked RestoredOnly on daemon start.
+        let mut d = op(false);
+        d.mark_restored();
+        assert!(d.restored_only);
+        let kt = AndroidDcfFacts::from_kotlin_json(&serde_json::json!({
+            "source": "YahooFinance", "resolverState": "RestoredOnly",
+            "model": "FcffWacc", "bearIntrinsicValueCents": 9000,
+            "baseIntrinsicValueCents": 10000, "bullIntrinsicValueCents": 11000
+        }));
+        assert!(kt.restored_only);
+        assert_eq!(kt.identity, AndroidIdentity::Value(10_000));
+    }
+
+    #[test]
+    fn android_from_kotlin_json_identity_complete() {
+        let id = |extra: Value| {
+            let mut v = serde_json::json!({
+                "source": "YahooFinance", "resolverState": "Selected",
+                "businessClass": "OperatingNonFinancial", "model": "FcffWacc",
+                "bearIntrinsicValueCents": 9000, "baseIntrinsicValueCents": 10000,
+                "bullIntrinsicValueCents": 11000
+            });
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            AndroidDcfFacts::from_kotlin_json(&v).identity
+        };
+        assert_eq!(id(serde_json::json!({})), AndroidIdentity::Value(10_000));
+        // Kotlin default businessClass is OperatingNonFinancial.
+        let mut no_class = serde_json::json!({
+            "source": "YahooFinance", "model": "ComponentSum",
+            "bearIntrinsicValueCents": 9000, "baseIntrinsicValueCents": 10000,
+            "bullIntrinsicValueCents": 11000
+        });
+        assert_eq!(
+            AndroidDcfFacts::from_kotlin_json(&no_class).identity,
+            AndroidIdentity::Value(10_000)
+        );
+        no_class["model"] = "ResidualIncomeEquity".into();
+        assert_eq!(
+            AndroidDcfFacts::from_kotlin_json(&no_class).identity,
+            AndroidIdentity::None
+        );
+        // Width exactly 12000 bps is usable; above is not; disordered fan is not.
+        assert_eq!(
+            id(
+                serde_json::json!({"bearIntrinsicValueCents": 4000, "bullIntrinsicValueCents": 16000})
+            ),
+            AndroidIdentity::Value(10_000)
+        );
+        assert_eq!(
+            id(
+                serde_json::json!({"bearIntrinsicValueCents": 4000, "bullIntrinsicValueCents": 16001})
+            ),
+            AndroidIdentity::None
+        );
+        assert_eq!(
+            id(serde_json::json!({"bearIntrinsicValueCents": 10001})),
+            AndroidIdentity::None
+        );
+        for refuse in [
+            serde_json::json!({"businessClass": "Unclassified"}),
+            serde_json::json!({"businessClass": "NotEligible"}),
+            serde_json::json!({"businessClass": "FinancialServices"}),
+            serde_json::json!({"valuationUnavailableReason": "x"}),
+            serde_json::json!({"model": "None"}),
+        ] {
+            assert_eq!(id(refuse.clone()), AndroidIdentity::None, "{refuse}");
+        }
+        // A blank unavailable reason does not refuse (Kotlin isNullOrBlank).
+        assert_eq!(
+            id(serde_json::json!({"valuationUnavailableReason": " "})),
+            AndroidIdentity::Value(10_000)
+        );
+        assert_eq!(
+            id(
+                serde_json::json!({"businessClass": "FinancialServices", "model": "ResidualIncomeEquity"})
+            ),
+            AndroidIdentity::Value(10_000)
+        );
     }
 
     #[test]
