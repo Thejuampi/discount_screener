@@ -318,7 +318,7 @@ pub fn compute_crypto_score(
     }
 }
 
-fn score_to_label(score: i32) -> &'static str {
+pub(crate) fn score_to_label(score: i32) -> &'static str {
     if score >= 60 {
         "StrongAccumulate"
     } else if score >= 30 {

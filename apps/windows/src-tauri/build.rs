@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../../scripts/version.ps1");
     println!("cargo:rerun-if-changed=../../../.git/HEAD");
     println!("cargo:rustc-env=DS_APP_VERSION={}", app_version());
+    #[cfg(feature = "gui")]
     tauri_build::build()
 }
 

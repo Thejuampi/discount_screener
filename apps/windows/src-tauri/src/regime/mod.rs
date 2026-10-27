@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::tauri_compat::State;
 use reqwest::blocking::Client;
-use tauri::State;
 
 use crate::engine::{compute_chart_summary, ChartSummary, HistoricalCandle, ScreenerState};
 use crate::fetcher::{is_crypto, is_etf, YahooClient};
@@ -554,7 +554,7 @@ pub fn spawn_regime_worker(state: &AppState) {
 }
 
 /// Tauri command — returns stale-while-revalidate cache; recomputes when empty.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_market_regime(state: State<'_, AppState>) -> Result<MarketRegime, String> {
     if let Some(cached) = state.regime_cache.get() {
         if state.regime_cache.needs_refresh() {

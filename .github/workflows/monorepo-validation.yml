@@ -46,3 +46,25 @@ jobs:
       - name: Shared contract validation
         shell: pwsh
         run: ./scripts/validate-contracts.ps1
+
+  android-jvm-parity:
+    # Android Opps screen (OpportunityEngine + ScreenReplay.project on the JVM) vs headless Rust,
+    # field by field, on committed recorded live inputs. Offline: no market-data network calls.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Kotlin replay of recorded inputs
+        env:
+          PARITY_REPLAY: shared/contracts/android-jvm-parity-recorded.json
+          PARITY_OUT: ${{ runner.temp }}/replay
+        run: apps/android/gradlew -p tools/android-jvm-parity --no-configuration-cache run
+      - name: Headless golden + field-by-field diff
+        run: |
+          (cd apps/windows/src-tauri && cargo test --no-default-features --lib android_)
+          python3 tools/android-jvm-parity/diff_headless.py replay \
+            shared/contracts/android-jvm-parity-recorded.json "${{ runner.temp }}/replay/opps.json"

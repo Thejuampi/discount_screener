@@ -32,19 +32,19 @@ const V3_FUND_PB_HIGH: f64 = 500.0;
 const V3_FUND_CASH_QUALITY_WEIGHT: f64 = 10.0;
 const V3_FUNDAMENTALS_FULL_WEIGHT: f64 = 100.0;
 
-const V3_TECH_TREND_DELTA_BOUND: f64 = 0.10;
-const V3_TECH_TREND_PRICE_20_WEIGHT: f64 = 12.0;
-const V3_TECH_TREND_20_50_WEIGHT: f64 = 18.0;
-const V3_TECH_TREND_50_200_WEIGHT: f64 = 15.0;
-const V3_TECH_HISTOGRAM_BOUND: f64 = 0.005;
-const V3_TECH_HISTOGRAM_WEIGHT: f64 = 12.0;
-const V3_TECH_MACD_DIRECTION_WEIGHT: f64 = 8.0;
-const V3_TECH_RSI_WEIGHT: f64 = 25.0;
-const V3_TECH_VOLUME_WEIGHT: f64 = 10.0;
-const V3_TECH_RSI_SLOPE_BOUND: f64 = 2.0;
-const V3_TECH_VOLUME_RATIO_LOW: f64 = 70.0;
-const V3_TECH_VOLUME_RATIO_HIGH: f64 = 150.0;
-const V3_TECHNICALS_FULL_WEIGHT: f64 = 100.0;
+pub(crate) const V3_TECH_TREND_DELTA_BOUND: f64 = 0.10;
+pub(crate) const V3_TECH_TREND_PRICE_20_WEIGHT: f64 = 12.0;
+pub(crate) const V3_TECH_TREND_20_50_WEIGHT: f64 = 18.0;
+pub(crate) const V3_TECH_TREND_50_200_WEIGHT: f64 = 15.0;
+pub(crate) const V3_TECH_HISTOGRAM_BOUND: f64 = 0.005;
+pub(crate) const V3_TECH_HISTOGRAM_WEIGHT: f64 = 12.0;
+pub(crate) const V3_TECH_MACD_DIRECTION_WEIGHT: f64 = 8.0;
+pub(crate) const V3_TECH_RSI_WEIGHT: f64 = 25.0;
+pub(crate) const V3_TECH_VOLUME_WEIGHT: f64 = 10.0;
+pub(crate) const V3_TECH_RSI_SLOPE_BOUND: f64 = 2.0;
+pub(crate) const V3_TECH_VOLUME_RATIO_LOW: f64 = 70.0;
+pub(crate) const V3_TECH_VOLUME_RATIO_HIGH: f64 = 150.0;
+pub(crate) const V3_TECHNICALS_FULL_WEIGHT: f64 = 100.0;
 
 const V3_FORECAST_UPSIDE_LOWER_BPS: f64 = -2_000.0;
 const V3_FORECAST_UPSIDE_UPPER_BPS: f64 = 5_000.0;
@@ -327,13 +327,29 @@ pub fn score_forecast_v3(
     row: &CandidateRow,
     dcf: Option<&DcfAnalysis>,
 ) -> (Option<i32>, Vec<String>) {
+    score_forecast_v3_with(
+        row,
+        dcf,
+        preferred_forecast_fair_value_cents(row),
+        target_analyst_count(row),
+    )
+}
+
+/// [`score_forecast_v3`] with an explicit Street target and its analyst count.
+/// The headless Android path passes Kotlin's `preferredForecastFairValueCents`
+/// (clamped weighted fair ?: external fair) and `targetAnalystCount`
+/// (weightedAnalystCount ?: analystOpinionCount); desktop keeps its own inputs.
+pub fn score_forecast_v3_with(
+    row: &CandidateRow,
+    dcf: Option<&DcfAnalysis>,
+    target_fair: Option<i64>,
+    target_count: Option<u32>,
+) -> (Option<i32>, Vec<String>) {
     let mut acc = EvidenceAccumulator::new(V3_FORECAST_FULL_WEIGHT);
     let mut sufficiency = Vec::new();
     let mut reliable = 0.0_f64;
     let mut has_anchor = false;
 
-    let target_fair = preferred_forecast_fair_value_cents(row);
-    let target_count = target_analyst_count(row);
     let recommendation_count = recommendation_analyst_count(row);
     let broadest = [target_count, recommendation_count]
         .into_iter()
@@ -708,6 +724,255 @@ pub fn setup_from_v3_composite(composite: i32) -> (i32, &'static str) {
     };
     (composite, label)
 }
+
+/// Kotlin `Double.roundToInt()` (Math.round: half rounds toward +inf).
+pub fn kotlin_round(x: f64) -> i32 {
+    (x + 0.5).floor() as i32
+}
+
+struct AndroidAcc {
+    norm: f64,
+    sum: f64,
+    evidence: f64,
+    silent: f64,
+    signals: Vec<String>,
+}
+
+impl AndroidAcc {
+    fn new(norm: f64) -> Self {
+        Self {
+            norm,
+            sum: 0.0,
+            evidence: 0.0,
+            silent: 0.0,
+            signals: vec![],
+        }
+    }
+    fn add(&mut self, w: f64, ramp: f64, label: &str) {
+        let c = ramp.clamp(-1.0, 1.0);
+        self.sum += w * c;
+        self.evidence += w;
+        let suf = if c >= 0.5 {
+            "++"
+        } else if c > 0.0 {
+            "+"
+        } else if c >= -0.5 {
+            "-"
+        } else {
+            "--"
+        };
+        self.signals.push(format!("{label}{suf}"));
+    }
+    fn flag(&mut self, label: &str) {
+        self.signals.push(label.to_string());
+    }
+    fn exempt(&mut self, w: f64) {
+        self.norm = (self.norm - w).max(1.0);
+    }
+    fn silence(&mut self, w: f64) {
+        self.silent += w;
+    }
+    fn flag_coverage_gap(&mut self) {
+        if self.norm - self.evidence - self.silent > ANDROID_COVERAGE_GAP_IDLE_WEIGHT {
+            self.flag("Fund∅ coverage");
+        }
+    }
+    fn score(&self) -> Option<i32> {
+        if self.evidence == 0.0 {
+            return None;
+        }
+        Some(kotlin_round(
+            ((self.sum / self.norm) * 100.0).clamp(-100.0, 100.0),
+        ))
+    }
+}
+
+fn android_cash_size(row: &CandidateRow) -> Option<i64> {
+    if let Some(mc) = row.market_cap_dollars.filter(|m| *m > 0) {
+        return Some(mc as i64);
+    }
+    let shares = row.shares_outstanding.filter(|s| *s > 0)?;
+    if row.market_price_cents <= 0 {
+        return None;
+    }
+    let cap = shares as f64 * row.market_price_cents as f64 / 100.0;
+    (cap.is_finite() && cap > 0.0).then(|| cap.round() as i64)
+}
+
+fn android_cash_yield_bps(cash: i64, size: i64) -> Option<i32> {
+    if size <= 0 {
+        return None;
+    }
+    let bps = cash as f64 / size as f64 * 10_000.0;
+    bps.is_finite()
+        .then(|| (bps.clamp(i32::MIN as f64, i32::MAX as f64) + 0.5).floor() as i32)
+}
+
+/// `class` is `None` when the symbol has no fundamentals snapshot at all
+/// (Kotlin: `detail.fundamentals == null` → absent bucket).
+pub fn score_fundamentals_v3_android(
+    row: &CandidateRow,
+    class: Option<BusinessClass>,
+) -> (Option<i32>, Vec<String>) {
+    let Some(class) = class else {
+        return (None, vec![]);
+    };
+    let mut acc = AndroidAcc::new(V3_FUNDAMENTALS_FULL_WEIGHT);
+    let operating = class == BusinessClass::OperatingNonFinancial;
+    if !operating {
+        acc.exempt(V3_FUND_FCF_WEIGHT);
+        acc.exempt(V3_FUND_CASH_QUALITY_WEIGHT);
+    }
+
+    // Cash-flow vote.
+    let mut yield_voted = false;
+    if !operating {
+        if row.free_cash_flow_dollars.is_some() || row.operating_cash_flow_dollars.is_some() {
+            acc.flag(match class {
+                BusinessClass::FinancialServices => "FCFy∅ financial",
+                BusinessClass::Unclassified => "FCFy∅ unknown",
+                _ => "FCFy∅ ineligible",
+            });
+        }
+    } else {
+        let size = android_cash_size(row);
+        match (row.free_cash_flow_dollars, size) {
+            (Some(fcf), Some(size)) => {
+                if let Some(bps) = android_cash_yield_bps(fcf, size) {
+                    let y = bps as f64 / 10_000.0;
+                    acc.add(
+                        V3_FUND_FCF_WEIGHT,
+                        smooth_ramp(y, V3_FUND_FCF_YIELD_LOWER, V3_FUND_FCF_YIELD_UPPER),
+                        "FCFy",
+                    );
+                }
+                yield_voted = true;
+            }
+            (Some(_), None) => {}
+            (None, _) => {
+                if let (Some(ocf), Some(size)) = (row.operating_cash_flow_dollars, size) {
+                    if let Some(bps) = android_cash_yield_bps(ocf, size) {
+                        let y = bps as f64 / 10_000.0;
+                        acc.add(
+                            V3_FUND_OCF_FALLBACK_WEIGHT,
+                            smooth_ramp(y, V3_FUND_OCF_YIELD_LOWER, V3_FUND_OCF_YIELD_UPPER),
+                            "OCF",
+                        );
+                    }
+                    acc.flag("OCFy∅ unmeasured");
+                }
+            }
+        }
+    }
+
+    if let Some(roe) = row.return_on_equity_bps {
+        acc.add(
+            V3_FUND_ROE_WEIGHT,
+            smooth_ramp(roe as f64, V3_FUND_ROE_LOWER_BPS, V3_FUND_ROE_UPPER_BPS),
+            "ROE",
+        );
+    }
+    if let Some(g) = row.earnings_growth_bps {
+        acc.add(
+            V3_FUND_GROWTH_WEIGHT,
+            smooth_ramp(g as f64, V3_FUND_GROWTH_LOWER_BPS, V3_FUND_GROWTH_UPPER_BPS),
+            "Growth",
+        );
+    }
+    if let Some(de) = row.debt_to_equity_hundredths {
+        acc.add(
+            V3_FUND_BALANCE_WEIGHT,
+            -smooth_ramp(de as f64, V3_FUND_BALANCE_DE_LOW, V3_FUND_BALANCE_DE_HIGH),
+            "D/E",
+        );
+    } else if let (Some(cash), Some(debt)) = (row.total_cash_dollars, row.total_debt_dollars) {
+        acc.add(
+            V3_FUND_BALANCE_WEIGHT,
+            if cash >= debt { 1.0 } else { -0.5 },
+            "Bal",
+        );
+    }
+
+    let mut ramps = Vec::new();
+    if let Some(pe) = row.forward_pe_hundredths.filter(|v| *v > 0) {
+        ramps.push(-smooth_ramp(pe as f64, V3_FUND_PE_LOW, V3_FUND_PE_HIGH));
+    }
+    if let Some(ev) = row.enterprise_to_ebitda_hundredths.filter(|v| *v > 0) {
+        ramps.push(-smooth_ramp(
+            ev as f64,
+            V3_FUND_EV_EBITDA_LOW,
+            V3_FUND_EV_EBITDA_HIGH,
+        ));
+    }
+    if let Some(pb) = row.price_to_book_hundredths.filter(|v| *v > 0) {
+        ramps.push(-smooth_ramp(pb as f64, V3_FUND_PB_LOW, V3_FUND_PB_HIGH));
+    }
+    if !ramps.is_empty() {
+        let blended = ramps.iter().sum::<f64>() / ramps.len() as f64;
+        acc.add(
+            V3_FUND_VALUATION_WEIGHT * (ramps.len() as f64 / 3.0),
+            blended,
+            "Mult",
+        );
+    }
+
+    // Cash conversion.
+    if yield_voted {
+        acc.silence(V3_FUND_CASH_QUALITY_WEIGHT);
+    } else if operating {
+        if let (Some(fcf), Some(ocf)) =
+            (row.free_cash_flow_dollars, row.operating_cash_flow_dollars)
+        {
+            if ocf > 0 {
+                let conv = fcf as f64 / ocf as f64;
+                if conv.is_finite() {
+                    acc.add(
+                        V3_FUND_CASH_QUALITY_WEIGHT,
+                        smooth_ramp(conv, 0.0, 1.0),
+                        "Conv",
+                    );
+                }
+            }
+        }
+    }
+    acc.flag_coverage_gap();
+    (acc.score(), acc.signals)
+}
+
+/// Android `compositeScoreFor` (three buckets, regime off). Same formula as
+/// [`composite_score_v3`] but rounds like Kotlin `roundToInt` (half up), which
+/// differs from `f64::round` on negative `.5` values.
+pub fn composite_score_v3_android(
+    fund: Option<i32>,
+    tech: Option<i32>,
+    forecast: Option<i32>,
+    beta_millis: Option<i32>,
+) -> i32 {
+    let buckets = [fund, tech, forecast];
+    let coverage = buckets.iter().filter(|x| x.is_some()).count();
+    if coverage == 0 {
+        return 0;
+    }
+    let sum: i32 = buckets.iter().map(|x| x.unwrap_or(0)).sum();
+    let mean = sum as f64 / coverage as f64;
+    let bonus = V3_COMPOSITE_COVERAGE_BONUS * (coverage as f64 - 1.0);
+    let base = (mean + bonus).clamp(-V3_COMPOSITE_BOUND as f64, V3_COMPOSITE_BOUND as f64);
+    kotlin_round(base - beta_risk_haircut(beta_millis))
+        .clamp(-V3_COMPOSITE_BOUND, V3_COMPOSITE_BOUND)
+}
+
+// ── Android-faithful V3 fundamentals (headless "android" semantics) ──────────
+//
+// Port of OpportunityEngine.kt `aggressiveV3FundamentalsScore` with its class
+// exemptions, cash-yield vote, conversion silencing and coverage flag. Tauri
+// keeps `score_fundamentals_v3`; only the headless Android-semantics path calls
+// this one.
+
+use crate::dcf_model::BusinessClass;
+
+const V3_FUND_OCF_YIELD_LOWER: f64 = 0.0;
+const V3_FUND_OCF_YIELD_UPPER: f64 = 0.10;
+const ANDROID_COVERAGE_GAP_IDLE_WEIGHT: f64 = 0.5;
 
 #[cfg(test)]
 mod tests {
