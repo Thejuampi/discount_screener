@@ -24,6 +24,7 @@ mod fibonacci;
 pub mod forward_earnings_multiple;
 #[cfg(test)]
 mod forward_earnings_multiple_contract;
+pub mod headless;
 mod index_estimates;
 pub mod issuer_identity;
 mod launch_profile;
@@ -37,6 +38,7 @@ mod quant_lens;
 mod quote_summary;
 mod regime;
 mod risk;
+#[cfg(feature = "gui")]
 mod scalp_ws;
 mod scalping;
 mod schwab;
@@ -48,6 +50,7 @@ mod smc;
 pub mod source_continuity;
 mod state;
 mod stooq;
+mod tauri_compat;
 mod ticker_search;
 #[cfg(test)]
 mod valuation_baseline;
@@ -70,12 +73,15 @@ mod valuation_high_signal;
 mod valuation_probes;
 mod yahoo_session;
 
+#[cfg(feature = "gui")]
 use state::AppState;
+#[cfg(feature = "gui")]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
+#[cfg(feature = "gui")]
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 #[cfg(all(debug_assertions, target_os = "windows"))]
@@ -93,12 +99,14 @@ fn enable_local_webview_debugging() {
     eprintln!("discount_screener: local WebView debug endpoint on 127.0.0.1:9222");
 }
 
+#[cfg(feature = "gui")]
 /// Debug-only flag set by native e2e runners (`test:e2e:native:*`).
 /// Must never be true during normal `cargo test` / `npm test`.
 fn is_native_e2e() -> bool {
     cfg!(debug_assertions) && std::env::var("DS_NATIVE_E2E").as_deref() == Ok("1")
 }
 
+#[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(all(debug_assertions, target_os = "windows"))]
@@ -335,6 +343,7 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+#[cfg(feature = "gui")]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();

@@ -15,16 +15,38 @@ members = ["valuation-core"]
 name = "discount_screener_windows_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# `gui` = the Tauri desktop shell (needs webkit2gtk/gtk on Linux). Disable it
+# (`--no-default-features`) to build the headless V3 daemon/CLI on a server.
+default = ["gui"]
+gui = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-shell",
+    "dep:tauri-plugin-autostart",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-notification",
+]
+
+[[bin]]
+name = "discount-screener-windows"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "vantage-headless"
+path = "src/bin/vantage_headless.rs"
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
 valuation-core = { path = "valuation-core" }
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-shell = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-single-instance = "2"
-tauri-plugin-notification = "2"
+tauri = { version = "2", features = ["tray-icon"], optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-autostart = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-notification = { version = "2", optional = true }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }

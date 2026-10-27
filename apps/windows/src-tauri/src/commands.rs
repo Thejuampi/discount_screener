@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::tauri_compat::State;
 use serde::Serialize;
-use tauri::State;
 
 use crate::analyst_forecasts::{AnalystForecastPanel, ForecastPricePoint, TipRanksSettingsStatus};
 use crate::db::{BacktestResult, HistorySnapshot, SnapshotInsert};
@@ -165,12 +165,12 @@ pub struct UniverseProfileStatus {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_app_version() -> String {
     env!("DS_APP_VERSION").to_string()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
     use std::sync::atomic::Ordering;
 
@@ -190,7 +190,7 @@ pub fn get_opportunities(state: State<AppState>) -> Vec<OpportunityRow> {
     build_opportunity_rows(&state.screener, apply_regime, regime_snapshot)
 }
 
-fn build_opportunity_rows(
+pub(crate) fn build_opportunity_rows(
     screener: &std::sync::Mutex<crate::engine::ScreenerState>,
     apply_regime: bool,
     regime_snapshot: Option<crate::regime::MarketRegime>,
@@ -224,22 +224,22 @@ fn build_opportunity_rows_with_hook<F: FnOnce()>(
     )
 }
 
-struct OpportunityProjection {
-    model: ScoringModel,
-    rows: Vec<OpportunityProjectionInput>,
+pub(crate) struct OpportunityProjection {
+    pub(crate) model: ScoringModel,
+    pub(crate) rows: Vec<OpportunityProjectionInput>,
 }
 
-struct OpportunityProjectionInput {
-    row: CandidateRow,
-    daily: Option<crate::engine::ChartSummary>,
-    weekly: Option<crate::engine::ChartSummary>,
-    hourly: Option<crate::engine::ChartSummary>,
-    daily_candles: Vec<HistoricalCandle>,
-    dcf_analysis: Option<crate::dcf_model::DcfAnalysis>,
-    crypto_setup: Option<(i32, &'static str)>,
+pub(crate) struct OpportunityProjectionInput {
+    pub(crate) row: CandidateRow,
+    pub(crate) daily: Option<crate::engine::ChartSummary>,
+    pub(crate) weekly: Option<crate::engine::ChartSummary>,
+    pub(crate) hourly: Option<crate::engine::ChartSummary>,
+    pub(crate) daily_candles: Vec<HistoricalCandle>,
+    pub(crate) dcf_analysis: Option<crate::dcf_model::DcfAnalysis>,
+    pub(crate) crypto_setup: Option<(i32, &'static str)>,
 }
 
-fn capture_opportunity_projection(
+pub(crate) fn capture_opportunity_projection(
     screener: &std::sync::Mutex<crate::engine::ScreenerState>,
 ) -> OpportunityProjection {
     let mut screener = screener.lock().unwrap();
@@ -275,7 +275,7 @@ fn capture_opportunity_projection(
     OpportunityProjection { model, rows }
 }
 
-fn project_opportunity_rows<F: FnOnce()>(
+pub(crate) fn project_opportunity_rows<F: FnOnce()>(
     projection: OpportunityProjection,
     apply_regime: bool,
     policy_long: Option<crate::regime::RegimeScoringPolicy>,
@@ -628,7 +628,7 @@ fn project_opportunity_rows<F: FnOnce()>(
 }
 
 #[cfg(test)]
-mod opportunity_projection_tests {
+pub(crate) mod opportunity_projection_tests {
     use super::*;
     use crate::engine::{
         ExternalValuationSignal, FundamentalSnapshot, MarketSnapshot, ScreenerState,
@@ -636,7 +636,7 @@ mod opportunity_projection_tests {
     use crate::regime::MarketRegime;
     use std::sync::{mpsc, Arc, Mutex};
 
-    fn fixture_state() -> Arc<Mutex<ScreenerState>> {
+    pub(crate) fn fixture_state() -> Arc<Mutex<ScreenerState>> {
         let mut state = ScreenerState::new();
         for (symbol, price, intrinsic, sector) in [
             ("AAPL", 20_000, 27_000, "Technology"),
@@ -882,13 +882,13 @@ mod opportunity_projection_tests {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_regime_scoring_enabled(state: State<AppState>) -> bool {
     use std::sync::atomic::Ordering;
     state.apply_regime_scoring.load(Ordering::Relaxed)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool {
     use std::sync::atomic::Ordering;
     state.apply_regime_scoring.store(enabled, Ordering::Relaxed);
@@ -899,7 +899,7 @@ pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool
     enabled
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<SymbolDetail> {
     let symbol = symbol.trim().to_uppercase();
     {
@@ -918,7 +918,7 @@ pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<Symbo
 /// Deterministic native-E2E setup. This is inert in release builds and unless
 /// the dedicated runner opts in; the assertion path itself still uses the real
 /// `get_symbol_detail` command and the normal DetailPanel renderer.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn debug_seed_cof_native_e2e(state: State<AppState>) -> Result<SymbolDetail, String> {
     if !cfg!(debug_assertions) || std::env::var("DS_NATIVE_E2E").as_deref() != Ok("1") {
         return Err("native E2E fixture seeding is disabled".into());
@@ -1580,7 +1580,7 @@ fn analyst_price_history(state: &AppState, symbol: &str) -> Vec<ForecastPricePoi
 }
 
 /// Cache-only detail read. Never spends TipRanks quota.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub async fn get_analyst_forecasts(
     symbol: String,
     state: State<'_, AppState>,
@@ -1589,7 +1589,7 @@ pub async fn get_analyst_forecasts(
     let eligible = !is_crypto(&symbol) && !is_etf(&symbol);
     let price_history = analyst_price_history(&state, &symbol);
     let service = Arc::clone(&state.analyst_forecasts);
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::tauri_compat::async_runtime::spawn_blocking(move || {
         if eligible {
             service.get(&symbol, price_history)
         } else {
@@ -1601,7 +1601,7 @@ pub async fn get_analyst_forecasts(
 }
 
 /// Explicit user load/refresh action. May spend one counted TipRanks call.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub async fn load_analyst_forecasts(
     symbol: String,
     state: State<'_, AppState>,
@@ -1610,7 +1610,7 @@ pub async fn load_analyst_forecasts(
     let eligible = !is_crypto(&symbol) && !is_etf(&symbol);
     let price_history = analyst_price_history(&state, &symbol);
     let service = Arc::clone(&state.analyst_forecasts);
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::tauri_compat::async_runtime::spawn_blocking(move || {
         if eligible {
             service.load(&symbol, price_history)
         } else {
@@ -1621,12 +1621,12 @@ pub async fn load_analyst_forecasts(
     .map_err(|error| format!("join TipRanks forecast load: {error}"))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn tipranks_settings_status(state: State<AppState>) -> Result<TipRanksSettingsStatus, String> {
     state.analyst_forecasts.settings_status()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn tipranks_save_key(
     api_key: String,
     state: State<AppState>,
@@ -1635,27 +1635,27 @@ pub fn tipranks_save_key(
     state.analyst_forecasts.settings_status()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn tipranks_delete_key(state: State<AppState>) -> Result<TipRanksSettingsStatus, String> {
     state.analyst_forecasts.delete_key()?;
     state.analyst_forecasts.settings_status()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub async fn tipranks_test_key(state: State<'_, AppState>) -> Result<AnalystForecastPanel, String> {
     let service = Arc::clone(&state.analyst_forecasts);
-    tauri::async_runtime::spawn_blocking(move || service.test_connection("AAPL"))
+    crate::tauri_compat::async_runtime::spawn_blocking(move || service.test_connection("AAPL"))
         .await
         .map_err(|error| format!("join TipRanks credential test: {error}"))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_alerts(state: State<AppState>) -> Vec<AlertEvent> {
     let screener = state.screener.lock().unwrap();
     screener.alerts.iter().rev().take(50).cloned().collect()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_feed_status(state: State<AppState>) -> FeedStatusResponse {
     let status = state.feed_status.lock().unwrap();
     let symbols_total = state.active_symbols.lock().unwrap().len();
@@ -1670,7 +1670,7 @@ pub fn get_feed_status(state: State<AppState>) -> FeedStatusResponse {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn list_universe_profiles() -> Vec<UniverseProfileInfo> {
     profile_definitions()
         .iter()
@@ -1692,12 +1692,12 @@ pub fn list_universe_profiles() -> Vec<UniverseProfileInfo> {
         .collect()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_universe_profile(state: State<AppState>) -> UniverseProfileStatus {
     universe_profile_status(&state)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn set_universe_profile(
     name: String,
     state: State<AppState>,
@@ -1723,7 +1723,7 @@ fn universe_profile_status(state: &AppState) -> UniverseProfileStatus {
 ///
 /// Idempotent by **canonical symbol set** when profile name matches: same membership
 /// set does not restart workers (order changes alone are ignored).
-fn apply_universe_profile(raw_name: &str, state: &AppState) -> Result<(), String> {
+pub(crate) fn apply_universe_profile(raw_name: &str, state: &AppState) -> Result<(), String> {
     with_profile_apply_gate(&state.profile_apply_gate, || {
         apply_universe_profile_serial(raw_name, state)
     })
@@ -1866,7 +1866,7 @@ fn ingest_fetch_result(
     RefreshOutcome { visible, enriched }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn refresh_symbol(symbol: String, state: State<AppState>) -> Result<String, String> {
     let generation = state.feed_generation.load(Ordering::SeqCst);
     let client = YahooClient::new().map_err(|e| e.to_string())?;
@@ -1884,19 +1884,19 @@ pub fn refresh_symbol(symbol: String, state: State<AppState>) -> Result<String, 
     Ok(symbol)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_scoring_model(state: State<AppState>) -> String {
     state.screener.lock().unwrap().scoring_model.clone()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn set_scoring_model(model: String, state: State<AppState>) -> Result<String, String> {
     let normalized = ScoringModel::parse(&model).as_str().to_string();
     state.screener.lock().unwrap().scoring_model = normalized.clone();
     Ok(normalized)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_index_estimates(state: State<AppState>) -> crate::index_estimates::IndexEstimatesReport {
     let profile_name = state.active_profile.lock().unwrap().clone();
     let screener = state.screener.lock().unwrap();
@@ -1917,7 +1917,7 @@ pub fn get_index_estimates(state: State<AppState>) -> crate::index_estimates::In
     crate::index_estimates::compute(&rows, &selected_dcf, &profile_name, now)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_quant_lens(
     symbol: String,
     state: State<AppState>,
@@ -1964,7 +1964,7 @@ pub fn get_quant_lens(
 
 /// Cache-only ValuationDossierView for the additive market-reference lane (1C).
 /// Never triggers providers, FCFF, or ranking mutation.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_valuation_dossier(
     symbol: String,
     state: State<AppState>,
@@ -1978,7 +1978,7 @@ pub fn get_valuation_dossier(
 
 /// Seed AMZN-shaped identity + fixture analyst-method import for native 1C E2E.
 /// Inert unless debug + DS_NATIVE_E2E=1.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn debug_seed_amzn_analyst_method_e2e(
     state: State<AppState>,
 ) -> Result<crate::valuation_dossier_view::ValuationDossierView, String> {
@@ -2034,7 +2034,7 @@ pub(crate) fn seed_amzn_analyst_method_e2e(
 /// `qa` profile and never changes universe membership.  Missing DCFs are
 /// computed sequentially through the same Detail route, so the audit cannot
 /// create a Yahoo burst or silently compare stale/partial models.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub async fn run_qa_valuation_divergence_audit(
     state: State<'_, AppState>,
 ) -> Result<crate::valuation_divergence::ValuationDivergenceAudit, String> {
@@ -2057,7 +2057,7 @@ pub async fn run_qa_valuation_divergence_audit(
     let feed_gen = state.feed_generation_arc();
     let generation = feed_gen.load(Ordering::SeqCst);
     let valuation_yahoo = state.valuation_yahoo.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::tauri_compat::async_runtime::spawn_blocking(move || {
         for symbol in &symbols {
             let (needs_valuation, mut audit_context) = {
                 let mut s = screener.lock().unwrap();
@@ -2146,7 +2146,7 @@ pub async fn run_qa_valuation_divergence_audit(
 }
 
 /// Local + optional remote Yahoo search (Android ticker/company search parity).
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn search_tickers(
     query: String,
     limit: Option<usize>,
@@ -2240,7 +2240,7 @@ fn fetch_remote_search_quotes(
     fetched
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn resolve_ticker_search_submit(
     query: String,
     suggestions: Vec<TickerSearchResult>,
@@ -2251,7 +2251,7 @@ pub fn resolve_ticker_search_submit(
 /// One-shot load for ad-hoc detail. Fast path (quote + daily) returns ASAP;
 /// multi-TF charts continue on a background thread so the detail panel is usable
 /// within ~1 request instead of waiting on 4 candle ranges.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn ensure_symbol_loaded(symbol: String, state: State<AppState>) -> Result<String, String> {
     ensure_symbol_loaded_inner(symbol, &state)
 }
@@ -2398,7 +2398,7 @@ pub(crate) fn ensure_symbol_loaded_inner(
     Ok(symbol)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_candles(
     symbol: String,
     range: String,
@@ -4278,7 +4278,7 @@ fn refresh_one_symbol(
     generation_is_current(active_generation, generation).then_some(outcome)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn start_feed(state: State<AppState>) -> Result<(), String> {
     with_profile_apply_gate(&state.profile_apply_gate, || {
         let status = state.feed_status.lock().unwrap();
@@ -5028,7 +5028,7 @@ fn spawn_feed_workers(
 
 // ── History / backtest commands ───────────────────────────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_symbol_history(
     symbol: String,
     days: i64,
@@ -5037,7 +5037,7 @@ pub fn get_symbol_history(
     state.db.symbol_history(&symbol, days)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_backtest(
     decision: String,
     days_ago: i64,
@@ -5051,7 +5051,7 @@ pub struct HistoryStatus {
     pub snapshot_count: i64,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_history_status(state: State<AppState>) -> Result<HistoryStatus, String> {
     Ok(HistoryStatus {
         snapshot_count: state.db.snapshot_count()?,
@@ -5086,13 +5086,15 @@ fn confidence_label(c: ConfidenceBand) -> &'static str {
 
 // ── Autostart / tray commands ─────────────────────────────────────────────────
 
-#[tauri::command]
+#[cfg(feature = "gui")]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[cfg(feature = "gui")]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
@@ -5103,7 +5105,8 @@ pub fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(),
     }
 }
 
-#[tauri::command]
+#[cfg(feature = "gui")]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
@@ -5118,7 +5121,7 @@ pub struct CongressOverview {
     pub top_politicians: Vec<crate::db::PoliticianActivityRow>,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_congress_overview(
     days: Option<i64>,
     state: State<AppState>,
@@ -5132,7 +5135,7 @@ pub fn get_congress_overview(
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_congress_trades_for_symbol(
     symbol: String,
     limit: Option<i64>,
@@ -5156,7 +5159,7 @@ pub struct CongressBacktestResult {
 ///
 /// This is long-running (~3-10 min depending on # of unique symbols). UI should
 /// show progress and run it as a background operation.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn compute_congress_metrics(state: State<AppState>) -> Result<CongressBacktestResult, String> {
     use crate::congress_scoring::*;
 
@@ -5231,7 +5234,7 @@ pub fn compute_congress_metrics(state: State<AppState>) -> Result<CongressBackte
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_top_politicians_ranked(
     sort_key: String,
     limit: Option<i64>,
@@ -5242,7 +5245,7 @@ pub fn get_top_politicians_ranked(
         .top_politicians_with_metrics(&sort_key, limit.unwrap_or(50))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_politician_detail(
     politician_id: i64,
     state: State<AppState>,
@@ -5260,7 +5263,7 @@ pub fn get_politician_detail(
 
 /// Start a multi-year sync in a background thread. Returns immediately.
 /// Frontend should poll `get_congress_sync_progress` for live status.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn sync_congress_house(
     years: Vec<u32>,
     max_per_year: Option<usize>,
@@ -5383,7 +5386,7 @@ pub fn sync_congress_house(
 /// Compute crypto cycle metrics for a given symbol.
 /// Combines: technical score (existing), drawdown from ATH, halving cycle phase,
 /// Fear & Greed index sentiment. Returns the full breakdown for the UI.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_crypto_metrics(
     symbol: String,
     state: State<AppState>,
@@ -5435,7 +5438,7 @@ pub fn get_crypto_metrics(
 }
 
 /// Get current sync progress for the UI to poll.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_congress_sync_progress(
     state: State<AppState>,
 ) -> Result<crate::state::CongressSyncProgress, String> {
@@ -5445,12 +5448,12 @@ pub fn get_congress_sync_progress(
 
 // ── Portfolio / Advisor commands ──────────────────────────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn portfolio_list(state: State<AppState>) -> Result<Vec<crate::db::PortfolioPosition>, String> {
     state.db.portfolio_list()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn portfolio_add(
     symbol: String,
     quantity: f64,
@@ -5474,7 +5477,7 @@ pub fn portfolio_add(
         .portfolio_add(&sym, quantity, avg_cost_cents, opened_at, notes)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn portfolio_update(
     id: i64,
     quantity: f64,
@@ -5510,7 +5513,7 @@ pub struct PortfolioImportResult {
 
 /// Bulk import: upsert each position keyed by symbol.
 /// The frontend has already aggregated buy/sell transactions into net positions.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn portfolio_import(
     positions: Vec<ImportPosition>,
     state: State<AppState>,
@@ -5541,7 +5544,7 @@ pub fn portfolio_import(
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn portfolio_replace(
     positions: Vec<ImportPosition>,
     state: State<AppState>,
@@ -5567,7 +5570,7 @@ pub fn portfolio_replace(
 // ── Crypto Scalping ─────────────────────────────────────────────────────────────
 
 /// Candles for the scalping chart (Coinbase, single timeframe).
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_scalp_candles(
     product: String,
     timeframe: String,
@@ -5576,7 +5579,7 @@ pub fn get_scalp_candles(
 }
 
 /// Set the product the real-time WebSocket feed should stream ticks for.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn scalp_ws_subscribe(product: String, state: State<AppState>) -> Result<(), String> {
     state
         .scalp_ws_tx
@@ -5587,7 +5590,7 @@ pub fn scalp_ws_subscribe(product: String, state: State<AppState>) -> Result<(),
 /// Full multi-timeframe scalping analysis: per-TF indicators + score + signal.
 /// `rr` is the reward:risk target (default 1.5); `fee_pct` is the per-side fee in
 /// percent (default 0.6) so take-profit economics are net of round-trip fees.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_scalp_analysis(
     product: String,
     rr: Option<f64>,
@@ -5615,7 +5618,7 @@ pub struct EmailConfigView {
     pub last_digest_date: Option<String>,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn email_config_get(state: State<AppState>) -> Result<EmailConfigView, String> {
     let c = state.db.email_config_get()?;
     Ok(EmailConfigView {
@@ -5638,7 +5641,7 @@ pub fn email_config_get(state: State<AppState>) -> Result<EmailConfigView, Strin
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn email_config_set(
     smtp_host: String,
     smtp_port: i64,
@@ -5669,7 +5672,7 @@ pub fn email_config_set(
 }
 
 /// Send an email using the stored SMTP config. Content is composed by the UI.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn email_send(
     subject: String,
     html: String,
@@ -5680,7 +5683,7 @@ pub fn email_send(
     crate::email::send(&cfg, &subject, &html, &text)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn email_mark_digest_sent(date: String, state: State<AppState>) -> Result<(), String> {
     state.db.email_mark_digest_sent(date.trim())
 }
@@ -5697,7 +5700,7 @@ pub struct SchwabStatus {
     pub callback: Option<String>,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn schwab_set_credentials(
     app_key: String,
     secret: String,
@@ -5713,7 +5716,7 @@ pub fn schwab_set_credentials(
     state.db.schwab_set_credentials(k, s, c)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn schwab_auth_url(state: State<AppState>) -> Result<String, String> {
     let auth = state.db.schwab_auth_get()?.ok_or("Schwab no configurado")?;
     match (auth.app_key, auth.callback) {
@@ -5722,17 +5725,17 @@ pub fn schwab_auth_url(state: State<AppState>) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn schwab_complete_auth(redirect_url: String, state: State<AppState>) -> Result<(), String> {
     crate::schwab_api::complete_auth(&state.db, redirect_url.trim()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn schwab_disconnect(state: State<AppState>) -> Result<(), String> {
     state.db.schwab_clear()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn schwab_status(state: State<AppState>) -> Result<SchwabStatus, String> {
     let auth = state.db.schwab_auth_get()?;
     let now = std::time::SystemTime::now()
@@ -5781,7 +5784,7 @@ pub struct PriceProvenance {
 
 /// Cross-check a symbol's price across independent sources so a single bad/stale
 /// feed can't silently poison the signal. On-demand (used by the detail panel).
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_price_provenance(
     symbol: String,
     state: State<AppState>,
@@ -5840,12 +5843,12 @@ pub fn get_price_provenance(
 
 // ── Investment journal ────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn journal_list(state: State<AppState>) -> Result<Vec<crate::db::JournalEntry>, String> {
     state.db.journal_list()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn journal_add(
     symbol: String,
     action: String,
@@ -5873,7 +5876,7 @@ pub fn journal_add(
     )
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn journal_close(
     id: i64,
     outcome: Option<String>,
@@ -5887,7 +5890,7 @@ pub fn journal_close(
     )
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn journal_delete(id: i64, state: State<AppState>) -> Result<(), String> {
     state.db.journal_delete(id)
 }
@@ -5938,7 +5941,7 @@ where
 
 /// Resolve current prices for arbitrary symbols. Read live screener prices first.
 /// Batch Yahoo quotes cover multiple holdings outside the active universe.
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub async fn get_quote_prices(
     symbols: Vec<String>,
     state: State<'_, AppState>,
@@ -5946,55 +5949,57 @@ pub async fn get_quote_prices(
     // Run the (blocking) cache read + network fallback on a worker thread so the
     // UI thread never stalls while custom holdings resolve their prices.
     let screener = state.screener.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<HashMap<String, i64>, String> {
-        let mut out: HashMap<String, i64> = HashMap::new();
-        let mut missing: Vec<String> = Vec::new();
-        {
-            let s = screener.lock().map_err(|_| "screener lock")?;
-            for sym in symbols {
-                let key = sym.trim().to_uppercase();
-                if let Some(snap) = s.snapshots.get(&key) {
-                    if snap.market_price_cents > 0 {
-                        out.insert(key, snap.market_price_cents);
-                        continue;
+    crate::tauri_compat::async_runtime::spawn_blocking(
+        move || -> Result<HashMap<String, i64>, String> {
+            let mut out: HashMap<String, i64> = HashMap::new();
+            let mut missing: Vec<String> = Vec::new();
+            {
+                let s = screener.lock().map_err(|_| "screener lock")?;
+                for sym in symbols {
+                    let key = sym.trim().to_uppercase();
+                    if let Some(snap) = s.snapshots.get(&key) {
+                        if snap.market_price_cents > 0 {
+                            out.insert(key, snap.market_price_cents);
+                            continue;
+                        }
                     }
+                    missing.push(key);
                 }
-                missing.push(key);
             }
-        }
-        if !missing.is_empty() {
-            let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
-            out.extend(resolve_missing_portfolio_prices(
-                missing,
-                |symbols| {
-                    client
-                        .fetch_quotes(symbols)
-                        .map(|result| {
-                            result
-                                .quotes
-                                .into_iter()
-                                .map(|(symbol, quote)| (symbol, quote.market_price_cents))
-                                .collect()
-                        })
-                        .map_err(|error| error.to_string())
-                },
-                |symbol| {
-                    let price = client
-                        .fetch_candles(symbol, "5d", "1d")
-                        .ok()
-                        .and_then(|candles| candles.last().map(|last| last.close_cents));
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    price
-                },
-            ));
-        }
-        Ok(out)
-    })
+            if !missing.is_empty() {
+                let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
+                out.extend(resolve_missing_portfolio_prices(
+                    missing,
+                    |symbols| {
+                        client
+                            .fetch_quotes(symbols)
+                            .map(|result| {
+                                result
+                                    .quotes
+                                    .into_iter()
+                                    .map(|(symbol, quote)| (symbol, quote.market_price_cents))
+                                    .collect()
+                            })
+                            .map_err(|error| error.to_string())
+                    },
+                    |symbol| {
+                        let price = client
+                            .fetch_candles(symbol, "5d", "1d")
+                            .ok()
+                            .and_then(|candles| candles.last().map(|last| last.close_cents));
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        price
+                    },
+                ));
+            }
+            Ok(out)
+        },
+    )
     .await
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn portfolio_delete(id: i64, state: State<AppState>) -> Result<(), String> {
     state.db.portfolio_delete(id)
 }
@@ -6084,7 +6089,7 @@ mod portfolio_quote_tests {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_model_accuracy(
     horizon_days: i64,
     state: State<AppState>,
@@ -6094,7 +6099,7 @@ pub fn get_model_accuracy(
 
 // ── Schwab commands ───────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn import_schwab_pdf(
     bytes: Vec<u8>,
     filename: Option<String>,
@@ -6105,7 +6110,7 @@ pub fn import_schwab_pdf(
     Ok(report)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_schwab_report(
     symbol: String,
     state: State<AppState>,
@@ -6113,19 +6118,19 @@ pub fn get_schwab_report(
     state.db.get_schwab_report(&symbol)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn count_schwab_reports(state: State<AppState>) -> Result<i64, String> {
     state.db.count_schwab_reports()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn delete_schwab_report(symbol: String, state: State<AppState>) -> Result<(), String> {
     state.db.delete_schwab_report(&symbol)
 }
 
 // ── News commands ─────────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_news(symbol: String, state: State<AppState>) -> Result<crate::news::NewsBundle, String> {
     // Hit cache first to avoid hammering Yahoo on rapid re-selections
     if let Some(cached) = state.news_cache.get(&symbol) {
