@@ -40,6 +40,8 @@ class V31ActAdjustmentTest {
         assertEquals(-0.5, V31ActAdjustment.macdMomentum(summary(-25, 10_000))!!, 1e-12)
         assertNull(V31ActAdjustment.macdMomentum(summary(5, 0)))
         assertNull(V31ActAdjustment.macdMomentum(summary(null, 10_000)))
+        // configurable bound: -1% of price -> -0.5 at a 2% bound
+        assertEquals(-0.5, V31ActAdjustment.macdMomentum(summary(-100, 10_000), bound = 0.02)!!, 1e-12)
         assertEquals(V31ActAdjustment.adjustedScore(30, 0, -1.0), V31ActAdjustment.adjustedScore(30, 0, -5.0), 0.0)
     }
 }

@@ -2,7 +2,7 @@
 //! composite instead of the raw V3 composite S.
 //!
 //!     S_adj = S * exp(-λ_T * max(0, -T) / 100) * exp(-λ_M * max(0, -m))
-//!     m     = clip((histogram / close) / V31_M_HISTOGRAM_BOUND, -1, 1)
+//!     m     = clip((histogram / close) / V31_MOMENTUM_HISTOGRAM_BOUND, -1, 1)
 //!
 //! T = V3 technical bucket; histogram = MACD(12,26) − signal(9) of the Android Year
 //! (`1y`/`1wk`) summary, in cents. Only negative T / m penalise; ranking stays on raw S;
@@ -14,14 +14,22 @@ use crate::android_chart::AndroidChartSummary;
 pub const V31_RULE_VERSION: &str = "V3.1";
 pub const V31_LAMBDA_T: f64 = 1.5;
 pub const V31_LAMBDA_M: f64 = 0.3;
-pub const V31_M_HISTOGRAM_BOUND: f64 = 0.005;
+/// V3.1's own m bound, independent of the V3 technical histogram bound. Mirrors Kotlin
+/// `V31ActAdjustment.MOMENTUM_HISTOGRAM_BOUND`; pass another bound to `macd_momentum_with_bound`.
+pub const V31_MOMENTUM_HISTOGRAM_BOUND: f64 = 0.005;
 
 /// MACD momentum m in [-1, 1]; `None` when histogram or a positive close is missing.
 pub fn macd_momentum(summary: Option<&AndroidChartSummary>) -> Option<f64> {
+    macd_momentum_with_bound(summary, V31_MOMENTUM_HISTOGRAM_BOUND)
+}
+
+/// `macd_momentum` with an explicit bound (> 0), for sensitivity runs.
+pub fn macd_momentum_with_bound(summary: Option<&AndroidChartSummary>, bound: f64) -> Option<f64> {
+    assert!(bound > 0.0, "momentum bound must be > 0");
     let s = summary?;
     let hist = s.histogram_cents?;
     let close = s.latest_close_cents.filter(|c| *c > 0)?;
-    Some(((hist as f64 / close as f64) / V31_M_HISTOGRAM_BOUND).clamp(-1.0, 1.0))
+    Some(((hist as f64 / close as f64) / bound).clamp(-1.0, 1.0))
 }
 
 /// S_adj; a missing T or m contributes no penalty.
@@ -87,6 +95,8 @@ mod tests {
         assert_eq!(macd_momentum(Some(&sum(1000, 10_000))), Some(1.0));
         assert!((macd_momentum(Some(&sum(-25, 10_000))).unwrap() + 0.5).abs() < 1e-12);
         assert_eq!(macd_momentum(Some(&sum(5, 0))), None);
+        // configurable bound: -100/10000 = -1% of price -> -0.5 at a 2% bound
+        assert!((macd_momentum_with_bound(Some(&sum(-100, 10_000)), 0.02).unwrap() + 0.5).abs() < 1e-12);
         assert_eq!(
             adjusted_score(30, Some(0), Some(-5.0)),
             adjusted_score(30, Some(0), Some(-1.0))

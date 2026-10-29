@@ -10,3 +10,4 @@
 - Headless JSON rows carry `s_adj` and `m`; `/ranking` reports `rule_version: "V3.1"`.
   Android `ProjectedOpportunityRow` exposes `sAdj` and `macdMomentum`.
 - JVM parity diff checks the V3.1 constants on both sides and compares `sAdj`/`m` (tol 1e-9).
+- m bound is its own constant (`MOMENTUM_HISTOGRAM_BOUND` / `V31_MOMENTUM_HISTOGRAM_BOUND`, default 0.005, overridable per call), independent of `V3_TECH_HISTOGRAM_BOUND`; calibration + recommended 0.05 in the V3.1 doc.

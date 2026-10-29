@@ -50,7 +50,7 @@ def from_ranking(path):
 # V3.1 floats (S_adj, m) are compared with this absolute tolerance; decisions must match exactly.
 FLOAT_TOL = 1e-9
 FLOAT_FIELDS = ("sAdj", "m")
-V31_NAMES = ["LAMBDA_T", "LAMBDA_M", "M_HISTOGRAM_BOUND", "RULE_VERSION"]
+V31_NAMES = ["LAMBDA_T", "LAMBDA_M", "MOMENTUM_HISTOGRAM_BOUND", "RULE_VERSION"]
 
 def v31_constants():
     """V3.1 constants, Kotlin V31ActAdjustment vs Rust opportunity_v31, read from source."""

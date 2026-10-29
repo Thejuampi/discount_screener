@@ -33,9 +33,22 @@ the technical bucket already reads, in cents (rounded half-even on both sides); 
 summary's latest close.
 
 Why: the histogram is the momentum *change* (what the MACD panel shows as bearish/bullish),
-dividing by price makes it comparable across tickers, and 0.005 (0.5% of price = full strength)
-is the existing `V3_TECH_HISTOGRAM_BOUND` already used inside T, so no new tuning constant is
-introduced. ATR scaling was considered but ATR is not part of the Android summary on both sides;
+dividing by price makes it comparable across tickers. The bound is V3.1's own named constant
+(`V31ActAdjustment.MOMENTUM_HISTOGRAM_BOUND` / `V31_MOMENTUM_HISTOGRAM_BOUND`, default 0.005),
+independent of `V3_TECH_HISTOGRAM_BOUND`; both functions accept another bound for sensitivity
+runs, and `diff_headless.py` checks the defaults match.
+
+### Bound calibration (2026-10-29 snapshots, weekly bars, ranked rows)
+
+| universe | rows | p50 | p75 | p90 | p95 | p99 |
+|---|---|---|---|---|---|---|
+| sp500 | 93 | 1.81% | 2.45% | 4.08% | 4.79% | 5.67% |
+| russell | 410 | 1.55% | 2.81% | 4.19% | 5.45% | 9.34% |
+
+At 0.005, |m| = 1 for 90% (sp500) / 82% (russell) of rows, so m is effectively a sign.
+Recommended bound: **0.05** (≈ p95 sp500, ≈ p92 russell → 4.3% / 7.1% saturated): m then
+grades momentum instead of flagging it. The default stays 0.005 until Juan/Director approve the
+change, since it moves Act decisions (russell 11 → 16 Act). Full table: `tools/android-jvm-parity/v31_bound_sensitivity.py`. ATR scaling was considered but ATR is not part of the Android summary on both sides;
 price scaling needs no new indicator and is bit-identical.
 
 ## Where
