@@ -27,7 +27,13 @@ production on the box: `/workspace/vh-data/history.sqlite`.
   (`ON CONFLICT … DO UPDATE`) cannot overwrite a row. Writes are plain `INSERT`; a repeated run id is detected
   first and reported as a no-op (`Duplicate`).
 - **Startup check:** after migrating, the store verifies that all 9 triggers (`REQUIRED_TRIGGERS`) exist in
-  `sqlite_master`; if any is missing it refuses every write (reads still work) and the error names them.
+  `sqlite_master` **and** that each one's normalized SQL equals the migration DDL (a same-name no-op trigger is
+  caught). It then probes behaviour: inside a `SAVEPOINT` (a sentinel row is inserted if a table is empty) it tries
+  DELETE, UPDATE and a duplicate INSERT on each table, each in its own nested savepoint, expects the append-only
+  `ABORT`, and always `ROLLBACK TO` + `RELEASE` — the probe never changes data. Any failure refuses every write
+  (reads still work) and the error names the trigger(s).
+- **The triggers are the real defence.** The CI text guard below is best-effort only (a source scan can be
+  fooled by dynamically built SQL); it exists to catch mistakes early, not to enforce the guarantee.
 - **CI guard** (`monorepo-validation` → *Score history* step: `cargo test --no-default-features --lib score_history`,
   `--lib history_tick`, `--bin vantage-headless`): a test scans `src/` — lower-cased, quotes removed, `main.`/schema
   prefixes stripped — and fails on DELETE/UPDATE (incl. `UPDATE OR …`), DROP TABLE, DROP TRIGGER of these tables'
@@ -41,9 +47,11 @@ production on the box: `/workspace/vh-data/history.sqlite`.
 - **Daily backups** (score tables only): once per UTC day `serve` exports `score_runs`, `score_history` and
   `score_history_migrations` — nothing else from the app DB — into a fresh SQLite file, gzips it to
   `score-history-YYYY-MM-DD.sqlite.gz` and verifies it (`integrity_check`; row counts ≥ the live counts taken
-  just before). A failing file is renamed `*.failed`. Rotation keeps 30 daily + 12 monthly and only ever removes
-  files named exactly `score-history-YYYY-MM-DD.sqlite.gz`; pre-migration and pre-restore copies keep the newest
-  10 of each kind. The live DB is never a candidate. Manual backups are never rotated.
+  just before). A failing file is renamed `*.failed`. Rotation keeps the newest 7 daily files, the newest file of each
+  of the last 12 months and the newest file of **every year, forever**, and only ever removes files named exactly
+  `score-history-YYYY-MM-DD.sqlite.gz`; pre-migration, pre-restore and manual (`history.manual-*`) copies keep the
+  newest 10 of each kind. The live DB is never a candidate. Every backup holds the full history, so rotating a
+  backup never loses a row that the live DB or a newer backup still has.
 - **Backup directory**: `--history-backup-dir B`, else `$VANTAGE_HISTORY_BACKUP_DIR`, else
   `$XDG_DATA_HOME/vantage/backups` (`~/.local/share/vantage/backups`) — outside the data-dir by default.
 - **Lock**: `serve` (and `history-record-snapshot`) hold an exclusive lock on `<data-dir>/vantage-headless.lock`
@@ -58,8 +66,16 @@ production on the box: `/workspace/vh-data/history.sqlite`.
 | gzip backup | ~3–3.7 KB | ~20 KB |
 
 About 1,700 runs/year (4 interval runs/day + ≤252 close snapshots): **~20 MB/yr in the DB** at 94 rows/run
-(~115 MB/yr at 501 rows). Each daily backup holds the full history: ~5–6 MB after one year (34 MB worst case);
-the rotation keeps at most 42 such files.
+(~115 MB/yr at 501 rows). Each backup holds the full history: ~6 MB after one year at 94 rows (~33 MB at the
+~20 KB/run worst case), ~29 MB / ~166 MB after five years.
+
+Projected backup dir (all retained copies: 7 daily + 11 more month heads + one per past year; the second figure
+adds the worst case of all 30 pre-migration/pre-restore/manual slots full at current size):
+
+| | year 1 | year 5 |
+|---|---|---|
+| ~20 KB/run gz (501 rows, reviewer basis) | ~0.4 GB (≤ 1.4 GB) | ~3.1 GB (≤ 8.1 GB) |
+| ~3.5 KB/run gz (94 rows, today) | ~73 MB (≤ 0.25 GB) | ~0.55 GB (≤ 1.4 GB) |
 
 ## Box daemon start command
 ```
@@ -78,7 +94,12 @@ The store path is configuration, not a code default.
 - `vantage-headless history-restore FILE --data-dir DIR [--history-backup-dir B]` — **append-only merge**: refuses
   while a `serve` holds the data-dir lock; verifies FILE (`.sqlite` or `.sqlite.gz`, must contain the score
   tables); exports the current score tables to B (`history.pre-restore-<UTC>.sqlite.gz`); then, in one
-  `BEGIN EXCLUSIVE`, `ATTACH`es FILE and inserts only the runs/rows whose key is missing. Existing rows are never
+  `BEGIN EXCLUSIVE`, `ATTACH`es FILE and inserts only the runs/rows whose key is missing. Columns are matched
+  **by name, never by position**: FILE's `score_runs`/`score_history` must have exactly the live column set with
+  the same types; an unknown or missing column, a type mismatch, or a schema version (max
+  `score_history_migrations.version`) newer than this binary's is refused with a clear error before anything is
+  written (the only allowed gap is an older version missing exactly columns added by later migrations — none so
+  far; v2 only added triggers). Older versions (v1) restore into v2. Existing rows are never
   overwritten or deleted; other app tables are untouched. Ends with `PRAGMA wal_checkpoint(TRUNCATE)`. Running it
   twice adds nothing the second time. (`--force` is no longer needed and is ignored.)
 - `vantage-headless history-record-snapshot --data-dir DIR` — offline: records one run from the persisted

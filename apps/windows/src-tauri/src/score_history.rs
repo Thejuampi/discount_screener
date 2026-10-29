@@ -65,7 +65,7 @@ pub const REQUIRED_TRIGGERS: [&str; 9] = [
 pub const BACKUP_DIR_ENV: &str = "VANTAGE_HISTORY_BACKUP_DIR";
 pub const BACKUP_PREFIX: &str = "score-history-";
 pub const BACKUP_SUFFIX: &str = ".sqlite.gz";
-pub const BACKUP_KEEP_DAILY: usize = 30;
+pub const BACKUP_KEEP_DAILY: usize = 7;
 pub const BACKUP_KEEP_MONTHLY: usize = 12;
 /// Newest pre-migration and pre-restore copies kept (each kind).
 pub const PRE_BACKUP_KEEP: usize = 10;
@@ -253,6 +253,9 @@ pub struct RestoreReport {
     pub pre_restore_backup: Option<PathBuf>,
     pub runs_added: usize,
     pub rows_added: usize,
+    /// Row counts found in the (verified) backup.
+    pub backup_runs: i64,
+    pub backup_rows: i64,
 }
 
 pub fn iso_utc(epoch: i64) -> String {
@@ -327,23 +330,123 @@ fn has_table(c: &Connection, schema: &str, t: &str) -> bool {
     .is_some()
 }
 
-/// Missing names from [`REQUIRED_TRIGGERS`] in schema `main`.
+fn norm_sql(sql: &str) -> String {
+    sql.to_ascii_lowercase()
+        .replace("if not exists ", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(';')
+        .to_string()
+}
+
+/// Expected trigger DDL (normalized), from the migrations applied to an empty DB.
+fn expected_trigger_sql() -> std::collections::HashMap<String, String> {
+    let c = Connection::open_in_memory().expect("in-memory sqlite");
+    c.execute_batch(MIGRATION_LOG).expect("log ddl");
+    for (_, sql) in MIGRATIONS {
+        c.execute_batch(sql).expect("migration ddl");
+    }
+    let mut st = c
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'")
+        .unwrap();
+    let rows = st
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap();
+    rows.flatten().map(|(n, q)| (n, norm_sql(&q))).collect()
+}
+
+/// Triggers from [`REQUIRED_TRIGGERS`] that are missing in `main` or whose SQL differs
+/// from the expected DDL (e.g. a same-name no-op trigger).
 pub fn missing_triggers(c: &Connection) -> Vec<&'static str> {
+    let expected = expected_trigger_sql();
     REQUIRED_TRIGGERS
         .iter()
         .copied()
         .filter(|t| {
-            c.query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1",
-                params![t],
-                |_| Ok(()),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .is_none()
+            let have: Option<String> = c
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                    params![t],
+                    |r| r.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            have.map(|h| norm_sql(&h)) != expected.get(*t).cloned()
         })
         .collect()
+}
+
+/// Behavioural check: inside a SAVEPOINT, DELETE, UPDATE and a duplicate INSERT on each
+/// history table must abort with the append-only error; everything is rolled back to the
+/// savepoint, so no data can be lost (empty tables get a sentinel row inside it).
+/// Returns the failing `table: op` pairs.
+pub fn trigger_behaviour_failures(c: &Connection) -> Vec<String> {
+    let mut bad = Vec::new();
+    if c.execute_batch("SAVEPOINT score_history_selfcheck")
+        .is_err()
+    {
+        return vec!["savepoint".into()];
+    }
+    let sentinel = |t: &str| -> rusqlite::Result<()> {
+        if table_count(c, t) > 0 {
+            return Ok(());
+        }
+        match t {
+            "score_runs" | "score_history" => {
+                if table_count(c, "score_runs") == 0 {
+                    c.execute(
+                        "INSERT INTO score_runs (run_id, captured_at, profile, model, rule_version, \
+                         semantics, market_context, binary_version, trigger, symbols_total, \
+                         symbols_ranked) VALUES ('__selfcheck__',0,'','','','',0,'','',0,0)",
+                        [],
+                    )?;
+                }
+                if t == "score_history" {
+                    c.execute(
+                        "INSERT INTO score_history (run_id, symbol, captured_at, rank, decision, \
+                         composite, price_cents) SELECT run_id, '__SELFCHECK__', 0, 0, '', 0, 0 \
+                         FROM score_runs LIMIT 1",
+                        [],
+                    )?;
+                }
+                Ok(())
+            }
+            _ => c
+                .execute(
+                    "INSERT INTO score_history_migrations (version, applied_at) VALUES (-1, 0)",
+                    [],
+                )
+                .map(|_| ()),
+        }
+    };
+    for t in HISTORY_TABLES {
+        if let Err(e) = sentinel(t) {
+            bad.push(format!("{t}: sentinel {e}"));
+            continue;
+        }
+        let ops = [
+            ("delete", format!("{} FROM {t}", "DELETE")),
+            ("update", format!("{} {t} SET rowid = rowid", "UPDATE")),
+            (
+                "duplicate insert",
+                format!("{} INTO {t} SELECT * FROM {t} LIMIT 1", "INSERT"),
+            ),
+        ];
+        for (op, sql) in ops {
+            // Each probe in its own nested savepoint, so one missing trigger cannot
+            // mask the next probe.
+            let _ = c.execute_batch("SAVEPOINT score_history_probe");
+            match c.execute(&sql, []) {
+                Err(e) if e.to_string().contains("append-only") => {}
+                _ => bad.push(format!("{t}: {op}")),
+            }
+            let _ = c.execute_batch("ROLLBACK TO score_history_probe; RELEASE score_history_probe");
+        }
+    }
+    let _ = c.execute_batch("ROLLBACK TO score_history_selfcheck; RELEASE score_history_selfcheck");
+    bad
 }
 
 fn gzip_file(src: &Path, dest: &Path) -> Result<(), String> {
@@ -543,7 +646,10 @@ impl ScoreHistoryStore {
             let _ = conn.pragma_update(None, "journal_mode", "WAL");
         }
         let migration_backup = migrate(&conn, backup_dir.as_deref(), migrations)?;
-        let missing_triggers = missing_triggers(&conn);
+        let mut missing_triggers = missing_triggers(&conn);
+        if missing_triggers.is_empty() && !trigger_behaviour_failures(&conn).is_empty() {
+            missing_triggers.push("behaviour self-check");
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             path,
@@ -561,7 +667,7 @@ impl ScoreHistoryStore {
             Ok(())
         } else {
             Err(format!(
-                "score history: refusing to write, append-only triggers missing: {}",
+                "score history: refusing to write, append-only triggers missing or altered: {}",
                 self.missing_triggers.join(", ")
             ))
         }
@@ -778,9 +884,16 @@ impl ScoreHistoryStore {
             let copied = (|| -> Result<(), String> {
                 c.execute_batch("BEGIN").map_err(err)?;
                 for t in HISTORY_TABLES {
-                    if let Err(e) =
-                        c.execute(&format!("INSERT INTO bk.{t} SELECT * FROM main.{t}"), [])
-                    {
+                    // Copied by column NAME, never by position.
+                    let cols = columns(&c, "main", t)?
+                        .into_iter()
+                        .map(|x| x.name)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if let Err(e) = c.execute(
+                        &format!("INSERT INTO bk.{t} ({cols}) SELECT {cols} FROM main.{t}"),
+                        [],
+                    ) {
                         let _ = c.execute_batch("ROLLBACK");
                         return Err(format!("export {t}: {e}"));
                     }
@@ -927,9 +1040,10 @@ fn backup_day(name: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()
 }
 
-/// Pure rotation: of the daily backup names, which to delete (keep the newest
-/// [`BACKUP_KEEP_DAILY`] days plus the newest file of each of the newest
-/// [`BACKUP_KEEP_MONTHLY`] months). Names not matching the pattern are never returned.
+/// Pure rotation: of the daily backup names, which to delete. Keeps the newest
+/// [`BACKUP_KEEP_DAILY`] days, the newest file of each of the newest
+/// [`BACKUP_KEEP_MONTHLY`] months, and the newest file of every year forever.
+/// Names not matching the pattern are never returned.
 pub fn rotation_deletes(names: &[String]) -> Vec<String> {
     let mut dated: Vec<(NaiveDate, &String)> = names
         .iter()
@@ -941,13 +1055,15 @@ pub fn rotation_deletes(names: &[String]) -> Vec<String> {
         keep.insert((*n).clone());
     }
     let mut months = Vec::new();
+    let mut years = Vec::new();
     for (d, n) in &dated {
         let m = (d.year(), d.month());
-        if !months.contains(&m) {
-            if months.len() == BACKUP_KEEP_MONTHLY {
-                break;
-            }
+        if !months.contains(&m) && months.len() < BACKUP_KEEP_MONTHLY {
             months.push(m);
+            keep.insert((*n).clone());
+        }
+        if !years.contains(&d.year()) {
+            years.push(d.year());
             keep.insert((*n).clone());
         }
     }
@@ -958,7 +1074,11 @@ pub fn rotation_deletes(names: &[String]) -> Vec<String> {
         .collect()
 }
 
-const PRE_KINDS: [&str; 2] = ["history.pre-score-history-", "history.pre-restore-"];
+const PRE_KINDS: [&str; 3] = [
+    "history.pre-score-history-",
+    "history.pre-restore-",
+    "history.manual-",
+];
 
 /// Stamp of a pre-* backup name (`…-<YYYYmmddTHHMMSS.mmmZ>.sqlite.gz`).
 fn pre_stamp(name: &str) -> Option<&str> {
@@ -967,7 +1087,7 @@ fn pre_stamp(name: &str) -> Option<&str> {
     (s.len() >= 16 && s.ends_with('Z') && s.as_bytes()[8] == b'T').then_some(s)
 }
 
-/// Pure rotation of pre-migration / pre-restore copies: keep the newest
+/// Pure rotation of pre-migration / pre-restore / manual copies: keep the newest
 /// [`PRE_BACKUP_KEEP`] of each kind. Only names with a pre-* prefix and a stamp qualify.
 pub fn pre_rotation_deletes(names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
@@ -999,7 +1119,7 @@ pub fn rotate_backups(dir: &Path) -> Result<Vec<PathBuf>, String> {
     remove_all(dir, rotation_deletes(&file_names(dir)?))
 }
 
-/// Keeps the newest [`PRE_BACKUP_KEEP`] pre-migration and pre-restore copies in `dir`.
+/// Keeps the newest [`PRE_BACKUP_KEEP`] pre-migration, pre-restore and manual copies in `dir`.
 pub fn rotate_pre_backups(dir: &Path) -> Result<Vec<PathBuf>, String> {
     remove_all(dir, pre_rotation_deletes(&file_names(dir)?))
 }
@@ -1014,39 +1134,150 @@ fn remove_all(dir: &Path, names: Vec<String>) -> Result<Vec<PathBuf>, String> {
     Ok(removed)
 }
 
+/// Merged tables and their keys.
+const MERGE_TABLES: [(&str, &[&str]); 2] = [
+    ("score_runs", &["run_id"]),
+    ("score_history", &["run_id", "symbol"]),
+];
+
+/// Columns introduced by migrations after v1, as (version, table, column). An older
+/// backup may lack exactly these (they are then filled with their default). Empty today.
+const LATER_COLUMNS: &[(i64, &str, &str)] = &[];
+
+#[derive(Debug, PartialEq)]
+struct Col {
+    name: String,
+    ty: String,
+}
+
+fn columns(c: &Connection, schema: &str, t: &str) -> Result<Vec<Col>, String> {
+    let mut st = c
+        .prepare(&format!("PRAGMA {schema}.table_info({t})"))
+        .map_err(err)?;
+    let cols = st
+        .query_map([], |r| {
+            Ok(Col {
+                name: r.get::<_, String>(1)?.to_ascii_lowercase(),
+                ty: r.get::<_, String>(2)?.to_ascii_uppercase(),
+            })
+        })
+        .map_err(err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(err)?;
+    Ok(cols)
+}
+
+fn schema_version_of(c: &Connection, schema: &str) -> i64 {
+    let log = HISTORY_TABLES[2];
+    if !has_table(c, schema, log) {
+        return 0;
+    }
+    c.query_row(
+        &format!("SELECT COALESCE(MAX(version), 0) FROM {schema}.{log}"),
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// Column list to copy for `t`, matched by NAME. Refuses unknown columns, missing
+/// columns (except [`LATER_COLUMNS`] newer than the backup's version) and type mismatches.
+fn merge_columns(
+    live: &[Col],
+    src: &[Col],
+    t: &str,
+    src_version: i64,
+) -> Result<Vec<String>, String> {
+    if let Some(x) = src.iter().find(|s| !live.iter().any(|l| l.name == s.name)) {
+        return Err(format!("backup {t} has unknown column '{}'", x.name));
+    }
+    let mut out = Vec::new();
+    for l in live {
+        match src.iter().find(|s| s.name == l.name) {
+            Some(s) if s.ty != l.ty => {
+                return Err(format!(
+                    "backup {t}.{} has type {} (expected {})",
+                    l.name, s.ty, l.ty
+                ))
+            }
+            Some(_) => out.push(l.name.clone()),
+            None => {
+                let later = LATER_COLUMNS
+                    .iter()
+                    .any(|(v, lt, lc)| *lt == t && *lc == l.name && *v > src_version);
+                if !later {
+                    return Err(format!("backup {t} is missing column '{}'", l.name));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Append-only restore: merges the score tables of backup `src` (`.sqlite` or
-/// `.sqlite.gz`) into the app DB `<data_dir>/history.sqlite`. Only rows whose key is
-/// missing are inserted; nothing is overwritten or deleted. Refuses while a `serve`
-/// holds the data-dir lock. The live score tables are exported to `backup_dir` first.
+/// `.sqlite.gz`) into the app DB `<data_dir>/history.sqlite`, copying columns by name.
+/// Only rows whose key is missing are inserted; nothing is overwritten or deleted.
+/// Refuses while a `serve` holds the data-dir lock, when the backup's schema version is
+/// newer than this binary's, or when its columns differ. The live score tables are
+/// exported to `backup_dir` first.
 pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<RestoreReport, String> {
     let _lock = lock_data_dir(data_dir)?;
     let rep = verify_file(src, true)?;
     let src_plain = plain(src)?;
     let store = ScoreHistoryStore::open(&data_dir.join("history.sqlite"), Some(backup_dir))?;
     store.check_writable()?;
-    let pre = backup_dir.join(format!("history.pre-restore-{}.sqlite.gz", stamp()));
-    store.export_to(&pre)?;
-    rotate_pre_backups(backup_dir)?;
     let c = store.conn.lock().map_err(|_| "lock")?;
     c.execute(
         "ATTACH DATABASE ?1 AS src",
         params![src_plain.path.to_string_lossy()],
     )
     .map_err(err)?;
+    let plan = (|| -> Result<Vec<String>, String> {
+        let live_v = current_version(&c)?;
+        let src_v = schema_version_of(&c, "src");
+        if src_v > live_v {
+            return Err(format!(
+                "backup schema v{src_v} is newer than this binary's v{live_v}; upgrade first"
+            ));
+        }
+        let mut sqls = Vec::new();
+        for (t, key) in MERGE_TABLES {
+            let cols = merge_columns(&columns(&c, "main", t)?, &columns(&c, "src", t)?, t, src_v)?;
+            let list = cols.join(", ");
+            let sel = cols
+                .iter()
+                .map(|x| format!("s.{x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let on = key
+                .iter()
+                .map(|k| format!("m.{k} = s.{k}"))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            sqls.push(format!(
+                "INSERT INTO main.{t} ({list}) SELECT {sel} FROM src.{t} s \
+                 WHERE NOT EXISTS (SELECT 1 FROM main.{t} m WHERE {on})"
+            ));
+        }
+        Ok(sqls)
+    })();
+    let plan = match plan {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = c.execute("DETACH DATABASE src", []);
+            return Err(format!("restore {}: {e}", src.display()));
+        }
+    };
+    drop(c);
+    let pre = backup_dir.join(format!("history.pre-restore-{}.sqlite.gz", stamp()));
+    store.export_to(&pre)?;
+    rotate_pre_backups(backup_dir)?;
+    let c = store.conn.lock().map_err(|_| "lock")?;
     let merged = (|| -> Result<(usize, usize), String> {
         c.execute_batch("BEGIN EXCLUSIVE").map_err(err)?;
         let res = (|| -> rusqlite::Result<(usize, usize)> {
-            let runs = c.execute(
-                "INSERT INTO main.score_runs SELECT * FROM src.score_runs s \
-                 WHERE NOT EXISTS (SELECT 1 FROM main.score_runs m WHERE m.run_id = s.run_id)",
-                [],
-            )?;
-            let rows = c.execute(
-                "INSERT INTO main.score_history SELECT * FROM src.score_history s \
-                 WHERE NOT EXISTS (SELECT 1 FROM main.score_history m \
-                 WHERE m.run_id = s.run_id AND m.symbol = s.symbol)",
-                [],
-            )?;
+            let runs = c.execute(&plan[0], [])?;
+            let rows = c.execute(&plan[1], [])?;
             c.execute_batch("COMMIT")?;
             Ok((runs, rows))
         })();
@@ -1059,11 +1290,12 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
     let (runs_added, rows_added) = merged?;
     c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .map_err(err)?;
-    let _ = rep;
     Ok(RestoreReport {
         pre_restore_backup: Some(pre),
         runs_added,
         rows_added,
+        backup_runs: rep.score_runs,
+        backup_rows: rep.score_history,
     })
 }
 
@@ -1467,6 +1699,261 @@ mod tests {
         assert!(e.contains("refusing to write"), "{e}");
         assert_eq!(s.counts().unwrap(), (0, 0));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_name_noop_trigger_is_detected_and_blocks_writes() {
+        let dir = tmpdir("noop");
+        let p = dir.join("history.sqlite");
+        drop(ScoreHistoryStore::open(&p, None).unwrap());
+        {
+            let c = Connection::open(&p).unwrap();
+            let t = HISTORY_TABLES[0];
+            let sql = format!(
+                "{drop} {t}_no_delete; CREATE TRIGGER {t}_no_delete BEFORE DELETE ON {t} \
+                 BEGIN SELECT 1; END;",
+                drop = ["DROP", "TRIGGER"].join(" ")
+            );
+            c.execute_batch(&sql).unwrap();
+            assert_eq!(trigger_behaviour_failures(&c), vec![format!("{t}: delete")]);
+        }
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        assert_eq!(s.missing_triggers, vec!["score_runs_no_delete"]);
+        assert!(s
+            .record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn behaviour_selfcheck_passes_and_never_changes_data() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        {
+            let c = s.conn.lock().unwrap();
+            assert!(
+                trigger_behaviour_failures(&c).is_empty(),
+                "empty tables (sentinels)"
+            );
+            assert_eq!(
+                (
+                    table_count(&c, "score_runs"),
+                    table_count(&c, "score_history")
+                ),
+                (0, 0)
+            );
+        }
+        s.record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        let c = s.conn.lock().unwrap();
+        let logs = table_count(&c, "score_history_migrations");
+        assert!(trigger_behaviour_failures(&c).is_empty());
+        assert_eq!(
+            (
+                table_count(&c, "score_runs"),
+                table_count(&c, "score_history")
+            ),
+            (1, 1)
+        );
+        assert_eq!(table_count(&c, "score_history_migrations"), logs);
+    }
+
+    type ColEdit<'a> = &'a dyn Fn(&str, &mut Vec<(String, String)>);
+
+    /// Writes a backup whose score tables use `cols` (name, type) in that order.
+    fn custom_backup(path: &Path, version: i64, edit: impl Fn(&str, &mut Vec<(String, String)>)) {
+        let live = ScoreHistoryStore::open_in_memory().unwrap();
+        let lc = live.conn.lock().unwrap();
+        let b = Connection::open(path).unwrap();
+        b.execute_batch(MIGRATION_LOG).unwrap();
+        b.execute(
+            "INSERT INTO score_history_migrations (version, applied_at) VALUES (?1, 0)",
+            params![version],
+        )
+        .unwrap();
+        for t in ["score_runs", "score_history"] {
+            let mut cols: Vec<(String, String)> = columns(&lc, "main", t)
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.name, c.ty))
+                .collect();
+            cols.reverse();
+            edit(t, &mut cols);
+            let ddl = cols
+                .iter()
+                .map(|(n, ty)| format!("{n} {ty}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            b.execute_batch(&format!("{} {t} ({ddl});", "CREATE TABLE"))
+                .unwrap();
+        }
+        let has = |t: &str, c: &str| {
+            b.query_row(
+                &format!("SELECT 1 FROM pragma_table_info('{t}') WHERE name = ?1"),
+                params![c],
+                |_| Ok(()),
+            )
+            .is_ok()
+        };
+        let runs = HISTORY_TABLES[0];
+        let hist = HISTORY_TABLES[1];
+        let rc = [
+            "run_id",
+            "captured_at",
+            "profile",
+            "model",
+            "rule_version",
+            "semantics",
+            "market_context",
+            "binary_version",
+            "trigger",
+            "symbols_total",
+            "symbols_ranked",
+            "incomplete_symbols",
+        ];
+        let rv = [
+            "'sp500-7-v3'",
+            "7",
+            "'sp500'",
+            "'v3'",
+            "'V3'",
+            "'android'",
+            "0",
+            "'b'",
+            "'interval'",
+            "1",
+            "1",
+            "'[]'",
+        ];
+        let (n, v): (Vec<&str>, Vec<&str>) = rc
+            .iter()
+            .zip(rv.iter())
+            .filter(|(c, _)| has(runs, c))
+            .unzip();
+        b.execute(
+            &format!(
+                "{} INTO {runs} ({}) VALUES ({})",
+                "INSERT",
+                n.join(","),
+                v.join(",")
+            ),
+            [],
+        )
+        .unwrap();
+        let hc = [
+            "run_id",
+            "symbol",
+            "captured_at",
+            "rank",
+            "decision",
+            "composite",
+            "fundamentals",
+            "price_cents",
+            "target_cents",
+            "trust_signal",
+        ];
+        let hv = [
+            "'sp500-7-v3'",
+            "'ADSK'",
+            "7",
+            "3",
+            "'Watch'",
+            "26",
+            "13",
+            "24175",
+            "30250",
+            "'t'",
+        ];
+        let (n, v): (Vec<&str>, Vec<&str>) = hc
+            .iter()
+            .zip(hv.iter())
+            .filter(|(c, _)| has(hist, c))
+            .unzip();
+        b.execute(
+            &format!(
+                "{} INTO {hist} ({}) VALUES ({})",
+                "INSERT",
+                n.join(","),
+                v.join(",")
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn restore_is_by_column_name_and_strict() {
+        let root = tmpdir("byname");
+        let bdir = root.join("bk");
+        // Reversed column order (and a v1 backup into v2): restored by name.
+        for v in [SCHEMA_VERSION, 1] {
+            let f = root.join(format!("rev{v}.sqlite"));
+            custom_backup(&f, v, |_, _| {});
+            let data = root.join(format!("d{v}"));
+            let r = restore(&f, &data, &bdir).unwrap();
+            assert_eq!(
+                (r.runs_added, r.rows_added, r.backup_runs, r.backup_rows),
+                (1, 1, 1, 1)
+            );
+            let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+            let h = s.history("ADSK", None, 10, None, None).unwrap();
+            assert_eq!(
+                (
+                    h[0].rank,
+                    h[0].decision.as_str(),
+                    h[0].composite,
+                    h[0].fundamentals
+                ),
+                (3, "Watch", 26, Some(13))
+            );
+            assert_eq!((h[0].price_cents, h[0].target_cents), (24175, Some(30250)));
+            assert_eq!(
+                (h[0].trust_signal.as_deref(), h[0].trigger.as_str()),
+                (Some("t"), "interval")
+            );
+        }
+        let refuse = |name: &str, v: i64, edit: ColEdit, want: &str| {
+            let f = root.join(name);
+            custom_backup(&f, v, edit);
+            let data = root.join(format!("d-{name}"));
+            let e = restore(&f, &data, &bdir).unwrap_err();
+            assert!(e.contains(want), "{name}: {e}");
+            let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+            assert_eq!(s.counts().unwrap(), (0, 0), "{name}: nothing written");
+        };
+        refuse(
+            "missing.sqlite",
+            SCHEMA_VERSION,
+            &|t, c| {
+                if t == "score_history" {
+                    c.retain(|(n, _)| n != "trust_signal")
+                }
+            },
+            "missing column 'trust_signal'",
+        );
+        refuse(
+            "extra.sqlite",
+            SCHEMA_VERSION,
+            &|t, c| {
+                if t == "score_runs" {
+                    c.push(("bogus".into(), "TEXT".into()))
+                }
+            },
+            "unknown column 'bogus'",
+        );
+        refuse(
+            "type.sqlite",
+            SCHEMA_VERSION,
+            &|t, c| {
+                if t == "score_history" {
+                    for x in c.iter_mut().filter(|x| x.0 == "composite") {
+                        x.1 = "TEXT".into();
+                    }
+                }
+            },
+            "type TEXT",
+        );
+        refuse("newer.sqlite", SCHEMA_VERSION + 1, &|_, _| {}, "newer than");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2125,11 +2612,23 @@ mod tests {
         assert!(del.iter().all(|n| backup_day(n).is_some()));
         assert!(kept.contains(&&"history.sqlite".to_string()));
         let dated = kept.iter().filter(|n| backup_day(n).is_some()).count();
-        // 30 daily + monthly heads not already among them (12 months, newest month overlaps).
-        assert!(
-            (BACKUP_KEEP_DAILY..=BACKUP_KEEP_DAILY + BACKUP_KEEP_MONTHLY).contains(&dated),
-            "{dated}"
-        );
+        // Last day 2026-05-15: 7 daily + 11 more month heads (2025-06..2026-04); the year
+        // heads (2026-05-15, 2025-12-31) are already kept.
+        assert_eq!(dated, 18, "{kept:?}");
+        let has = |d: &str| kept.iter().any(|n| n.contains(d));
+        assert!(has("2025-12-31") && has("2025-06-30") && !has("2025-05-31"));
+        // One per year forever.
+        let yearly: Vec<String> = (2015..=2026)
+            .flat_map(|y| {
+                [3u32, 9].map(move |m| format!("{BACKUP_PREFIX}{y}-{m:02}-28{BACKUP_SUFFIX}"))
+            })
+            .collect();
+        let gone = rotation_deletes(&yearly);
+        for y in 2015..=2025 {
+            let head = format!("{BACKUP_PREFIX}{y}-09-28{BACKUP_SUFFIX}");
+            assert!(!gone.contains(&head), "year head {y} kept");
+        }
+        assert!(gone.contains(&format!("{BACKUP_PREFIX}2015-03-28{BACKUP_SUFFIX}")));
         // On disk: live DB and foreign files survive.
         let dir = tmpdir("rot");
         for n in names.iter().take(40).chain(names.iter().rev().take(4)) {

@@ -7,10 +7,11 @@
   `GET /history` (UTC, ISO-8601, `profile=`) and `vantage-headless history` (local time, `--tz`, default
   America/New_York). Rule version from `SCORE_RULE_VERSION` (`score_history.rs`, `"V3"`).
 - Protections: DELETE/UPDATE abort triggers plus BEFORE INSERT triggers that reject an existing key (no
-  REPLACE/UPSERT overwrite), plain INSERTs, startup trigger check (refuses writes if one is missing), CI guard step,
+  REPLACE/UPSERT overwrite), plain INSERTs, startup trigger check by SQL and by behaviour (refuses writes if one is missing or altered), CI guard step,
   no pruning, gzip backup before migrations, verified daily gzip backups of the score tables only, rotated
-  30 daily + 12 monthly (pre-* copies: newest 10) to `--history-backup-dir` (default
-  `$XDG_DATA_HOME/vantage/backups`); `history-backup [--verify]`; `history-restore FILE` merges append-only and
+  7 daily + 12 monthly + one per year forever (pre-* and manual copies: newest 10) to `--history-backup-dir` (default
+  `$XDG_DATA_HOME/vantage/backups`); `history-backup [--verify]`; `history-restore FILE` merges append-only by column name (refuses unknown/missing columns, type
+  mismatches and newer schema versions) and
   refuses while `serve` holds `<data-dir>/vantage-headless.lock`.
 - Offline mode `serve --no-feed` and `history-record-snapshot`.
 - Contract `shared/contracts/score-history-v1.md`; docs `docs/product/score-history.md`.
