@@ -844,6 +844,13 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         .collect();
     let expected = if path == "/persist" { "POST" } else { "GET" };
     if path == "/history" && method == "GET" {
+        if matches!(q.get("all").copied(), Some("1" | "true")) {
+            return to_http((|| {
+                let dec = |k: &str| q.get(k).map(|v| pct_decode(v)).transpose();
+                let (sym, run, prof) = (dec("symbol")?, dec("run")?, dec("profile")?);
+                engine.history_all_json(sym.as_deref(), run.as_deref(), prof.as_deref())
+            })());
+        }
         return to_http(history_endpoint(&q, |sym, days, changes, profile| {
             engine.history_json(sym, days, changes, now_epoch(), profile)
         }));
