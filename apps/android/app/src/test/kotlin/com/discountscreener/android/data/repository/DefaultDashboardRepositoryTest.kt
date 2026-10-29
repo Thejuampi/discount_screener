@@ -1254,6 +1254,51 @@ class DefaultDashboardRepositoryTest {
         }
     }
 
+    /**
+     * Wiring for Juan's three-year journal: a real scoring pass, with the repository's own
+     * wall-clock seconds (no injected clock), prunes a 1096-day-old row and keeps a 1094-day-old
+     * one. A seconds/millis mix-up anywhere between the clock and the cutoff would either keep
+     * both or drop both.
+     */
+    @Test
+    fun a_scoring_pass_keeps_1094_day_journal_rows_and_prunes_1096_day_rows() = runTest(dispatcher) {
+        val store = CountingJournalStore(context, dispatcher)
+        try {
+            val day = 86_400L
+            val wallNow = System.currentTimeMillis() / 1_000
+            fun seed(symbol: String, ageDays: Long) = com.discountscreener.android.domain.model.ScoreJournalRow(
+                symbol = symbol, scoringModel = "Seed", scoredAtEpochSeconds = wallNow - ageDays * day,
+                fundamentalsScore = 1, technicalScore = 1, forecastScore = 1, regimeScore = 1,
+                compositeScore = 1, compositeScoreBase = 1, marketPriceCents = 1L,
+            )
+            store.appendScoreJournal(
+                listOf(seed("OLD1094", 1094), seed("OLD1096", 1096)),
+                retentionSeconds = Long.MAX_VALUE / 2,
+                nowEpochSeconds = wallNow,
+            )
+            val writesBefore = store.journalWrites
+            val repository = DefaultDashboardRepository(
+                stateStore = store,
+                profileCatalog = ProfileCatalog(context.assets),
+                yahooClient = FakeYahooFinanceClient(),
+                universeCatalog = UniverseCatalog(context.assets),
+                ioDispatcher = dispatcher,
+                defaultProfile = DefaultDashboardRepository.QA_PROFILE,
+            )
+            repository.bootstrap(ViewFilter(), null, ChartRange.Year, legacyModel)
+            repository.refreshAll(ViewFilter(), null, ChartRange.Year, legacyModel)
+            advanceUntilIdle()
+
+            assertTrue("the scoring pass must journal", store.journalWrites > writesBefore)
+            val journal = store.loadScoreJournal()
+            val seeds = journal.filter { it.scoringModel == "Seed" }.map { it.symbol }
+            assertEquals(listOf("OLD1094"), seeds)
+            assertTrue("the fresh pass's own rows survive", journal.any { it.scoringModel != "Seed" })
+        } finally {
+            store.close()
+        }
+    }
+
     @Test
     fun cancelled_refresh_does_not_capture_the_stale_profile() = runTest(dispatcher) {
         val store = CountingJournalStore(context, dispatcher)
