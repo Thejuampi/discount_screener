@@ -119,7 +119,8 @@ class DefaultDashboardRepositoryTest {
      */
     @Test
     fun the_score_journal_outlives_the_longest_measured_horizon() {
-        assertEquals(460L * 24L * 60L * 60L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
+        assertEquals(1095L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_DAYS)
+        assertEquals(1095L * 24L * 60L * 60L, DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
     }
 
     @Test
