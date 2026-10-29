@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS score_evaluations (
     coverage        INTEGER,
     fundamentals    INTEGER,
     technical       INTEGER,
+    technical_reason TEXT,
     forecast        INTEGER,
     decision        TEXT,
     confidence      TEXT,
@@ -285,6 +286,9 @@ CREATE TABLE IF NOT EXISTS score_run_stats (
     failed          INTEGER NOT NULL,
     reasons_json    TEXT NOT NULL,
     snapshot_rows   INTEGER NOT NULL,
+    inputs_stored   INTEGER NOT NULL,
+    inputs_run_id   TEXT,
+    inputs_reason   TEXT NOT NULL,
     snapshot_prefix BLOB NOT NULL,
     snapshot_suffix BLOB NOT NULL
 );
@@ -331,6 +335,9 @@ pub struct EvalRecord {
     pub coverage: Option<i64>,
     pub fundamentals: Option<i64>,
     pub technical: Option<i64>,
+    /// Why `technical` is NULL (`no_year_chart`, `no_latest_close`, `no_indicators`,
+    /// `not_loaded`, `score_error`); `None` when it was computed.
+    pub technical_reason: Option<String>,
     pub forecast: Option<i64>,
     /// V3 decision; always `None` unless `status == "ok"`.
     pub decision: Option<String>,
@@ -375,6 +382,15 @@ pub struct RunStats {
     /// Count per reason (`gap_below_min:<bps>` counted as `gap_below_min`).
     pub reasons: std::collections::BTreeMap<String, i64>,
     pub snapshot_rows: i64,
+    /// Whether this run stored its own full inputs.
+    #[serde(default)]
+    pub inputs_stored: bool,
+    /// Run whose inputs this run stored or points to (most recent run with inputs).
+    #[serde(default)]
+    pub inputs_run_id: Option<String>,
+    /// `first`, `close`, `material:<what>` or `skipped:unchanged`.
+    #[serde(default)]
+    pub inputs_reason: String,
 }
 
 impl RunStats {
@@ -395,6 +411,9 @@ impl RunStats {
             failed,
             reasons,
             snapshot_rows: e.inputs.len() as i64,
+            inputs_stored: false,
+            inputs_run_id: None,
+            inputs_reason: String::new(),
         }
     }
 }
@@ -402,16 +421,18 @@ impl RunStats {
 /// Writes a run's evaluations, inputs and stats inside the caller's transaction.
 fn write_evaluation(
     tx: &Connection,
+    meta: &RunMeta,
     run_id: &str,
-    captured_at: i64,
     e: &RunEvaluation,
 ) -> Result<(), String> {
+    let captured_at = meta.captured_at;
+    let (store_inputs, inputs_reason, prev) = inputs_policy(tx, meta, e)?;
     let mut hashes = Vec::with_capacity(e.inputs.len());
-    {
+    if store_inputs {
         let mut blob = tx
             .prepare(
                 "INSERT INTO score_inputs (hash, encoding, raw_size, bytes) \
-                 SELECT ?1, 'gzip', ?2, ?3 \
+                 SELECT ?1, 'zstd', ?2, ?3 \
                  WHERE NOT EXISTS (SELECT 1 FROM score_inputs WHERE hash = ?1)",
             )
             .map_err(err)?;
@@ -432,7 +453,7 @@ fn write_evaluation(
                 .map_err(err)?
                 .is_some();
             if !exists {
-                blob.execute(params![h, raw.len() as i64, gzip_bytes(raw)?])
+                blob.execute(params![h, raw.len() as i64, zstd_bytes(raw)?])
                     .map_err(|x| format!("input {sym}: {x}"))?;
             }
             link.execute(params![run_id, i as i64, sym, h])
@@ -444,10 +465,10 @@ fn write_evaluation(
         let mut st = tx
             .prepare(
                 "INSERT INTO score_evaluations (run_id, symbol, captured_at, status, reason, rank, \
-                 gate_gap_bps, composite, coverage, fundamentals, technical, forecast, decision, \
-                 confidence, row_confidence, price_cents, intrinsic_cents, anchor_cents, anchor, \
-                 gap_bps, upside_bps, trust_signal, inputs_hash) VALUES \
-                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+                 gate_gap_bps, composite, coverage, fundamentals, technical, technical_reason, \
+                 forecast, decision, confidence, row_confidence, price_cents, intrinsic_cents, \
+                 anchor_cents, anchor, gap_bps, upside_bps, trust_signal, inputs_hash) VALUES \
+                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
             )
             .map_err(err)?;
         let mut seen = std::collections::HashSet::new();
@@ -473,6 +494,7 @@ fn write_evaluation(
                 &x.coverage,
                 &x.fundamentals,
                 &x.technical,
+                &x.technical_reason,
                 &x.forecast,
                 &decision,
                 &x.confidence,
@@ -508,8 +530,8 @@ fn write_evaluation(
     }
     tx.execute(
         "INSERT INTO score_run_stats (run_id, universe_size, loaded, ok, excluded, failed, \
-         reasons_json, snapshot_rows, snapshot_prefix, snapshot_suffix) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+         reasons_json, snapshot_rows, inputs_stored, inputs_run_id, inputs_reason, \
+         snapshot_prefix, snapshot_suffix) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             run_id,
             stats.universe_size,
@@ -519,6 +541,13 @@ fn write_evaluation(
             stats.failed,
             serde_json::to_string(&stats.reasons).unwrap(),
             stats.snapshot_rows,
+            store_inputs as i64,
+            if store_inputs {
+                Some(run_id.to_string())
+            } else {
+                prev
+            },
+            inputs_reason,
             e.snapshot_prefix,
             e.snapshot_suffix,
         ],
@@ -527,18 +556,122 @@ fn write_evaluation(
     Ok(())
 }
 
+/// Material-change signature of one evaluation: (status, reason class, decision).
+/// `gap_below_min:<bps>` counts as `gap_below_min`; scores, ranks and prices do not count.
+const INPUTS_MAX_GAP_SECS: i64 = 24 * 3600;
+
+fn material_key(status: &str, reason: &str, decision: Option<&str>) -> String {
+    format!(
+        "{status}|{}|{}",
+        reason.split(':').next().unwrap_or(""),
+        decision.unwrap_or("")
+    )
+}
+
+/// Deterministic full-input policy (see docs/product/score-history.md):
+/// 1. `first`: no earlier run of this profile+model stored inputs;
+/// 2. `close`: the post-close run (trigger `close`) always stores them;
+/// 3. `daily`: the most recent inputs are >= 24 h older than this run (covers days whose
+///    close slot was satisfied by an interval run, and restarts);
+/// 4. `material:<what>`: vs the most recent run with inputs, the set of loaded symbols
+///    changed (`loaded_set`) or any symbol's (status, reason class, decision) changed
+///    (`evaluation`);
+/// 5. otherwise `skipped:unchanged`, pointing at that most recent run.
+///
+/// Returns (store, reason, most recent run with inputs).
+fn inputs_policy(
+    tx: &Connection,
+    meta: &RunMeta,
+    e: &RunEvaluation,
+) -> Result<(bool, String, Option<String>), String> {
+    let prev: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT s.run_id, r.captured_at FROM score_run_stats s JOIN score_runs r ON r.run_id = s.run_id \
+             WHERE s.inputs_stored = 1 AND r.profile = ?1 AND r.model = ?2 \
+             ORDER BY r.captured_at DESC, r.run_id DESC LIMIT 1",
+            params![meta.profile, meta.model],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(err)?;
+    let Some((p, p_at)) = prev else {
+        return Ok((true, "first".into(), None));
+    };
+    if meta.trigger == "close" {
+        return Ok((true, "close".into(), Some(p)));
+    }
+    if meta.captured_at - p_at >= INPUTS_MAX_GAP_SECS {
+        return Ok((true, "daily".into(), Some(p)));
+    }
+    let mut st = tx
+        .prepare(
+            "SELECT symbol, status, reason, decision, reason != 'not_loaded' \
+             FROM score_evaluations WHERE run_id = ?1",
+        )
+        .map_err(err)?;
+    let old: std::collections::BTreeMap<String, (String, bool)> = st
+        .query_map(params![p], |r| {
+            let (sym, status, reason, dec, loaded): (String, String, String, Option<String>, bool) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+            Ok((
+                sym,
+                (material_key(&status, &reason, dec.as_deref()), loaded),
+            ))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?;
+    let mut seen = std::collections::HashSet::new();
+    let new: std::collections::BTreeMap<String, (String, bool)> = e
+        .evals
+        .iter()
+        .filter(|x| seen.insert(x.symbol.as_str()))
+        .map(|x| {
+            let dec = if x.status == "ok" {
+                x.decision.as_deref()
+            } else {
+                None
+            };
+            (
+                x.symbol.clone(),
+                (
+                    material_key(&x.status, &x.reason, dec),
+                    x.reason != "not_loaded",
+                ),
+            )
+        })
+        .collect();
+    let loaded = |m: &std::collections::BTreeMap<String, (String, bool)>| -> Vec<String> {
+        m.iter()
+            .filter(|(_, v)| v.1)
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    if loaded(&old) != loaded(&new) {
+        return Ok((true, "material:loaded_set".into(), Some(p)));
+    }
+    let keys = |m: &std::collections::BTreeMap<String, (String, bool)>| -> Vec<(String, String)> {
+        m.iter().map(|(k, v)| (k.clone(), v.0.clone())).collect()
+    };
+    if keys(&old) != keys(&new) {
+        return Ok((true, "material:evaluation".into(), Some(p)));
+    }
+    Ok((false, "skipped:unchanged".into(), Some(p)))
+}
+
+/// zstd level for input blobs (deterministic; decoding does not depend on it).
+const INPUT_ZSTD_LEVEL: i32 = 19;
+
+fn zstd_bytes(b: &[u8]) -> Result<Vec<u8>, String> {
+    zstd::bulk::compress(b, INPUT_ZSTD_LEVEL).map_err(err)
+}
+
 fn sha256_hex(b: &[u8]) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(b)
         .iter()
         .map(|x| format!("{x:02x}"))
         .collect()
-}
-
-fn gzip_bytes(b: &[u8]) -> Result<Vec<u8>, String> {
-    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    gz.write_all(b).map_err(err)?;
-    gz.finish().map_err(err)
 }
 
 fn gunzip_bytes(b: &[u8]) -> Result<Vec<u8>, String> {
@@ -852,8 +985,9 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Result<Vec<String>, String>
             "score_run_stats" => c
                 .execute(
                     "INSERT INTO score_run_stats (run_id, universe_size, loaded, ok, excluded, \
-                     failed, reasons_json, snapshot_rows, snapshot_prefix, snapshot_suffix) \
-                     VALUES ('__selfcheck__', 0, 0, 0, 0, 0, '{}', 0, x'', x'')",
+                     failed, reasons_json, snapshot_rows, inputs_stored, inputs_reason, \
+                     snapshot_prefix, snapshot_suffix) \
+                     VALUES ('__selfcheck__', 0, 0, 0, 0, 0, '{}', 0, 0, 'selfcheck', x'', x'')",
                     [],
                 )
                 .map(|_| ()),
@@ -1374,7 +1508,7 @@ impl ScoreHistoryStore {
             }
         }
         if let Some(e) = eval {
-            write_evaluation(&tx, &run_id, meta.captured_at, e)?;
+            write_evaluation(&tx, meta, &run_id, e)?;
         }
         tx.commit().map_err(err)?;
         Ok(RecordOutcome::Recorded {
@@ -1386,8 +1520,8 @@ impl ScoreHistoryStore {
     pub fn run_stats(&self, run_id: &str) -> Result<Option<RunStats>, String> {
         let c = self.conn.lock().map_err(|_| "lock")?;
         c.query_row(
-            "SELECT universe_size, loaded, ok, excluded, failed, reasons_json, snapshot_rows \
-             FROM score_run_stats WHERE run_id = ?1",
+            "SELECT universe_size, loaded, ok, excluded, failed, reasons_json, snapshot_rows, \
+             inputs_stored, inputs_run_id, inputs_reason FROM score_run_stats WHERE run_id = ?1",
             params![run_id],
             |r| {
                 Ok(RunStats {
@@ -1399,6 +1533,9 @@ impl ScoreHistoryStore {
                     failed: r.get(4)?,
                     reasons: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
                     snapshot_rows: r.get(6)?,
+                    inputs_stored: r.get::<_, i64>(7)? != 0,
+                    inputs_run_id: r.get(8)?,
+                    inputs_reason: r.get(9)?,
                 })
             },
         )
@@ -1414,7 +1551,8 @@ impl ScoreHistoryStore {
                 "SELECT symbol, status, reason, rank, gate_gap_bps, composite, coverage, \
                  fundamentals, technical, forecast, decision, confidence, row_confidence, \
                  price_cents, intrinsic_cents, anchor_cents, anchor, gap_bps, upside_bps, \
-                 trust_signal, inputs_hash FROM score_evaluations WHERE run_id = ?1 \
+                 trust_signal, inputs_hash, technical_reason FROM score_evaluations \
+                 WHERE run_id = ?1 \
                  ORDER BY rank IS NULL, rank, symbol",
             )
             .map_err(err)?;
@@ -1443,6 +1581,7 @@ impl ScoreHistoryStore {
                     trust_signal: r.get(19)?,
                     input_idx: None,
                     inputs_hash: r.get(20)?,
+                    technical_reason: r.get(21)?,
                 })
             })
             .map_err(err)?
@@ -1511,16 +1650,23 @@ impl ScoreHistoryStore {
     /// re-checked; any mismatch or gap is an error.
     pub fn reconstruct_snapshot(&self, run_id: &str) -> Result<Vec<u8>, String> {
         let c = self.conn.lock().map_err(|_| "lock")?;
-        let (n, prefix, suffix): (i64, Vec<u8>, Vec<u8>) = c
+        type Head = (i64, Vec<u8>, Vec<u8>, i64, Option<String>);
+        let (n, prefix, suffix, stored, link): Head = c
             .query_row(
-                "SELECT snapshot_rows, snapshot_prefix, snapshot_suffix FROM score_run_stats \
-                 WHERE run_id = ?1",
+                "SELECT snapshot_rows, snapshot_prefix, snapshot_suffix, inputs_stored, \
+                 inputs_run_id FROM score_run_stats WHERE run_id = ?1",
                 params![run_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()
             .map_err(err)?
-            .ok_or_else(|| format!("run {run_id} has no stored inputs"))?;
+            .ok_or_else(|| format!("run {run_id} has no evaluations"))?;
+        if stored == 0 {
+            return Err(format!(
+                "run {run_id} did not store full inputs; most recent inputs: {}",
+                link.as_deref().unwrap_or("none")
+            ));
+        }
         let mut st = c
             .prepare(
                 "SELECT ri.idx, ri.hash, i.encoding, i.raw_size, i.bytes FROM score_run_inputs ri \
@@ -1548,6 +1694,7 @@ impl ScoreHistoryStore {
             }
             let bytes = bytes.ok_or_else(|| format!("run {run_id}: blob {hash} missing"))?;
             let raw = match enc.as_deref() {
+                Some("zstd") => zstd::stream::decode_all(bytes.as_slice()).map_err(err)?,
                 Some("gzip") => gunzip_bytes(&bytes)?,
                 Some("raw") => bytes,
                 e => return Err(format!("blob {hash}: unknown encoding {e:?}")),
@@ -2863,14 +3010,47 @@ mod tests {
             (3, 1, 1, 0, 2)
         );
         assert_eq!(st.reasons.get("not_loaded"), Some(&2));
-        // Same input bytes in two runs -> one blob.
+        // Run 1 stores inputs (`first`, zstd); run 2 is unchanged: no inputs, explicit link.
+        let r2 = meta(2).run_id();
+        assert!(st.inputs_stored);
+        assert_eq!(st.inputs_reason, "first");
+        let st2 = s.run_stats(&r2).unwrap().unwrap();
+        assert!(!st2.inputs_stored);
+        assert_eq!(st2.inputs_reason, "skipped:unchanged");
+        assert_eq!(st2.inputs_run_id.as_deref(), Some(r1.as_str()));
+        assert_eq!(
+            s.evaluations(&r2).unwrap().len(),
+            3,
+            "evaluations on every run"
+        );
+        let msg = s.reconstruct_snapshot(&r2).unwrap_err();
+        assert!(msg.contains(&r1), "{msg}");
+        let c = s.conn.lock().unwrap();
+        let enc: String = c
+            .query_row("SELECT encoding FROM score_inputs LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(enc, "zstd");
+        assert_eq!(table_count(&c, "score_run_inputs"), 1);
+        drop(c);
+        let want = [b"{\"rows\":[".as_slice(), &e.inputs[0].1, b"]}"].concat();
+        assert_eq!(s.reconstruct_snapshot(&r1).unwrap(), want);
+        // The post-close run always stores inputs; identical bytes dedup to one blob.
+        let mut close = meta(4);
+        close.trigger = "close".into();
+        s.record_run_full(&close, &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let st4 = s.run_stats(&close.run_id()).unwrap().unwrap();
+        assert_eq!(
+            (st4.inputs_stored, st4.inputs_reason.as_str()),
+            (true, "close")
+        );
+        assert_eq!(s.reconstruct_snapshot(&close.run_id()).unwrap(), want);
         let c = s.conn.lock().unwrap();
         assert_eq!(table_count(&c, "score_inputs"), 1);
         assert_eq!(table_count(&c, "score_run_inputs"), 2);
         drop(c);
-        let want = [b"{\"rows\":[".as_slice(), &e.inputs[0].1, b"]}"].concat();
-        assert_eq!(s.reconstruct_snapshot(&r1).unwrap(), want);
-        assert_eq!(s.reconstruct_snapshot(&meta(2).run_id()).unwrap(), want);
         // Excluded/failed decisions are never stored even if a caller passes one.
         let mut bad = tiny_eval(&["X", "Y"]);
         bad.evals[1].decision = Some("Act".into());
@@ -2882,6 +3062,83 @@ mod tests {
             .unwrap()
             .decision
             .is_none());
+    }
+
+    #[test]
+    fn material_change_policy_is_deterministic() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let base = tiny_eval(&["A", "B", "C"]);
+        let rec = |at: i64, e: &RunEvaluation| {
+            s.record_run_full(&meta(at), &[], Some(e)).unwrap();
+            s.run_stats(&meta(at).run_id()).unwrap().unwrap()
+        };
+        assert_eq!(rec(1, &base).inputs_reason, "first");
+        // Score / price / rank moves alone are NOT material.
+        let mut e = base.clone();
+        e.evals[0].composite = Some(99);
+        e.evals[0].price_cents = Some(12345);
+        e.evals[0].rank = Some(7);
+        e.inputs[0].1 = b"{\"symbol\":\"A\",\"p\":2}".to_vec();
+        assert_eq!(rec(2, &e).inputs_reason, "skipped:unchanged");
+        // gap_below_min:<bps> value changes are not material either (same class).
+        let mut x = base.clone();
+        x.evals[0].status = "excluded".into();
+        x.evals[0].reason = "gap_below_min:100".into();
+        x.evals[0].decision = None;
+        assert_eq!(rec(3, &x).inputs_reason, "material:evaluation");
+        x.evals[0].reason = "gap_below_min:150".into();
+        assert_eq!(rec(4, &x).inputs_reason, "skipped:unchanged");
+        // A decision change is material.
+        let mut d = base.clone();
+        d.evals[0].decision = Some("Watch".into());
+        assert_eq!(rec(5, &d).inputs_reason, "material:evaluation");
+        // A newly loaded symbol is material (loaded set).
+        let mut l = d.clone();
+        l.evals[1].status = "excluded".into();
+        l.evals[1].reason = "unprofitable".into();
+        assert_eq!(rec(6, &l).inputs_reason, "material:loaded_set");
+        // Skipped runs link to the most recent run that stored inputs.
+        let st = rec(7, &l);
+        assert_eq!(st.inputs_run_id, Some(meta(6).run_id()));
+        // Unchanged but >= 24 h since the last inputs: `daily`.
+        assert_eq!(rec(6 + 86_400, &l).inputs_reason, "daily");
+    }
+
+    /// Never prune: no API deletes history, a year of runs survives reopen, and the
+    /// only file-removing paths touch backup files, never the live tables.
+    #[test]
+    fn no_pruning_path_and_every_run_survives() {
+        let dir = tmpdir("noprune");
+        let p = dir.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, Some(&dir.join("bk"))).unwrap();
+        let e = tiny_eval(&["A", "B"]);
+        for d in 0..400 {
+            s.record_run_full(
+                &meta(1_000 + d * 86_400),
+                &[row("A", "Act", 30, 60, 0, 30)],
+                Some(&e),
+            )
+            .unwrap();
+        }
+        drop(s);
+        let s = ScoreHistoryStore::open(&p, Some(&dir.join("bk"))).unwrap();
+        assert_eq!(s.run_count().unwrap(), 400);
+        let c = s.conn.lock().unwrap();
+        for t in HISTORY_TABLES.iter().skip(4) {
+            assert!(table_count(&c, t) > 0, "{t}");
+        }
+        assert_eq!(table_count(&c, "score_evaluations"), 800);
+        drop(c);
+        // Source scan: no prune/purge/retention API and no delete verb in this module
+        // outside tests (the guard test covers SQL on every guarded table).
+        let src = include_str!("score_history.rs");
+        let body = &src[..src.find("#[cfg(test)]").unwrap()];
+        for w in ["fn prune", "fn purge", "retention_days", "fn truncate"] {
+            assert!(!body.contains(w), "{w}");
+        }
+        let del = ["DELETE", "FROM"].join(" ");
+        assert!(!body.contains(&del), "no delete statement in the store");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

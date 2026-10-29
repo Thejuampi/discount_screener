@@ -1467,6 +1467,7 @@ pub fn run_evaluation(
                 coverage: a.map(|r| r.coverage as i64),
                 fundamentals: a.and_then(|r| r.fundamentals).map(i64::from),
                 technical: a.and_then(|r| r.technical).map(i64::from),
+                technical_reason: technical_reason(snap, e),
                 forecast: a.and_then(|r| r.forecast).map(i64::from),
                 decision: a.and_then(|r| r.decision.clone()),
                 confidence: a.map(|r| r.confidence.clone()),
@@ -1494,6 +1495,23 @@ pub fn run_evaluation(
             snapshot_suffix: suffix,
         },
     ))
+}
+
+/// Why an evaluation's diagnostic T is NULL (`None` when it was computed).
+fn technical_reason(snap: &OpportunitySnapshot, e: &Evaluation) -> Option<String> {
+    if e.row.as_ref().is_some_and(|r| r.technical.is_some()) {
+        return None;
+    }
+    let why = match e.snapshot_index.and_then(|i| snap.rows.get(i)) {
+        None => "not_loaded",
+        Some(_) if e.row.is_none() => "score_error",
+        Some(r) => match r.year.as_ref() {
+            None => "no_year_chart",
+            Some(y) if y.latest_close_cents.is_none() => "no_latest_close",
+            Some(_) => "no_indicators",
+        },
+    };
+    Some(why.to_string())
 }
 
 /// (envelope prefix, per-row (symbol, bytes), envelope suffix).
@@ -2597,7 +2615,8 @@ mod full_universe_parity_tests {
                 semantics: "android".into(),
                 market_context: false,
                 binary_version: "rc".into(),
-                trigger: "interval".into(),
+                // 4 runs/day at 6 h; the 4th of each day is the post-close run.
+                trigger: if run % 4 == 3 { "close" } else { "interval" }.into(),
                 symbols_total: n,
                 incomplete_symbols: vec![],
             };
@@ -2605,9 +2624,14 @@ mod full_universe_parity_tests {
                 .record_run_full(&meta, &android_to_ranked(&ranked), Some(&eval))
                 .unwrap();
             let id = meta.run_id();
-            let rebuilt = store.reconstruct_snapshot(&id).unwrap();
             let original = serde_json::to_vec(&snap).unwrap();
             let st = store.run_stats(&id).unwrap().unwrap();
+            let rebuilt = if st.inputs_stored {
+                store.reconstruct_snapshot(&id).unwrap()
+            } else {
+                assert!(store.reconstruct_snapshot(&id).is_err());
+                original.clone()
+            };
             let rows = store.evaluations(&id).unwrap().len();
             println!(
                 "RC {}",
@@ -2620,7 +2644,8 @@ mod full_universe_parity_tests {
                     "snapshot_bytes": original.len(),
                     "snapshot_sha256": sha_hex(&original),
                     "reconstructed_sha256": sha_hex(&rebuilt),
-                    "reconstruction_byte_identical": rebuilt == original,
+                    "inputs_stored": st.inputs_stored,
+                    "reconstruction_byte_identical": st.inputs_stored.then_some(rebuilt == original),
                 })
             );
             assert_eq!(rows, n);

@@ -131,12 +131,37 @@ Every recorded run also stores one row per **universe** symbol in `score_evaluat
 Excluded rows carry diagnostic f/t/fc and composite scores; `decision` is NULL unless `ok`.
 The official ranking (`rank_android_v3`) is exactly the `ok` evaluations in main's order.
 
-The raw snapshot rows are content-addressed in `score_inputs` (sha256 of the exact serde
-bytes, gzip, deduplicated across runs); `score_run_inputs` lists each run's rows in order and
-`score_run_stats` holds the counts plus the snapshot envelope, so
+**Evaluations are written on every run** (all universe symbols). Excluded rows also get a
+diagnostic T (`technical`) when the Year chart allows; otherwise `technical` is NULL and
+`technical_reason` says why (`not_loaded`, `score_error`, `no_year_chart`, `no_latest_close`,
+`no_indicators`). `decision` stays NULL for every non-`ok` row.
+
+**Full inputs** (the raw snapshot rows) are stored only when the deterministic policy says so;
+`score_run_stats.inputs_reason` records which rule fired, checked in this order:
+
+1. `first` - no earlier run of this profile+model stored inputs;
+2. `close` - the post-close run (trigger `close`) always stores them (one per trading day);
+3. `daily` - the most recent inputs are >= 24 h older than this run (days whose close slot
+   was taken by an interval run, restarts);
+4. `material:loaded_set` - the set of loaded symbols (reason != `not_loaded`) differs from the
+   most recent run with inputs;
+5. `material:evaluation` - any symbol's (status, reason class, decision) differs from that run;
+   the reason class drops the `:<detail>` suffix (`gap_below_min:120` -> `gap_below_min`).
+   Score, rank and price moves alone are **not** material;
+6. otherwise `skipped:unchanged`.
+
+`inputs_stored` is 1 for rules 1-5. `inputs_run_id` is explicit on every run: the run itself
+when it stored inputs, otherwise the most recent run that did (the inputs it can be read
+against). Blobs are content-addressed in `score_inputs` (sha256 of the exact serde bytes,
+`encoding = 'zstd'` level 19, deduplicated across runs); `score_run_inputs` lists the run's rows
+in order and `score_run_stats` holds counts plus the snapshot envelope, so
 `ScoreHistoryStore::reconstruct_snapshot(run_id)` rebuilds the snapshot byte for byte (hashes
-re-checked). All four tables are append-only (triggers, self-check, export, restore by name;
-older backups without them restore fine). Everything is written in the run's one transaction.
+re-checked) for runs with inputs, and errors naming `inputs_run_id` for runs without.
+
+**Nothing is ever pruned**: there is no retention/prune code path (a test scans the source and
+keeps 400 daily runs across reopen). All four tables are append-only (triggers, self-check,
+export, restore by name; older backups without them restore fine). Everything is written in
+the run's one transaction.
 
 `GET /history?all=1[&run=<id>][&profile=]` returns the latest (or given) run's evaluations
 and stats; `GET /history?all=1&symbol=X` one symbol's evaluations across runs.
