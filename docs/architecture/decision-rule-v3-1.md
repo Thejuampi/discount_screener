@@ -22,13 +22,16 @@ S = V3 composite, T = V3 technical bucket, histogram = MACD(12,26) − signal(9)
   `histogram_raw_cents`), never the official rounded `histogramCents`. That matters because the two
   sides round the official cents differently (Kotlin `roundToLong` is half-up, Rust `round_even`
   is half-even). Using raw values keeps the shadow identical on both sides, within 1e-9. The
-  official rounded field and its rounding are unchanged.
+  official rounded field and its rounding are unchanged. Summaries persisted before the raw field
+  existed, such as the current daemons' `opportunity_snapshot.json`, fall back to the rounded
+  cents on both sides. There the two rounding modes can differ only on an exact half-cent tie: at
+  most 0.5 cent of histogram.
 - **Warm-up.** With fewer than 35 weekly bars (26 + 9 for MACD + signal), m is null, `warmup` is
   true, and no momentum penalty applies. The T term still applies. The flag is stored per row.
 - **Partial week.** The last weekly bar is the current, possibly incomplete, week, exactly as the
   official V3 technicals see it. So m can move intra-week. Each recorded run captures the value
   at its own time.
-- **Missing inputs.** A missing T, missing m, or a summary from before `histogramRawCents` existed
+- **Missing inputs.** A missing T or a missing histogram/close
   gives no penalty for that term.
 
 ## Config grid (stable ids — append only, never renumber)

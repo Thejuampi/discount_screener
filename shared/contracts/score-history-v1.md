@@ -59,7 +59,7 @@ transaction as the official `score_runs`/`score_history` rows.
 | bound | REAL NOT NULL | |
 | lambda_t | REAL NOT NULL | |
 | lambda_m | REAL NOT NULL | |
-| m | REAL | null when the raw histogram/close is missing or during warm-up |
+| m | REAL | null when the histogram (raw, else rounded cents)/close is missing or during warm-up |
 | warmup | INTEGER NOT NULL | 1 when the Year series has < 35 weekly bars (m null, no penalty) |
 | s_adj | REAL NOT NULL | |
 | shadow_decision | TEXT | Act/Watch/Avoid; only ever differs from the official decision as Act → Watch |

@@ -141,7 +141,8 @@ class V31ActAdjustmentTest {
         assertTrue(v.grid(Act, 40, 0, -1.0, warmup = true).all { it.m == null && it.sAdj == 40.0 })
         val raw = ChartRangeSummary(ChartRange.Year, 0L, 35, latestCloseCents = 10_000, histogramCents = -1, histogramRawCents = -0.5)
         assertEquals(-0.5 / 10_000.0, v.histogramRatio(raw)!!, 0.0)
-        assertNull(v.histogramRatio(ChartRangeSummary(ChartRange.Year, 0L, 60, latestCloseCents = 10_000, histogramCents = -5)))
+        assertEquals(-5.0 / 10_000.0, v.histogramRatio(ChartRangeSummary(ChartRange.Year, 0L, 60, latestCloseCents = 10_000, histogramCents = -5))!!, 0.0)
+        assertNull(v.histogramRatio(ChartRangeSummary(ChartRange.Year, 0L, 60, latestCloseCents = 10_000)))
         assertTrue(!v.isWarmup(null))
     }
 }

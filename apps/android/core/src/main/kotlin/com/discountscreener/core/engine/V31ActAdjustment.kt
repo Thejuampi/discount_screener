@@ -45,7 +45,8 @@ object V31ActAdjustment {
     /** Unrounded histogram / close of the Year summary; null when missing, close <= 0, or warming up. */
     fun histogramRatio(summary: ChartRangeSummary?): Double? {
         if (summary == null || isWarmup(summary)) return null
-        val hist = summary.histogramRawCents?.takeIf { it.isFinite() } ?: return null
+        // Raw when present; summaries persisted before the raw field fall back to rounded cents.
+        val hist = (summary.histogramRawCents ?: summary.histogramCents?.toDouble())?.takeIf { it.isFinite() } ?: return null
         val close = summary.latestCloseCents?.takeIf { it > 0 } ?: return null
         return hist / close.toDouble()
     }

@@ -88,10 +88,12 @@ pub fn momentum_input(summary: Option<&AndroidChartSummary>) -> (Option<f64>, bo
     if s.candle_count < V31_MIN_WEEKLY_BARS {
         return (None, true);
     }
-    let ratio = match (
-        s.histogram_raw_cents,
-        s.latest_close_cents.filter(|c| *c > 0),
-    ) {
+    // Raw histogram when present; summaries persisted before the raw field existed (e.g. the
+    // daemons' opportunity_snapshot.json) fall back to the rounded cents.
+    let hist = s
+        .histogram_raw_cents
+        .or(s.histogram_cents.map(|h| h as f64));
+    let ratio = match (hist, s.latest_close_cents.filter(|c| *c > 0)) {
         (Some(h), Some(c)) if h.is_finite() => Some(h / c as f64),
         _ => None,
     };
@@ -351,8 +353,13 @@ mod tests {
         let (r, w) = momentum_input(Some(&summary(35, Some(-0.5), Some(0), 10_000)));
         assert_eq!((r, w), (Some(-0.5 / 10_000.0), false));
         assert_eq!(momentum_input(None), (None, false));
+        // No raw value (older persisted summary): rounded cents fallback.
         assert_eq!(
             momentum_input(Some(&summary(60, None, Some(-5), 10_000))),
+            (Some(-5.0 / 10_000.0), false)
+        );
+        assert_eq!(
+            momentum_input(Some(&summary(60, None, None, 10_000))),
             (None, false)
         );
         // A grid called with warmup ignores any ratio.
