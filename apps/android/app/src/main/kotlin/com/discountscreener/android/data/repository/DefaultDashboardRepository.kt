@@ -903,7 +903,7 @@ class DefaultDashboardRepository(
                 logger.info(
                     TAG,
                     "score journal: dropped $dropped row(s) older than " +
-                        "${SCORE_JOURNAL_RETENTION_SECONDS / 86_400} days",
+                        "$SCORE_JOURNAL_RETENTION_DAYS days",
                 )
             }
         }.onFailure { error ->
@@ -6063,10 +6063,17 @@ class DefaultDashboardRepository(
         internal const val STAGE_TIMING_PREFIX = "stage-timing"
 
         /**
-         * The one-year outcome can mature after 252 trading sessions.
-         * The calendar margin covers weekends, holidays, and delayed app openings.
+         * How long the score journal keeps a row: three years (1095 days), Juan's decision.
+         * It covers the one-year outcome (252 trading sessions) with ample margin and keeps a
+         * multi-year record for comparing models.
+         *
+         * Boundary: a row is pruned only when it is strictly older than this window, i.e.
+         * `scored_at < now - SCORE_JOURNAL_RETENTION_SECONDS`. A row exactly 1095 days old is
+         * kept; a row 1095 days and one second old (and so any row 1096 days old) is pruned.
+         * `scoring_evaluation_snapshot` has no age-based retention at all.
          */
-        internal const val SCORE_JOURNAL_RETENTION_SECONDS = 460L * 24L * 60L * 60L
+        internal const val SCORE_JOURNAL_RETENTION_DAYS = 1095L
+        internal const val SCORE_JOURNAL_RETENTION_SECONDS = SCORE_JOURNAL_RETENTION_DAYS * 24L * 60L * 60L
 
         /** V1 through V5, scored from one input snapshot. Legacy remains a separate Buffett view. */
         private val EVALUATION_MODELS = listOf(
