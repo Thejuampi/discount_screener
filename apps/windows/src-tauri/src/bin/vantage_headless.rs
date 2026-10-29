@@ -514,6 +514,7 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
                 "profile": engine.profile(),
                 "model": model.as_str(),
                 "semantics": used,
+                "rule_version": discount_screener_windows_lib::opportunity_v31::V31_RULE_VERSION,
                 "ranked_total": total,
                 "market_context": engine.status().market_context,
                 "source": source,
@@ -608,6 +609,8 @@ mod tests {
             regime: None,
             trust_signal: None,
             projection_gap: None,
+            s_adj: None,
+            m: None,
         };
         let t = render_table(&[mk("APT21794-USD"), mk("A")]);
         let pos: Vec<usize> = t

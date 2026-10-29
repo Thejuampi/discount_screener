@@ -270,7 +270,13 @@ fun rankProjectWrite(s: State, outDir: File) {
         watchlistSymbols = emptySet(),
         detailsBySymbol = details,
         candidateRows = candidates,
-        opportunityDecisionFactsBySymbol = rows.associate { it.symbol to ProjectedOpportunityDecisionFacts(it.compositeScore) },
+        opportunityDecisionFactsBySymbol = rows.associate {
+            it.symbol to ProjectedOpportunityDecisionFacts(
+                it.compositeScore,
+                it.technicalScore,
+                V31ActAdjustment.macdMomentum(s.summaries[it.symbol]?.get(ChartRange.Year)),
+            )
+        },
         chartCandles = detailSymbols.mapNotNull { sym -> s.candles[sym]?.let { SymbolRangeKey(sym, ChartRange.Year) to it } }.toMap(),
         chartSummariesBySymbol = s.summaries.mapValues { it.value.toMap() },
         dcfBySymbol = s.dcf.toMap(),
@@ -296,6 +302,7 @@ fun rankProjectWrite(s: State, outDir: File) {
                 put("anchorCents", p.fairValueAnchor.valueCents); put("anchorSource", p.fairValueAnchor.toString().take(160))
                 put("trustSignal", p.trustSignal?.kind?.name)
                 put("decision", p.decision?.name)
+                put("sAdj", p.sAdj); put("m", p.macdMomentum); put("ruleVersion", V31ActAdjustment.RULE_VERSION)
                 put("judgmentPrimaryCents", p.valuationJudgment?.primaryCents)
             })
         }

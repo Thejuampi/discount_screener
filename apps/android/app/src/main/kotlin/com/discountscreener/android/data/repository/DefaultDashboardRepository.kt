@@ -95,6 +95,7 @@ import com.discountscreener.core.engine.IndexEstimatesEngine
 import com.discountscreener.core.engine.MODEL_POLICY_VERSION
 import com.discountscreener.core.engine.OpportunityContext
 import com.discountscreener.core.engine.OpportunityEngine
+import com.discountscreener.core.engine.V31ActAdjustment
 import com.discountscreener.core.engine.PricingHistoryMerge
 import com.discountscreener.core.engine.QuantLensEngine
 import com.discountscreener.core.engine.QuantLensExpectedValuePolicy
@@ -3205,7 +3206,13 @@ class DefaultDashboardRepository(
     )
 
     private fun projectedOpportunityDecisionFactsBySymbol(rows: List<OpportunityRow>): Map<String, ProjectedOpportunityDecisionFacts> =
-        rows.associate { row -> row.symbol to ProjectedOpportunityDecisionFacts(compositeScore = row.compositeScore) }
+        rows.associate { row ->
+            row.symbol to ProjectedOpportunityDecisionFacts(
+                compositeScore = row.compositeScore,
+                technicalScore = row.technicalScore,
+                macdMomentum = V31ActAdjustment.macdMomentum(chartSummaries[row.symbol]?.get(ChartRange.Year)),
+            )
+        }
 
     private fun trackedRowsFromProjectionLocked(
         projectedRows: List<ProjectedTrackedRow>,

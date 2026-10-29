@@ -53,3 +53,9 @@ CI (`android-jvm-parity` job) runs the offline replay and diff on the committed 
 Headless flags rows whose on-screen value needs an Android DCF identity value it does not
 compute (Street unusable and a live residual/FCFF DCF) with `projection_gap`; the diff
 counts those separately instead of failing.
+
+## V3.1
+
+`opps.json` rows carry `sAdj`, `m` and `ruleVersion`. `diff_headless.py` first checks the V3.1
+constants (λ_T, λ_M, histogram bound, version) match between `V31ActAdjustment.kt` and
+`opportunity_v31.rs`, then compares `sAdj`/`m` with absolute tolerance 1e-9 and decisions exactly.

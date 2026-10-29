@@ -204,6 +204,8 @@ class ScreenDataProjectionEngine {
                 opportunityDecisionFacts = decisionFacts,
                 scoringModel = request.route.opportunityScoringModel,
             ),
+            sAdj = v31AdjustedScore(decisionFacts, request.route.opportunityScoringModel),
+            macdMomentum = decisionFacts.macdMomentum,
             quantLensSummary = quantLensRowSummary(row.symbol, detail, dcfAnalysis),
             valuationJudgment = named.judgment,
         )
@@ -760,7 +762,17 @@ class ScreenDataProjectionEngine {
         else -> ProjectedRowDecision.Watch
     }
 
-    private fun opportunityDecision(
+    /** V3.1 S_adj for AggressiveV3 rows with a composite; null otherwise (raw S rule applies). */
+    internal fun v31AdjustedScore(
+        facts: ProjectedOpportunityDecisionFacts,
+        scoringModel: OpportunityScoringModel,
+    ): Double? {
+        if (scoringModel != OpportunityScoringModel.AggressiveV3) return null
+        val composite = facts.compositeScore ?: return null
+        return V31ActAdjustment.adjustedScore(composite, facts.technicalScore, facts.macdMomentum)
+    }
+
+    internal fun opportunityDecision(
         upsideBps: Int,
         confidence: ProjectedConfidence,
         trustSignal: ProjectedTrustSignal?,
@@ -768,6 +780,8 @@ class ScreenDataProjectionEngine {
         scoringModel: OpportunityScoringModel,
     ): ProjectedRowDecision? {
         var compositeScore = facts.compositeScore
+        // V3.1: Act is checked on S_adj (technical/momentum-penalised); Avoid stays on raw S.
+        val actScore = v31AdjustedScore(facts, scoringModel)
         val avoidBelow = OpportunityEngine.avoidBelowScore(scoringModel)
         val actAtOrAbove = OpportunityEngine.actAtOrAboveScore(scoringModel)
         return when {
@@ -776,7 +790,8 @@ class ScreenDataProjectionEngine {
             upsideBps <= 0 -> ProjectedRowDecision.Avoid
             compositeScore != null && compositeScore < avoidBelow -> ProjectedRowDecision.Avoid
             trustSignal != null -> ProjectedRowDecision.Watch
-            confidence == ProjectedConfidence.High && (compositeScore ?: actAtOrAbove) >= actAtOrAbove -> ProjectedRowDecision.Act
+            confidence == ProjectedConfidence.High &&
+                (actScore ?: (compositeScore ?: actAtOrAbove).toDouble()) >= actAtOrAbove -> ProjectedRowDecision.Act
             else -> ProjectedRowDecision.Watch
         }
     }

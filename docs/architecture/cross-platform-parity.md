@@ -52,3 +52,5 @@ Before finishing a feature, check that:
 
 - shared contracts produce the same meaning on each participating client, or
 - the document names the platform exception.
+
+See also [decision rule V3.1](decision-rule-v3-1.md) (Act on technically adjusted S_adj).

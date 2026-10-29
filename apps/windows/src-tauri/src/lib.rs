@@ -33,6 +33,7 @@ mod news;
 pub mod operating_valuation;
 pub mod operating_valuation_runtime;
 mod opportunity_v3;
+pub mod opportunity_v31;
 mod price_path;
 mod profiles;
 mod quant_lens;
