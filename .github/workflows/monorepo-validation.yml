@@ -75,3 +75,8 @@ jobs:
           cargo test --no-default-features --lib history_tick
           cargo test --no-default-features --lib full_universe_parity
           cargo test --no-default-features --bin vantage-headless
+      - name: V3.1 shadow unit tests (opportunity_v31, score_shadow_report)
+        run: |
+          cd apps/windows/src-tauri
+          cargo test --no-default-features --lib opportunity_v31
+          cargo test --no-default-features --lib score_shadow_report

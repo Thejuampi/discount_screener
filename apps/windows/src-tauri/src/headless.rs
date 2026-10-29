@@ -453,6 +453,9 @@ pub struct RankedRow {
     /// Set when the on-screen value needs a DCF identity value headless does not compute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_gap: Option<String>,
+    /// V3.1 SHADOW grid (android semantics only). NOT official output: decision/rank ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<Vec<crate::opportunity_v31::ShadowValue>>,
 }
 
 /// Short-side setup label from the (already short-oriented) Short V3 composite.
@@ -505,6 +508,7 @@ pub fn to_ranked(rows: &[OpportunityRow], model: ScoringModel) -> Vec<RankedRow>
             regime: r.regime_score,
             trust_signal: None,
             projection_gap: None,
+            shadow: None,
         })
         .collect()
 }
@@ -532,6 +536,7 @@ pub fn android_to_ranked(rows: &[AndroidRow]) -> Vec<RankedRow> {
             regime: None,
             trust_signal: r.trust_signal.clone(),
             projection_gap: r.projection_gap.clone(),
+            shadow: r.shadow.clone(),
         })
         .collect()
 }
@@ -643,6 +648,9 @@ pub struct AndroidRow {
     /// does not compute (Street unusable + live residual/FCFF DCF).
     pub projection_gap: Option<String>,
     pub fundamentals_signals: Vec<String>,
+    /// V3.1 SHADOW grid. NOT official output: decision/rank ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<Vec<crate::opportunity_v31::ShadowValue>>,
 }
 
 /// `quant_lens.row_upside_min_bps` / `row_upside_max_bps` (valuation-policy.yaml).
@@ -936,6 +944,17 @@ fn android_score(r: &SnapshotRow, row: &crate::engine::CandidateRow) -> (Android
             row_upside_bps: upside.unwrap_or(0),
             projection_gap: p.projection_gap.map(str::to_string),
             fundamentals_signals: sig,
+            // V3.1 shadow, computed from the official decision; never feeds back.
+            shadow: Some({
+                let (ratio, warmup) = crate::opportunity_v31::momentum_input(r.year.as_ref());
+                let src = crate::opportunity_v31::hist_source(r.year.as_ref());
+                let mut g =
+                    crate::opportunity_v31::shadow_grid(p.decision, composite, t, ratio, warmup);
+                for v in &mut g {
+                    v.hist_source = src.map(str::to_string);
+                }
+                g
+            }),
         },
         confidence_rank(row.confidence),
     )
@@ -2029,6 +2048,20 @@ mod android_parity_tests {
         };
         let rows = rank_fixture_at(std::path::Path::new(&inp));
         std::fs::write(out, serde_json::to_vec(&rows).unwrap()).unwrap();
+        // Runtime V3.1 shadow constants, compared with the Kotlin runtime ones by diff_headless.
+        if let Ok(path) = std::env::var("FIXTURE_CONSTANTS_OUT") {
+            use crate::opportunity_v31::*;
+            let c = serde_json::json!({
+                "ruleVersion": V31_SHADOW_RULE_VERSION,
+                "lambdaT": V31_LAMBDA_T,
+                "actThreshold": V31_ACT_THRESHOLD,
+                "minWeeklyBars": V31_MIN_WEEKLY_BARS,
+                "configs": V31_SHADOW_CONFIGS.iter().map(|c| serde_json::json!({
+                    "id": c.id, "bound": c.bound, "lambdaM": c.lambda_m,
+                })).collect::<Vec<_>>(),
+            });
+            std::fs::write(path, serde_json::to_vec(&c).unwrap()).unwrap();
+        }
     }
 
     /// The golden must actually exercise every sort key, or mutating one would
@@ -2364,7 +2397,7 @@ mod history_tick_tests {
 mod full_universe_parity_tests {
     use super::*;
 
-    /// VERBATIM copy of main's `rank_android_v3` (a69b736), the reference.
+    /// VERBATIM copy of main's `rank_android_v3` (2c19869, with the V3.1 shadow), the reference.
     #[allow(clippy::all)]
     fn rank_android_v3_main(
         snapshot: &OpportunitySnapshot,
@@ -2437,6 +2470,19 @@ mod full_universe_parity_tests {
                         row_upside_bps: upside.unwrap_or(0),
                         projection_gap: p.projection_gap.map(str::to_string),
                         fundamentals_signals: sig,
+                        // V3.1 shadow, computed from the official decision; never feeds back.
+                        shadow: Some({
+                            let (ratio, warmup) =
+                                crate::opportunity_v31::momentum_input(r.year.as_ref());
+                            let src = crate::opportunity_v31::hist_source(r.year.as_ref());
+                            let mut g = crate::opportunity_v31::shadow_grid(
+                                p.decision, composite, t, ratio, warmup,
+                            );
+                            for v in &mut g {
+                                v.hist_source = src.map(str::to_string);
+                            }
+                            g
+                        }),
                     },
                     confidence_rank(row.confidence),
                 )

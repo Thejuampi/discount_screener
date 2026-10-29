@@ -22,6 +22,10 @@ pub struct AndroidChartSummary {
     pub macd_cents: Option<i64>,
     pub signal_cents: Option<i64>,
     pub histogram_cents: Option<i64>,
+    /// Unrounded MACD histogram in cents (V3.1 shadow input only; `histogram_cents` is the
+    /// official, rounded value). Absent in summaries serialized before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub histogram_raw_cents: Option<f64>,
     pub latest_wilder_rsi: Option<f64>,
     pub latest_rsi_slope: Option<f64>,
     pub volume_ratio_hundredths: Option<i32>,
@@ -183,7 +187,8 @@ pub fn build_summary(candles: &[HistoricalCandle]) -> AndroidChartSummary {
         ema200_cents: last(ema(&closes, 200)),
         macd_cents: last(macd),
         signal_cents: last(signal),
-        histogram_cents: last(hist),
+        histogram_cents: last(hist.clone()),
+        histogram_raw_cents: hist.last().copied(),
         latest_wilder_rsi: rsi,
         latest_rsi_slope: slope,
         volume_ratio_hundredths: volume_ratio_hundredths(candles),

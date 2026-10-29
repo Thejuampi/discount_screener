@@ -25,6 +25,7 @@ import com.discountscreener.core.model.ProjectedOpportunityDecisionFacts
 import com.discountscreener.core.model.ProjectedProviderCategory
 import com.discountscreener.core.model.ProjectedProvenanceState
 import com.discountscreener.core.model.ProjectedRowDecision
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProjectedRowFreshness
 import com.discountscreener.core.model.ProjectedTrustSignalKind
 import com.discountscreener.core.model.ProjectionProfileFacts
@@ -382,6 +383,33 @@ class ScreenDataProjectionEngineTest {
         ).requireSuccess()
 
         assertEquals(ProjectedRowDecision.Avoid, result.opportunityRows.single().decision)
+    }
+
+    @Test
+    fun v31_shadow_inputs_never_change_the_official_decision() {
+        val candidate = candidateRow().copy(confidence = ConfidenceBand.High)
+        fun project(facts: ProjectedOpportunityDecisionFacts) = ScreenDataProjectionEngine().project(
+            emptyRequest(candidateRows = listOf(candidate), opportunityDecisionFactsBySymbol = mapOf(candidate.symbol to facts)),
+        ).requireSuccess().opportunityRows.single()
+        for (c in listOf(7, 29, 30, 36, 80)) {
+            val plain = project(ProjectedOpportunityDecisionFacts(compositeScore = c))
+            val withShadow = project(ProjectedOpportunityDecisionFacts(compositeScore = c, technicalScore = -100, macdHistogramRatio = -0.5))
+            assertEquals(plain.decision, withShadow.decision)
+            assertEquals(plain.copy(shadow = null), withShadow.copy(shadow = null))
+        }
+    }
+
+    @Test
+    fun v31_shadow_grid_is_aggressive_v3_only_and_demotes_ssrm() {
+        val e = ScreenDataProjectionEngine()
+        val ssrm = ProjectedOpportunityDecisionFacts(compositeScore = 36, technicalScore = -20, macdHistogramRatio = -87.0 / 2833.0)
+        val g = e.v31Shadow(ProjectedRowDecision.Act, ssrm, OpportunityScoringModel.AggressiveV3)!!
+        assertEquals(V31ActAdjustment.SHADOW_CONFIGS.map { it.id }, g.map { it.configId })
+        assertTrue(g.all { it.shadowDecision == ProjectedRowDecision.Watch })
+        assertEquals(null, e.v31Shadow(ProjectedRowDecision.Act, ProjectedOpportunityDecisionFacts(), OpportunityScoringModel.AggressiveV3))
+        OpportunityScoringModel.entries.filter { it != OpportunityScoringModel.AggressiveV3 }.forEach {
+            assertEquals(null, e.v31Shadow(ProjectedRowDecision.Act, ssrm, it))
+        }
     }
 
     @Test
