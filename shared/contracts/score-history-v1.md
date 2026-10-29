@@ -9,14 +9,16 @@ Source: `vantage-headless serve` → `GET /history?symbol=TICKER[&days=N][&chang
   "symbol": "ADSK",
   "days": 30,
   "points": [
-    {"run_id": "sp500-1761750000-v3", "captured_at": 1761750000, "profile": "sp500",
-     "model": "v3", "rule_version": "V3", "market_context": false,
-     "rank": 12, "decision": "Act", "composite": 71.2, "fundamentals": 68.0,
-     "technical": 74.1, "forecast": 70.3, "regime": null, "confidence": 0.82,
-     "trust_signal": "ok", "price_cents": 23150, "target_cents": 27800, "upside_bps": 2008}
+    {"run_id": "sp500-1761750000-v3", "captured_at": 1761750000, "date": "2025-10-29 15:00",
+     "profile": "sp500", "model": "v3", "rule_version": "V3", "market_context": false,
+     "rank": 12, "decision": "Act", "composite": 71, "fundamentals": 68, "technical": 74,
+     "forecast": 70, "regime": null, "confidence": "High", "trust_signal": "ok",
+     "price_cents": 23150, "target_cents": 27800, "upside_bps": 2008}
   ],
   "changes": [
-    {"captured_at": 1761750000, "from": "Watch", "to": "Act", "run_id": "...", "rule_version": "V3"}
+    {"from_date": "2025-10-28 15:00", "to_date": "2025-10-29 15:00", "from": "Watch", "to": "Act",
+     "composite_delta": 4, "fundamentals_delta": 1, "technical_delta": 6, "forecast_delta": null,
+     "point": { "...": "HistoryPoint of the new row" }}
   ]
 }
 ```
