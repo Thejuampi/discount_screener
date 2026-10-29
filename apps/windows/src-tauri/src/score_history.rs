@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS score_shadow (
     warmup          INTEGER NOT NULL,
     s_adj           REAL NOT NULL,
     shadow_decision TEXT,
+    hist_source     TEXT,
     PRIMARY KEY (run_id, ticker, config_id)
 );
 CREATE INDEX IF NOT EXISTS score_shadow_config ON score_shadow(config_id, ticker);
@@ -825,8 +826,8 @@ impl ScoreHistoryStore {
             let mut st = tx
                 .prepare(
                     "INSERT INTO score_shadow (run_id, ticker, rule_version, config_id, bound, \
-                     lambda_t, lambda_m, m, warmup, s_adj, shadow_decision) \
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                     lambda_t, lambda_m, m, warmup, s_adj, shadow_decision, hist_source) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 )
                 .map_err(err)?;
             for r in &good {
@@ -843,6 +844,7 @@ impl ScoreHistoryStore {
                         v.warmup,
                         v.s_adj,
                         v.shadow_decision,
+                        v.hist_source,
                     ])
                     .map_err(|e| format!("insert shadow {} {}: {e}", r.symbol, v.config_id))?;
                 }
@@ -2951,6 +2953,74 @@ mod tests {
         assert_eq!(rr.shadow_added, 0, "second restore adds nothing");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    #[test]
+    fn v3_backup_without_score_shadow_or_hist_source_is_refused() {
+        let root = tmpdir("noshadow");
+        let bdir = root.join("bk");
+        // v3 backup whose score_shadow table was dropped: refused, nothing written.
+        let f = root.join("v3-noshadow.sqlite");
+        custom_backup(&f, 3, |_, _| {});
+        Connection::open(&f)
+            .unwrap()
+            .execute_batch(&format!("{} TABLE score_shadow;", "DROP"))
+            .unwrap();
+        let data = root.join("d1");
+        let e = restore(&f, &data, &bdir).unwrap_err();
+        assert!(e.contains("has no score_shadow"), "{e}");
+        let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+        assert_eq!(
+            (s.counts().unwrap(), s.shadow_count().unwrap()),
+            ((0, 0), 0)
+        );
+        drop(s);
+        // v3 backup lacking the hist_source column: strict by-name check refuses.
+        let f = root.join("v3-nohs.sqlite");
+        custom_backup(&f, 3, |t, c| {
+            if t == "score_shadow" {
+                c.retain(|(n, _)| n != "hist_source")
+            }
+        });
+        let data = root.join("d2");
+        let e = restore(&f, &data, &bdir).unwrap_err();
+        assert!(e.contains("missing column 'hist_source'"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hist_source_is_recorded_per_shadow_row() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let mut a = row("RAW", "Act", 36, 60, -20, 30);
+        let mut g =
+            crate::opportunity_v31::shadow_grid(Some("Act"), 36, Some(-20), Some(-0.03), false);
+        g.iter_mut()
+            .for_each(|v| v.hist_source = Some("raw".into()));
+        a.shadow = Some(g);
+        let mut b = row("RND", "Act", 36, 60, -20, 30);
+        let mut g =
+            crate::opportunity_v31::shadow_grid(Some("Act"), 36, Some(-20), Some(-0.03), false);
+        g.iter_mut()
+            .for_each(|v| v.hist_source = Some("rounded".into()));
+        b.shadow = Some(g);
+        s.record_run(&meta(1), &[a, b]).unwrap();
+        let c = s.conn.lock().unwrap();
+        let n: Vec<(String, String, i64)> = c
+            .prepare(
+                "SELECT ticker, hist_source, count(*) FROM score_shadow GROUP BY 1, 2 ORDER BY 1",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            n,
+            vec![
+                ("RAW".into(), "raw".into(), 6),
+                ("RND".into(), "rounded".into(), 6)
+            ]
+        );
     }
 
     #[test]

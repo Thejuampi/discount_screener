@@ -14,8 +14,9 @@ import kotlin.math.exp
  *     shadow   = Watch if official == Act and S_adj < ACT_THRESHOLD, else official
  *
  * T = V3 technical bucket; histogram = MACD(12,26) - signal(9) of the `ChartRange.Year` (1y/1wk)
- * summary, UNROUNDED ([ChartRangeSummary.histogramRawCents], never the rounded histogramCents, so
- * Kotlin's round-half-up vs Rust's round-half-even cannot reach the shadow). The last weekly bar is
+ * summary, preferably UNROUNDED ([ChartRangeSummary.histogramRawCents], so Kotlin's round-half-up
+ * vs Rust's round-half-even cannot reach the shadow); summaries without the raw value fall back to
+ * the rounded histogramCents (headless records which one in `score_shadow.hist_source`). The last weekly bar is
  * the current, possibly partial, week, as for the official technicals. Warm-up: with fewer than
  * [MIN_WEEKLY_BARS] bars m is null, `warmup` is true and no momentum penalty applies. Avoid and ranking are never touched (S_adj <= S, so shadow can only demote Act).
  * Mirrored in headless `apps/windows/src-tauri/src/opportunity_v31.rs`; the constants and the
@@ -42,7 +43,7 @@ object V31ActAdjustment {
     /** True when the Year summary exists but has fewer than [MIN_WEEKLY_BARS] bars. */
     fun isWarmup(summary: ChartRangeSummary?): Boolean = summary != null && summary.candleCount < MIN_WEEKLY_BARS
 
-    /** Unrounded histogram / close of the Year summary; null when missing, close <= 0, or warming up. */
+    /** Histogram (raw, else rounded fallback) / close of the Year summary; null when missing, close <= 0, or warming up. */
     fun histogramRatio(summary: ChartRangeSummary?): Double? {
         if (summary == null || isWarmup(summary)) return null
         // Raw when present; summaries persisted before the raw field fall back to rounded cents.

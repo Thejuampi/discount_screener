@@ -967,7 +967,14 @@ pub fn rank_android_v3(
                     shadow: Some({
                         let (ratio, warmup) =
                             crate::opportunity_v31::momentum_input(r.year.as_ref());
-                        crate::opportunity_v31::shadow_grid(p.decision, composite, t, ratio, warmup)
+                        let src = crate::opportunity_v31::hist_source(r.year.as_ref());
+                        let mut g = crate::opportunity_v31::shadow_grid(
+                            p.decision, composite, t, ratio, warmup,
+                        );
+                        for v in &mut g {
+                            v.hist_source = src.map(str::to_string);
+                        }
+                        g
                     }),
                 },
                 confidence_rank(row.confidence),

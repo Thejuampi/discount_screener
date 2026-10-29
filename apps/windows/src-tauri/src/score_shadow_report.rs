@@ -14,6 +14,13 @@ use chrono::NaiveDate;
 use rusqlite::{params, Connection, OpenFlags};
 use serde::Serialize;
 
+/// (profile, config_id, ticker, day) of an Act entry.
+type EntryKey = (String, String, String, NaiveDate);
+/// (captured_at, official decision, shadow decision) of the day's last run.
+type EntryVal = (i64, String, Option<String>);
+/// (entries, demoted, per-horizon (demoted returns, kept returns)).
+type Acc = (usize, usize, Vec<(Vec<f64>, Vec<f64>)>);
+
 pub const DEFAULT_HORIZONS: [usize; 3] = [5, 20, 60];
 /// Below this many observations in either group a horizon is reported as insufficient data.
 pub const DEFAULT_MIN_N: usize = 20;
@@ -139,8 +146,7 @@ pub fn shadow_report(
         }
     }
     // (profile, config, symbol, day) -> (captured_at, official, shadow) of the day's last run.
-    let mut ent: HashMap<(String, String, String, NaiveDate), (i64, String, Option<String>)> =
-        HashMap::new();
+    let mut ent: HashMap<EntryKey, EntryVal> = HashMap::new();
     {
         let mut st = c
             .prepare(
@@ -165,7 +171,7 @@ pub fn shadow_report(
         for row in rows {
             let (p, cfg, s, at, off, sh) = row.map_err(|e| e.to_string())?;
             let k = (p, cfg, s, day(at));
-            if ent.get(&k).map_or(true, |e| at >= e.0) {
+            if ent.get(&k).is_none_or(|e| at >= e.0) {
                 ent.insert(k, (at, off, sh));
             }
         }
@@ -175,8 +181,7 @@ pub fn shadow_report(
         .map(|(p, d)| (p.clone(), d.iter().copied().collect()))
         .collect();
     // (profile, config) -> per horizon (demoted returns, kept returns); plus entry counts.
-    let mut acc: BTreeMap<(String, String), (usize, usize, Vec<(Vec<f64>, Vec<f64>)>)> =
-        BTreeMap::new();
+    let mut acc: BTreeMap<(String, String), Acc> = BTreeMap::new();
     for ((p, cfg, s, d), (_, off, sh)) in &ent {
         if off != "Act" {
             continue;

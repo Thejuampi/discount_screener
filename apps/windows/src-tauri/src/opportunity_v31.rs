@@ -6,8 +6,10 @@
 //!     shadow = Watch if official == Act and S_adj < 30, else official
 //!
 //! T = V3 technical bucket; histogram = MACD(12,26) − signal(9) of the Android Year (`1y`/`1wk`)
-//! summary, UNROUNDED (`histogram_raw_cents`, never the rounded `histogram_cents`, so the
-//! Rust round-half-even vs Kotlin round-half-up difference cannot reach the shadow). The last
+//! summary, preferably UNROUNDED (`histogram_raw_cents`, so the Rust round-half-even vs Kotlin
+//! round-half-up difference cannot reach the shadow). Summaries without the raw value (e.g.
+//! snapshots persisted before it existed) fall back to the rounded `histogram_cents`; each
+//! shadow value records which one was used in `hist_source` (`raw` / `rounded`). The last
 //! weekly bar is the current, possibly partial, week (same as the official technicals).
 //! Warm-up: with fewer than [`V31_MIN_WEEKLY_BARS`] bars (26 + 9 for MACD + signal) m is null,
 //! `warmup` is true and no momentum penalty applies; the T term still applies. S_adj ≤ S, so the shadow can only demote Act. Mirror of Kotlin
@@ -76,6 +78,23 @@ pub struct ShadowValue {
     pub warmup: bool,
     pub s_adj: f64,
     pub shadow_decision: Option<String>,
+    /// Histogram used for m: `raw` (unrounded) or `rounded` (fallback); None when m is null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hist_source: Option<String>,
+}
+
+/// Which histogram [`momentum_input`] used: `raw`, `rounded` (fallback) or None (no ratio).
+pub fn hist_source(summary: Option<&AndroidChartSummary>) -> Option<&'static str> {
+    match momentum_input(summary) {
+        (Some(_), false) => summary.map(|s| {
+            if s.histogram_raw_cents.is_some_and(f64::is_finite) {
+                "raw"
+            } else {
+                "rounded"
+            }
+        }),
+        _ => None,
+    }
 }
 
 /// Momentum input from the Year summary: (unrounded histogram / close, warm-up flag).
@@ -118,7 +137,7 @@ pub fn adjusted_score(
     composite as f64 * (-lambda_t * (-t).max(0.0) / 100.0).exp() * (-lambda_m * (-m).max(0.0)).exp()
 }
 
-pub fn shadow_decision<'a>(official: Option<&'a str>, s_adj: f64) -> Option<&'a str> {
+pub fn shadow_decision(official: Option<&str>, s_adj: f64) -> Option<&str> {
     match official {
         Some("Act") if s_adj < V31_ACT_THRESHOLD => Some("Watch"),
         o => o,
@@ -148,6 +167,7 @@ pub fn shadow_grid(
                 warmup,
                 s_adj,
                 shadow_decision: shadow_decision(official, s_adj).map(str::to_string),
+                hist_source: None,
             }
         })
         .collect()
@@ -339,6 +359,24 @@ mod tests {
         for (got, want) in ms.iter().zip([-1.0, -1.0, -0.5, -0.5, -0.2, -0.2]) {
             assert!((got - want).abs() < 1e-12, "{ms:?}");
         }
+    }
+
+    #[test]
+    fn hist_source_raw_rounded_or_none() {
+        assert_eq!(
+            hist_source(Some(&summary(60, Some(-5.4), Some(-5), 10_000))),
+            Some("raw")
+        );
+        assert_eq!(
+            hist_source(Some(&summary(60, None, Some(-5), 10_000))),
+            Some("rounded")
+        );
+        assert_eq!(
+            hist_source(Some(&summary(34, Some(-5.4), Some(-5), 10_000))),
+            None
+        );
+        assert_eq!(hist_source(Some(&summary(60, None, None, 10_000))), None);
+        assert_eq!(hist_source(None), None);
     }
 
     #[test]

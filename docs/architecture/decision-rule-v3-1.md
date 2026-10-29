@@ -61,8 +61,10 @@ at 0.05 for < 10%.
 | inputs | `ProjectedOpportunityDecisionFacts.technicalScore`, `.macdHistogramRatio` (never read by the official decision) | `technical`, `histogram_ratio(year)` |
 | storage | none (Android has no score-history store; it computes shadow values for parity only) | `score_shadow` in `history.sqlite` |
 
-JSON: rows gain an optional `shadow` array (`rule_version` (`V3.1-shadow`), `config_id, bound,
-lambda_t, lambda_m, m, warmup, s_adj, shadow_decision`). Every row carries its own provenance; no existing field changes and `/ranking` is unchanged otherwise.
+JSON: headless `/ranking` and `rank-snapshot --json` rows (and Android parity output) carry an additive,
+optional `shadow` array (`rule_version` (`V3.1-shadow`), `config_id, bound, lambda_t, lambda_m, m, warmup,
+s_adj, shadow_decision`; headless also `hist_source` = `raw`/`rounded`, omitted when m is null). Histogram
+input: unrounded when available, else the rounded cents (older snapshots). Every row carries its own provenance; no existing field changes and `/ranking` is unchanged otherwise.
 
 ## Parity
 
