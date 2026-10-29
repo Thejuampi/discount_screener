@@ -111,3 +111,22 @@ The store path is configuration, not a code default.
 - `vantage-headless serve --no-feed` — offline: no quote feed, Year-chart or regime workers; serves the persisted
   snapshot and history.
 - `GET /history?symbol=…` percent-decodes strictly on bytes; malformed escapes or non-UTF-8 → `400`.
+
+## Full-universe evaluations (migration v4)
+
+Every recorded run also stores one row per **universe** symbol in `score_evaluations`
+(`status` / `reason`: `ok`/`qualified`; `excluded`/`unprofitable`, `gap_below_min:<bps>`,
+`no_intrinsic_value`; `failed`/`not_loaded`, `invalid_price`, `score_error:<msg>`).
+Excluded rows carry diagnostic f/t/fc and composite scores; `decision` is NULL unless `ok`.
+The official ranking (`rank_android_v3`) is exactly the `ok` evaluations in main's order.
+
+The raw snapshot rows are content-addressed in `score_inputs` (sha256 of the exact serde
+bytes, gzip, deduplicated across runs); `score_run_inputs` lists each run's rows in order and
+`score_run_stats` holds the counts plus the snapshot envelope, so
+`ScoreHistoryStore::reconstruct_snapshot(run_id)` rebuilds the snapshot byte for byte (hashes
+re-checked). All four tables are append-only (triggers, self-check, export, restore by name;
+older backups without them restore fine). Everything is written in the run's one transaction.
+
+`GET /history?all=1[&run=<id>][&profile=]` returns the latest (or given) run's evaluations
+and stats; `GET /history?all=1&symbol=X` one symbol's evaluations across runs.
+`/status.ranked_rows` is the real ranked count; `snapshot_rows` the loaded rows.

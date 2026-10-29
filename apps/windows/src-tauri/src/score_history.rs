@@ -2260,12 +2260,15 @@ mod tests {
             "score_runs ADD COLUMN note TEXT;".into(),
         ]
         .join(" ");
-        let extra: &[(i64, &str)] = &[MIGRATIONS[0], MIGRATIONS[1], (3, add_col.as_str())];
+        let next = SCHEMA_VERSION + 1;
+        let mut extra: Vec<(i64, &str)> = MIGRATIONS.to_vec();
+        extra.push((next, add_col.as_str()));
+        let extra = extra.as_slice();
         drop(s);
         let s = ScoreHistoryStore::open_with(&p, Some(&bdir), extra).unwrap();
         let bk2 = s.migration_backup.clone().unwrap();
         assert_eq!(verify_file(&bk2, true).unwrap().score_runs, 1);
-        assert_eq!(s.schema_version().unwrap(), 3);
+        assert_eq!(s.schema_version().unwrap(), next);
         assert_eq!(s.counts().unwrap(), (1, 1));
         let c = Connection::open(&p).unwrap();
         let uv: i64 = c
@@ -2375,8 +2378,13 @@ mod tests {
     fn delete_update_replace_and_upsert_abort() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
         assert!(s.missing_triggers.is_empty());
-        s.record_run(&meta(1), &[row("ADSK", "Act", 30, 60, 0, 30)])
-            .unwrap();
+        // With evaluations, so every table (incl. the evaluation ones) has a row.
+        s.record_run_full(
+            &meta(1),
+            &[row("ADSK", "Act", 30, 60, 0, 30)],
+            Some(&tiny_eval(&["ADSK", "BK"])),
+        )
+        .unwrap();
         let c = s.conn.lock().unwrap();
         for t in HISTORY_TABLES {
             let del = format!("{} FROM {t}", "DELETE");
@@ -2643,6 +2651,100 @@ mod tests {
     type ColEdit<'a> = &'a dyn Fn(&str, &mut Vec<(String, String)>);
 
     /// Writes a backup whose score tables use `cols` (name, type) in that order.
+    /// A synthetic evaluation: first symbol loaded and ok, the rest not loaded.
+    fn tiny_eval(syms: &[&str]) -> RunEvaluation {
+        let raw = format!("{{\"symbol\":\"{}\",\"p\":1}}", syms[0]).into_bytes();
+        let mut evals = vec![EvalRecord {
+            symbol: syms[0].into(),
+            status: "ok".into(),
+            reason: "qualified".into(),
+            rank: Some(1),
+            composite: Some(30),
+            decision: Some("Act".into()),
+            input_idx: Some(0),
+            ..Default::default()
+        }];
+        for x in &syms[1..] {
+            evals.push(EvalRecord {
+                symbol: (*x).into(),
+                status: "failed".into(),
+                reason: "not_loaded".into(),
+                ..Default::default()
+            });
+        }
+        RunEvaluation {
+            universe_size: syms.len(),
+            evals,
+            inputs: vec![(syms[0].into(), raw)],
+            snapshot_prefix: b"{\"rows\":[".to_vec(),
+            snapshot_suffix: b"]}".to_vec(),
+        }
+    }
+
+    #[test]
+    fn evaluations_stats_dedup_and_exact_reconstruction() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let e = tiny_eval(&["ADSK", "BK", "ZZ"]);
+        s.record_run_full(&meta(1), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        s.record_run_full(&meta(2), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let r1 = meta(1).run_id();
+        assert_eq!(s.evaluations(&r1).unwrap().len(), 3);
+        let st = s.run_stats(&r1).unwrap().unwrap();
+        assert_eq!(
+            (st.universe_size, st.loaded, st.ok, st.excluded, st.failed),
+            (3, 1, 1, 0, 2)
+        );
+        assert_eq!(st.reasons.get("not_loaded"), Some(&2));
+        // Same input bytes in two runs -> one blob.
+        let c = s.conn.lock().unwrap();
+        assert_eq!(table_count(&c, "score_inputs"), 1);
+        assert_eq!(table_count(&c, "score_run_inputs"), 2);
+        drop(c);
+        let want = [b"{\"rows\":[".as_slice(), &e.inputs[0].1, b"]}"].concat();
+        assert_eq!(s.reconstruct_snapshot(&r1).unwrap(), want);
+        assert_eq!(s.reconstruct_snapshot(&meta(2).run_id()).unwrap(), want);
+        // Excluded/failed decisions are never stored even if a caller passes one.
+        let mut bad = tiny_eval(&["X", "Y"]);
+        bad.evals[1].decision = Some("Act".into());
+        s.record_run_full(&meta(3), &[], Some(&bad)).unwrap();
+        let ev = s.evaluations(&meta(3).run_id()).unwrap();
+        assert!(ev
+            .iter()
+            .find(|x| x.symbol == "Y")
+            .unwrap()
+            .decision
+            .is_none());
+    }
+
+    #[test]
+    fn v2_backup_restores_into_current_and_evaluations_survive_restore() {
+        let root = tmpdir("v2into");
+        let bdir = root.join("bk");
+        // A v2 backup (no evaluation tables) merges into the current schema.
+        let f = root.join("v2.sqlite");
+        custom_backup(&f, 2, |_, _| {});
+        let data = root.join("d");
+        let r = restore(&f, &data, &bdir).unwrap();
+        assert_eq!((r.runs_added, r.rows_added), (1, 1));
+        // Full round trip: export a store with evaluations, restore into an empty dir.
+        let src = ScoreHistoryStore::open(&root.join("src.sqlite"), Some(&bdir)).unwrap();
+        let e = tiny_eval(&["ADSK", "BK"]);
+        src.record_run_full(&meta(5), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let bk = root.join("full.sqlite.gz");
+        src.export_to(&bk).unwrap();
+        let want = src.reconstruct_snapshot(&meta(5).run_id()).unwrap();
+        let data2 = root.join("d2");
+        restore(&bk, &data2, &bdir).unwrap();
+        let s = ScoreHistoryStore::open(&data2.join("history.sqlite"), Some(&bdir)).unwrap();
+        assert_eq!(s.reconstruct_snapshot(&meta(5).run_id()).unwrap(), want);
+        assert_eq!(s.evaluations(&meta(5).run_id()).unwrap().len(), 2);
+        assert_eq!(s.run_stats(&meta(5).run_id()).unwrap().unwrap().failed, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn custom_backup(path: &Path, version: i64, edit: impl Fn(&str, &mut Vec<(String, String)>)) {
         let live = ScoreHistoryStore::open_in_memory().unwrap();
         let lc = live.conn.lock().unwrap();
@@ -2668,6 +2770,9 @@ mod tests {
                 .join(", ");
             b.execute_batch(&format!("{} {t} ({ddl});", "CREATE TABLE"))
                 .unwrap();
+        }
+        if version >= EVALUATIONS_MIGRATION {
+            b.execute_batch(EVALUATIONS_DDL).unwrap();
         }
         let has = |t: &str, c: &str| {
             b.query_row(
@@ -3146,10 +3251,9 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(
-            names,
-            ["score_history", "score_history_migrations", "score_runs"]
-        );
+        let mut want: Vec<&str> = HISTORY_TABLES.to_vec();
+        want.sort();
+        assert_eq!(names, want);
         drop(b);
         drop(pl);
         std::fs::remove_dir_all(&data).unwrap();

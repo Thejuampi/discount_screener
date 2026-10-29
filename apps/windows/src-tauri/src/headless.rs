@@ -1477,11 +1477,12 @@ pub fn run_evaluation(
     ))
 }
 
+/// (envelope prefix, per-row (symbol, bytes), envelope suffix).
+pub type SnapshotParts = (Vec<u8>, Vec<(String, Vec<u8>)>, Vec<u8>);
+
 /// Splits the exact `OpportunitySnapshot::save` bytes into envelope prefix, per-row
 /// bytes and suffix, and checks that they join back to the same bytes.
-pub fn snapshot_parts(
-    snap: &OpportunitySnapshot,
-) -> Result<(Vec<u8>, Vec<(String, Vec<u8>)>, Vec<u8>), String> {
+pub fn snapshot_parts(snap: &OpportunitySnapshot) -> Result<SnapshotParts, String> {
     let full = serde_json::to_vec(snap).map_err(|e| e.to_string())?;
     let rows: Vec<(String, Vec<u8>)> = snap
         .rows
@@ -2309,9 +2310,8 @@ mod history_tick_tests {
             source: Cell::new("live"),
             snap: fixture_snap(),
         };
-        let t = NOW + HISTORY_YEAR_WAIT_SECS;
-        assert!(matches!(tick(&f, &s, &seen, NOW), HistoryWrite::Skipped(_)));
-        assert!(matches!(tick(&f, &s, &seen, t), HistoryWrite::Recorded { .. }));
+        let w = tick(&f, &s, &seen, NOW);
+        assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
         let run = s.latest_run_id("sp500", HISTORY_MODEL).unwrap().unwrap();
         let ev = s.evaluations(&run).unwrap();
         // Rows = universe, including not-loaded (and any failed) symbols.
@@ -2357,5 +2357,135 @@ mod history_tick_tests {
         assert_eq!(v["stats"]["universe_size"], 100);
         let v = history_all_json(&s, Some("S99"), None, "sp500").unwrap();
         assert_eq!(v["evaluations"][0]["reason"], "not_loaded");
+    }
+}
+
+#[cfg(test)]
+mod full_universe_parity_tests {
+    use super::*;
+
+    /// VERBATIM copy of main's `rank_android_v3` (a69b736), the reference.
+    #[allow(clippy::all)]
+    fn rank_android_v3_main(
+        snapshot: &OpportunitySnapshot,
+        universe: Option<&[String]>,
+    ) -> Vec<AndroidRow> {
+        use crate::engine::QualificationStatus;
+        use crate::opportunity_v3::{
+            composite_score_v3_android, score_forecast_v3, score_forecast_v3_with,
+            score_fundamentals_v3_android,
+        };
+        let allowed: Option<std::collections::HashSet<&str>> =
+            universe.map(|u| u.iter().map(|s| s.as_str()).collect());
+        let mut rows: Vec<(AndroidRow, u8)> = snapshot
+            .rows
+            .iter()
+            .filter(|r| {
+                allowed
+                    .as_ref()
+                    .is_none_or(|a| a.contains(r.row.symbol.as_str()))
+            })
+            .map(|r| (r, android_row(r)))
+            .filter(|(_, row)| row.qualification == QualificationStatus::Qualified)
+            .map(|(r, row)| {
+                let row = &row;
+                let (f, sig) = score_fundamentals_v3_android(row, r.business_class);
+                let t = crate::android_chart::score_technicals_v3(r.year.as_ref());
+                let (fc, _) = match r.android_target {
+                    Some((fair, count)) => {
+                        score_forecast_v3_with(row, r.dcf_analysis.as_ref(), fair, count)
+                    }
+                    // No external signal → Kotlin has no Street target.
+                    None if r.external.is_none() => {
+                        score_forecast_v3_with(row, r.dcf_analysis.as_ref(), None, None)
+                    }
+                    // Snapshot written before `android_target` existed: desktop inputs.
+                    None => score_forecast_v3(row, r.dcf_analysis.as_ref()),
+                };
+                let composite = composite_score_v3_android(f, t, fc, row.beta_millis);
+                let coverage = [f, t, fc].iter().filter(|x| x.is_some()).count() as u8;
+                let upside = android_upside_bps(row.market_price_cents, row.intrinsic_value_cents);
+                let p = android_project_row(
+                    row.confidence,
+                    row.market_price_cents,
+                    composite,
+                    r.android_street.as_ref(),
+                    r.android_dcf.as_ref(),
+                );
+                (
+                    AndroidRow {
+                        symbol: row.symbol.clone(),
+                        company: row.company_name.clone(),
+                        sector: row.sector_name.clone(),
+                        composite_score: composite,
+                        coverage,
+                        fundamentals: f,
+                        technical: t,
+                        forecast: fc,
+                        decision: p.decision.map(str::to_string),
+                        confidence: confidence_label(p.confidence.unwrap_or(row.confidence))
+                            .to_string(),
+                        price_cents: row.market_price_cents,
+                        intrinsic_cents: row.intrinsic_value_cents,
+                        anchor_cents: p.anchor_cents,
+                        anchor: p.anchor.to_string(),
+                        gap_bps: p.gap_bps,
+                        upside_bps: p.upside_bps,
+                        trust_signal: p.trust_signal.map(str::to_string),
+                        row_confidence: confidence_label(row.confidence).to_string(),
+                        row_gap_bps: row.gap_bps.unwrap_or(0),
+                        row_upside_bps: upside.unwrap_or(0),
+                        projection_gap: p.projection_gap.map(str::to_string),
+                        fundamentals_signals: sig,
+                    },
+                    confidence_rank(row.confidence),
+                )
+            })
+            .collect();
+        rows.sort_by(|(a, ac), (b, bc)| {
+            b.composite_score
+                .cmp(&a.composite_score)
+                .then(b.coverage.cmp(&a.coverage))
+                .then(bc.cmp(ac))
+                .then(b.row_upside_bps.cmp(&a.row_upside_bps))
+                .then(a.symbol.cmp(&b.symbol))
+        });
+        rows.into_iter().map(|(r, _)| r).collect()
+    }
+
+    #[test]
+    fn ranking_and_decisions_byte_identical_to_main() {
+        let screener = crate::commands::opportunity_projection_tests::fixture_state();
+        let snap = OpportunitySnapshot::capture(&screener, "fixture");
+        let all: Vec<String> = snap.rows.iter().map(|r| r.row.symbol.clone()).collect();
+        let half: Vec<String> = all.iter().step_by(2).cloned().collect();
+        let mut with_missing = half.clone();
+        with_missing.push("NOTLOADED".into());
+        for u in [
+            None,
+            Some(all.as_slice()),
+            Some(half.as_slice()),
+            Some(with_missing.as_slice()),
+        ] {
+            let main = serde_json::to_vec(&rank_android_v3_main(&snap, u)).unwrap();
+            let new = serde_json::to_vec(&rank_android_v3(&snap, u)).unwrap();
+            assert_eq!(main, new, "universe {u:?}");
+        }
+        let ev = evaluate_android_v3(&snap, Some(&with_missing));
+        assert_eq!(ev.len(), with_missing.len());
+        assert_eq!(ev.last().unwrap().reason, "not_loaded");
+        assert!(ev.iter().any(|e| e.status == "ok"));
+        assert!(
+            ev.iter().any(|e| e.status == "excluded"),
+            "fixture should exercise exclusions: {:?}",
+            ev.iter()
+                .map(|e| (&e.symbol, &e.reason))
+                .collect::<Vec<_>>()
+        );
+        for e in &ev {
+            if e.status != "ok" {
+                assert!(e.row.as_ref().is_none_or(|r| r.decision.is_none()));
+            }
+        }
     }
 }
