@@ -31,8 +31,8 @@ use discount_screener_windows_lib::headless::{
     SNAPSHOT_FILE,
 };
 use discount_screener_windows_lib::score_history::{
-    default_backup_dir, format_in_tz, restore, validate_symbol, verify_file, RecordOutcome,
-    RunMeta, ScoreHistoryStore,
+    default_backup_dir, format_in_tz, lock_data_dir, restore, validate_days, validate_symbol,
+    verify_file, RecordOutcome, RunMeta, ScoreHistoryStore,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7979";
@@ -105,9 +105,10 @@ history TICKER [--days N] [--changes] [--profile P] [--tz IANA] [--json]\n\
      \x20       (score history via GET /history; dates in --tz, default America/New_York)\n\
      history-record-snapshot --data-dir DIR [--history-backup-dir B]   (offline: record the persisted snapshot)\n\
      history-backup --data-dir DIR [--history-backup-dir B] [--verify]   (verified backup now; --verify checks all)\n\
-     history-restore FILE --data-dir DIR [--history-backup-dir B] [--force]   (daemon must be stopped)\n\
+     history-restore FILE --data-dir DIR [--history-backup-dir B]   (append-only merge; refused while serve runs)\n\
 serve:  --history-interval-hours H (default 6; 0 disables score history)\n\
-     \x20       --history-backup-dir B (default $VANTAGE_HISTORY_BACKUP_DIR or the store dir) --no-feed (offline)"
+     \x20       --history-backup-dir B (default $VANTAGE_HISTORY_BACKUP_DIR, else $XDG_DATA_HOME/vantage/backups\n\
+     \x20       or ~/.local/share/vantage/backups) --no-feed (offline)"
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
@@ -213,6 +214,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "history-record-snapshot" => {
             let data_dir = data_dir_flag(&o)?;
+            let _lock = lock_data_dir(&data_dir)?;
             let snap = OpportunitySnapshot::load(&data_dir.join(SNAPSHOT_FILE))?;
             let u = discount_screener_windows_lib::headless::android_universe(&snap.profile);
             let rows = android_to_ranked(
@@ -252,8 +254,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let data_dir = data_dir_flag(&o)?;
             let dir = backup_dir_flag(&o);
             let store = ScoreHistoryStore::open(&data_dir.join("history.sqlite"), Some(&dir))?;
-            let dest = dir.join(format!("history.manual-{}.sqlite", stamp_now()));
-            let rep = store.backup_to(&dest)?;
+            let dest = dir.join(format!("history.manual-{}.sqlite.gz", stamp_now()));
+            let rep = store.export_to(&dest)?;
             println!(
                 "backup {} integrity={} score_runs={} score_history={}",
                 rep.path.display(),
@@ -261,17 +263,21 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 rep.score_runs,
                 rep.score_history
             );
+            println!("  {} bytes (score tables only, gzip)", rep.bytes);
             if o.flags.contains_key("verify") {
                 let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
                     .map_err(|e| format!("read {}: {e}", dir.display()))?
                     .flatten()
                     .map(|e| e.path())
-                    .filter(|p| p.extension().map_or(false, |x| x == "sqlite"))
+                    .filter(|p| {
+                        let n = p.to_string_lossy();
+                        n.ends_with(".sqlite.gz") || n.ends_with(".sqlite")
+                    })
                     .collect();
                 files.sort();
                 let mut bad = 0;
                 for f in files {
-                    match verify_file(&f) {
+                    match verify_file(&f, false) {
                         Ok(r) => println!(
                             "  ok  {} score_runs={} score_history={}",
                             f.display(),
@@ -293,23 +299,19 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "history-restore" => {
             let file = o.positional.get(1).ok_or("history-restore needs FILE")?;
             let data_dir = data_dir_flag(&o)?;
-            let live = data_dir.join("history.sqlite");
-            let pre = restore(
-                &PathBuf::from(file),
-                &live,
-                &backup_dir_flag(&o),
-                o.flags.contains_key("force"),
-            )?;
-            if let Some(p) = pre {
-                println!("previous {} backed up to {}", live.display(), p.display());
+            let r = restore(&PathBuf::from(file), &data_dir, &backup_dir_flag(&o))?;
+            if let Some(p) = &r.pre_restore_backup {
+                println!("score tables backed up first to {}", p.display());
             }
-            let r = verify_file(&live)?;
+            let live = data_dir.join("history.sqlite");
+            let v = verify_file(&live, true)?;
             println!(
-                "restored {} -> {} (score_runs={} score_history={})",
-                file,
+                "merged {file} into {} (append-only): +{} runs, +{} rows; now score_runs={} score_history={}",
                 live.display(),
-                r.score_runs,
-                r.score_history
+                r.runs_added,
+                r.rows_added,
+                v.score_runs,
+                v.score_history
             );
             Ok(())
         }
@@ -443,22 +445,43 @@ fn pct(s: &str) -> String {
         .collect()
 }
 
-fn pct_decode(s: &str) -> String {
+/// Strict percent-decoding on bytes: `%` must be followed by two hex digits and the
+/// result must be UTF-8; anything else is an error (-> 400), never a panic.
+fn pct_decode(s: &str) -> Result<String, String> {
+    fn hex(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(x) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(x);
+        match b[i] {
+            b'%' => {
+                let pair = b
+                    .get(i + 1)
+                    .copied()
+                    .and_then(hex)
+                    .zip(b.get(i + 2).copied().and_then(hex));
+                let (h, l) = pair.ok_or_else(|| "bad percent-encoding in query".to_string())?;
+                out.push(h << 4 | l);
                 i += 3;
-                continue;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
             }
         }
-        out.push(if b[i] == b'+' { b' ' } else { b[i] });
-        i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).map_err(|_| "query is not valid UTF-8".to_string())
 }
 
 fn data_dir_flag(o: &Opts) -> Result<PathBuf, String> {
@@ -476,7 +499,7 @@ fn backup_dir_flag(o: &Opts) -> PathBuf {
 }
 
 fn stamp_now() -> String {
-    chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+    chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string()
 }
 
 fn signed(v: Option<i32>) -> String {
@@ -599,6 +622,8 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
         None => 6,
     };
     check_bind_addr(addr, allow_remote)?;
+    // Held for the life of the process: a second serve or a restore on this data-dir refuses.
+    let _lock = discount_screener_windows_lib::score_history::lock_data_dir(&data_dir)?;
     // Feed universe: android (default) loads exactly Android's profile list;
     // tauri loads the desktop composition (+ ETFs + crypto).
     let android_feed = Semantics::parse(
@@ -893,20 +918,19 @@ fn history_endpoint(
 ) -> Result<serde_json::Value, String> {
     let symbol = q
         .get("symbol")
-        .map(|s| pct_decode(s))
-        .ok_or("history needs symbol=TICKER")?;
+        .ok_or_else(|| "history needs symbol=TICKER".to_string())
+        .and_then(|s| pct_decode(s))?;
     let symbol = validate_symbol(&symbol)?;
     let days = match q.get("days") {
-        Some(d) => Some(
-            d.parse::<i64>()
-                .ok()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| format!("bad days '{d}' (expected a positive integer)"))?,
-        ),
+        Some(d) => {
+            Some(validate_days(d.parse::<i64>().map_err(|_| {
+                format!("bad days '{d}' (expected 1..=36500)")
+            })?)?)
+        }
         None => None,
     };
     let changes = matches!(q.get("changes").copied(), Some("1" | "true"));
-    let profile = q.get("profile").map(|p| pct_decode(p));
+    let profile = q.get("profile").map(|p| pct_decode(p)).transpose()?;
     query(&symbol, days, changes, profile.as_deref())
 }
 
@@ -1049,6 +1073,16 @@ mod tests {
             vec![],
             vec![("symbol", "A%20B")],
             vec![("symbol", "AAAAAAAAAAAAAAAAA")],
+            vec![("symbol", "%aé")],
+            vec![("symbol", "é")],
+            vec![("symbol", "%C3%A9")],
+            vec![("symbol", "%")],
+            vec![("symbol", "AB%4")],
+            vec![("symbol", "%G1")],
+            vec![("symbol", "%FF")],
+            vec![("symbol", "ADSK"), ("profile", "%é")],
+            vec![("symbol", "ADSK"), ("days", "36501")],
+            vec![("symbol", "ADSK"), ("days", "99999999999999999999")],
         ] {
             let q: HashMap<&str, &str> = bad.into_iter().collect();
             assert_eq!(
@@ -1060,6 +1094,13 @@ mod tests {
         let (_, body) = to_http(history_endpoint(&q, |s, _, _, _| Ok(serde_json::json!(s))));
         assert_eq!(body.trim(), "\"^GSPC\"");
         assert_eq!(pct("^GSPC"), "%5EGSPC");
+        assert_eq!(
+            pct_decode("AB%41").unwrap(),
+            "ABA",
+            "trailing escape decoded"
+        );
+        assert_eq!(pct_decode("s%C3%A9+x").unwrap(), "sé x");
+        assert!(pct_decode("%aé").is_err());
         assert_eq!(pct("EURUSD=X"), "EURUSD%3DX");
     }
 
