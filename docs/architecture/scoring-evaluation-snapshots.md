@@ -198,7 +198,9 @@ The candle series grows beyond Yahoo's rolling one-year response.
 
 The score journal remains as a compatibility record.
 
-Its retention is 460 calendar days.
+Its retention is 1095 calendar days (3 years).
+
+A row is pruned only when it is strictly older than the window (`scored_at < now - 1095 days`): a row exactly 1095 days old is kept.
 
 The atomic snapshot has no automatic retention limit.
 
@@ -250,7 +252,11 @@ Capture begins only after the current refresh dependencies finish.
 
 Process termination before that point can leave no cohort.
 
-The score journal retains 460 days.
+The score journal retains 1095 days (3 years); a row is pruned only when strictly older than the window.
+
+Storage estimate for the score journal. Measured on the Robolectric scoring pass (QA universe, fake Yahoo data): `factors_json` averages ~325 bytes and a full row, including the primary key and the `(scored_at, scoring_model)` index, takes ~451 bytes on disk (4 KiB pages, after VACUUM). Real-market factors may be somewhat larger. At about 500 symbols x 2 models x 1 pass a day, 1095 days is ~1.1M rows, ~0.5 GB (~470 MiB); the old 460-day window was ~0.46M rows, ~0.2 GB, so 1095 days is ~2.4x. Each extra journaled model adds ~0.25 GB at 3 years.
+
+Downsampling old rows (for example keeping one row per week past a year) is a possible future option to bound this, but it would delete score history and needs Juan's decision. Nothing does it today.
 
 Atomic evaluation snapshots have no automatic retention limit.
 

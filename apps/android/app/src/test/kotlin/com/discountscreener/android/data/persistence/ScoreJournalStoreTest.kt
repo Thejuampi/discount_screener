@@ -4,6 +4,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import androidx.test.core.app.ApplicationProvider
+import com.discountscreener.android.data.repository.DefaultDashboardRepository
 import com.discountscreener.android.domain.model.JournalFactors
 import com.discountscreener.android.domain.model.ScoreJournalRow
 import com.discountscreener.core.model.ScoreFactor
@@ -161,6 +162,51 @@ class ScoreJournalStoreTest {
             var rows = load()
             assertEquals(null, rows.first { it.symbol == "AAPL" }.factors)
             assertNotNull(rows.first { it.symbol == "MSFT" }.factors)
+        }
+    }
+
+    /**
+     * Juan's three-year retention, at its exact edge. Pruning is strict (`scored_at < now - window`):
+     * exactly 1095 days old stays, one second more goes, 1096 days goes.
+     */
+    @Test
+    fun three_year_retention_keeps_day_1095_and_prunes_day_1096() = runTest {
+        val window = DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS
+        val day = 86_400L
+        val dropped = append(
+            listOf(
+                row(symbol = "KEEP1095", scoredAt = NOW - 1095 * day),
+                row(symbol = "KEEP1094", scoredAt = NOW - 1094 * day),
+                row(symbol = "DROP1095S", scoredAt = NOW - 1095 * day - 1),
+                row(symbol = "DROP1096", scoredAt = NOW - 1096 * day),
+            ),
+            retentionSeconds = window,
+        )
+        assertEquals(2, dropped)
+        assertEquals(listOf("KEEP1095", "KEEP1094"), load().map { it.symbol })
+    }
+
+    @Test
+    fun scoring_evaluation_snapshots_are_not_pruned_by_the_journal_retention() = runTest {
+        val store = SQLiteStateStore(context)
+        try {
+            store.writableDatabase.execSQL(
+                "INSERT INTO scoring_evaluation_snapshot (snapshot_id, captured_at, observation_day_utc, " +
+                    "profile_name, schema_version, policy_version, input_fingerprint, payload_json) " +
+                    "VALUES ('old', ${NOW - 2000 * 86_400L}, '2018-01-01', 'p', 1, 'v', 'f', '{}')",
+            )
+        } finally {
+            store.close()
+        }
+        append(listOf(row()), retentionSeconds = DefaultDashboardRepository.SCORE_JOURNAL_RETENTION_SECONDS)
+        val check = SQLiteStateStore(context)
+        try {
+            check.readableDatabase.rawQuery("SELECT COUNT(*) FROM scoring_evaluation_snapshot", null).use {
+                it.moveToFirst()
+                assertEquals(1, it.getInt(0))
+            }
+        } finally {
+            check.close()
         }
     }
 

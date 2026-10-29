@@ -25,6 +25,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use chrono::{Datelike, NaiveDate, TimeZone};
 use chrono_tz::Tz;
@@ -377,6 +378,10 @@ fn has_table(c: &Connection, schema: &str, t: &str) -> bool {
     .is_some()
 }
 
+/// Normalization for the trigger SQL comparison. The expected SQL is rebuilt from
+/// [`MIGRATIONS`], so FUTURE MIGRATIONS MUST NOT EDIT THE TEXT OF EXISTING TRIGGERS:
+/// a changed trigger needs a new name (and a new migration), otherwise every existing
+/// DB would be flagged as altered and refuse writes.
 fn norm_sql(sql: &str) -> String {
     sql.to_ascii_lowercase()
         .replace("if not exists ", "")
@@ -428,14 +433,33 @@ pub fn missing_triggers(c: &Connection) -> Vec<&'static str> {
 /// Behavioural check: inside a SAVEPOINT, DELETE, UPDATE and a duplicate INSERT on each
 /// history table must abort with the append-only error; everything is rolled back to the
 /// savepoint, so no data can be lost (empty tables get a sentinel row inside it).
-/// Returns the failing `table: op` pairs.
-pub fn trigger_behaviour_failures(c: &Connection) -> Vec<String> {
+/// Returns the failing `table: op` pairs, or `Err` when the DB is busy/locked by another
+/// writer (inconclusive, NOT a failure).
+pub fn trigger_behaviour_failures(c: &Connection) -> Result<Vec<String>, String> {
     let mut bad = Vec::new();
-    if c.execute_batch("SAVEPOINT score_history_selfcheck")
-        .is_err()
-    {
-        return vec!["savepoint".into()];
+    // Take the write lock up front (BEGIN IMMEDIATE waits on the busy handler); a
+    // deferred read->write upgrade would get an immediate, un-retried SQLITE_BUSY.
+    let own_tx = c.is_autocommit();
+    if own_tx {
+        if let Err(e) = c.execute_batch("BEGIN IMMEDIATE") {
+            return if is_busy(&e) {
+                Err(e.to_string())
+            } else {
+                Ok(vec![format!("begin {e}")])
+            };
+        }
     }
+    if let Err(e) = c.execute_batch("SAVEPOINT score_history_selfcheck") {
+        if own_tx {
+            let _ = c.execute_batch("ROLLBACK");
+        }
+        return if is_busy(&e) {
+            Err(e.to_string())
+        } else {
+            Ok(vec![format!("savepoint {e}")])
+        };
+    }
+    let mut busy: Option<String> = None;
     let sentinel = |t: &str| -> rusqlite::Result<()> {
         if table_count(c, t) > 0 {
             return Ok(());
@@ -486,7 +510,14 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Vec<String> {
         }
     };
     for t in HISTORY_TABLES {
+        if busy.is_some() {
+            break;
+        }
         if let Err(e) = sentinel(t) {
+            if is_busy(&e) {
+                busy = Some(e.to_string());
+                break;
+            }
             bad.push(format!("{t}: sentinel {e}"));
             continue;
         }
@@ -503,6 +534,7 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Vec<String> {
             // mask the next probe.
             let _ = c.execute_batch("SAVEPOINT score_history_probe");
             match c.execute(&sql, []) {
+                Err(e) if is_busy(&e) => busy = Some(e.to_string()),
                 Err(e) if e.to_string().contains("append-only") => {}
                 _ => bad.push(format!("{t}: {op}")),
             }
@@ -510,8 +542,62 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Vec<String> {
         }
     }
     let _ = c.execute_batch("ROLLBACK TO score_history_selfcheck; RELEASE score_history_selfcheck");
-    bad
+    if own_tx {
+        let _ = c.execute_batch("ROLLBACK");
+    }
+    match busy {
+        Some(e) => Err(e),
+        None => Ok(bad),
+    }
 }
+
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// Result of the behavioural self-check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelfCheck {
+    Passed,
+    Failed(Vec<String>),
+    /// Another writer held the DB; re-run before the next write.
+    Pending(String),
+}
+
+type Probe = fn(&Connection) -> Result<Vec<String>, String>;
+
+/// Runs `probe` with a short busy timeout and backoff; BUSY after all attempts →
+/// [`SelfCheck::Pending`] (logged loudly), never a failure. Restores the 10 s timeout.
+fn run_selfcheck(c: &Connection, probe: Probe, attempts: u32, per_try: Duration) -> SelfCheck {
+    let _ = c.busy_timeout(per_try);
+    let mut last = String::new();
+    let mut out = None;
+    for i in 0..attempts {
+        match probe(c) {
+            Ok(bad) if bad.is_empty() => out = Some(SelfCheck::Passed),
+            Ok(bad) => out = Some(SelfCheck::Failed(bad)),
+            Err(e) => {
+                last = e;
+                std::thread::sleep(Duration::from_millis(100 << i.min(6)));
+                continue;
+            }
+        }
+        break;
+    }
+    let _ = c.busy_timeout(BUSY_TIMEOUT);
+    out.unwrap_or_else(|| {
+        eprintln!(
+            "WARNING score history: append-only self-check INCONCLUSIVE ({last}): another writer \
+             holds the DB; it will be re-run before the next write"
+        );
+        SelfCheck::Pending(last)
+    })
+}
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn gzip_file(src: &Path, dest: &Path) -> Result<(), String> {
     let partial = dest.with_extension("gz.partial");
@@ -664,6 +750,9 @@ pub struct ScoreHistoryStore {
     pub migration_backup: Option<PathBuf>,
     /// Missing required triggers at open: when non-empty the store refuses to write.
     pub missing_triggers: Vec<&'static str>,
+    /// Behavioural self-check state (Pending is re-run before the next write).
+    selfcheck: Mutex<SelfCheck>,
+    probe: Probe,
 }
 
 impl ScoreHistoryStore {
@@ -704,22 +793,41 @@ impl ScoreHistoryStore {
         backup_dir: Option<PathBuf>,
         migrations: &[(i64, &str)],
     ) -> Result<Self, String> {
-        conn.busy_timeout(std::time::Duration::from_secs(10))
-            .map_err(err)?;
+        Self::init_with(
+            conn,
+            path,
+            backup_dir,
+            migrations,
+            trigger_behaviour_failures,
+        )
+    }
+
+    fn init_with(
+        conn: Connection,
+        path: Option<PathBuf>,
+        backup_dir: Option<PathBuf>,
+        migrations: &[(i64, &str)],
+        probe: Probe,
+    ) -> Result<Self, String> {
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(err)?;
         if path.is_some() {
             // Same journal mode the desktop Db already sets on this file (db.rs).
             let _ = conn.pragma_update(None, "journal_mode", "WAL");
         }
         let migration_backup = migrate(&conn, backup_dir.as_deref(), migrations)?;
-        let mut missing_triggers = missing_triggers(&conn);
-        if missing_triggers.is_empty() && !trigger_behaviour_failures(&conn).is_empty() {
-            missing_triggers.push("behaviour self-check");
-        }
+        let missing_triggers = missing_triggers(&conn);
+        let selfcheck = if missing_triggers.is_empty() {
+            run_selfcheck(&conn, probe, 4, Duration::from_millis(250))
+        } else {
+            SelfCheck::Failed(vec![])
+        };
         Ok(Self {
             conn: Mutex::new(conn),
             path,
             migration_backup,
             missing_triggers,
+            selfcheck: Mutex::new(selfcheck),
+            probe,
         })
     }
 
@@ -727,14 +835,37 @@ impl ScoreHistoryStore {
         self.path.as_deref()
     }
 
+    /// Current behavioural self-check state.
+    pub fn selfcheck(&self) -> SelfCheck {
+        self.selfcheck
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or(SelfCheck::Pending("lock".into()))
+    }
+
     fn check_writable(&self) -> Result<(), String> {
-        if self.missing_triggers.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
+        if !self.missing_triggers.is_empty() {
+            return Err(format!(
                 "score history: refusing to write, append-only triggers missing or altered: {}",
                 self.missing_triggers.join(", ")
-            ))
+            ));
+        }
+        let mut st = self.selfcheck.lock().map_err(|_| "lock")?;
+        if let SelfCheck::Pending(_) = *st {
+            // Deferred: re-run now, waiting the full busy timeout (this is a write anyway).
+            let c = self.conn.lock().map_err(|_| "lock")?;
+            *st = run_selfcheck(&c, self.probe, 2, BUSY_TIMEOUT);
+        }
+        match &*st {
+            SelfCheck::Passed => Ok(()),
+            SelfCheck::Failed(bad) => Err(format!(
+                "score history: refusing to write, append-only behaviour self-check failed: {}",
+                bad.join(", ")
+            )),
+            SelfCheck::Pending(e) => Err(format!(
+                "score history: database busy ({e}); append-only self-check deferred, write \
+                 not attempted — will retry on the next write"
+            )),
         }
     }
 
@@ -1857,7 +1988,10 @@ mod tests {
                 drop = ["DROP", "TRIGGER"].join(" ")
             );
             c.execute_batch(&sql).unwrap();
-            assert_eq!(trigger_behaviour_failures(&c), vec![format!("{t}: delete")]);
+            assert_eq!(
+                trigger_behaviour_failures(&c).unwrap(),
+                vec![format!("{t}: delete")]
+            );
         }
         let s = ScoreHistoryStore::open(&p, None).unwrap();
         assert_eq!(s.missing_triggers, vec!["score_runs_no_delete"]);
@@ -1873,7 +2007,7 @@ mod tests {
         {
             let c = s.conn.lock().unwrap();
             assert!(
-                trigger_behaviour_failures(&c).is_empty(),
+                trigger_behaviour_failures(&c).unwrap().is_empty(),
                 "empty tables (sentinels)"
             );
             assert_eq!(
@@ -1888,7 +2022,7 @@ mod tests {
             .unwrap();
         let c = s.conn.lock().unwrap();
         let logs = table_count(&c, "score_history_migrations");
-        assert!(trigger_behaviour_failures(&c).is_empty());
+        assert!(trigger_behaviour_failures(&c).unwrap().is_empty());
         assert_eq!(
             (
                 table_count(&c, "score_runs"),
@@ -1897,6 +2031,136 @@ mod tests {
             (1, 1)
         );
         assert_eq!(table_count(&c, "score_history_migrations"), logs);
+    }
+
+    #[test]
+    fn behaviour_failure_with_matching_sql_refuses_writes_through_open() {
+        let s = ScoreHistoryStore::init_with(
+            Connection::open_in_memory().unwrap(),
+            None,
+            None,
+            MIGRATIONS,
+            |_| Ok(vec!["score_runs: delete".into()]),
+        )
+        .unwrap();
+        assert!(s.missing_triggers.is_empty(), "SQL matches");
+        assert_eq!(
+            s.selfcheck(),
+            SelfCheck::Failed(vec!["score_runs: delete".into()])
+        );
+        let e = s.check_writable().unwrap_err();
+        assert!(e.contains("behaviour self-check failed"), "{e}");
+        assert!(s
+            .record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .is_err());
+        assert_eq!(s.counts().unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn duplicate_insert_probe_without_trigger_is_flagged() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        s.record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        let c = s.conn.lock().unwrap();
+        let t = HISTORY_TABLES[0];
+        c.execute_batch(&format!(
+            "{} {t}_no_overwrite;",
+            ["DROP", "TRIGGER"].join(" ")
+        ))
+        .unwrap();
+        // The PK still rejects the duplicate, but not with the append-only abort.
+        assert_eq!(
+            trigger_behaviour_failures(&c).unwrap(),
+            vec![format!("{t}: duplicate insert")]
+        );
+        assert_eq!(table_count(&c, t), 1);
+    }
+
+    /// N1 repro: another connection holds BEGIN IMMEDIATE while the store opens.
+    #[test]
+    fn busy_db_at_open_defers_selfcheck_and_does_not_disable_history() {
+        let dir = tmpdir("busy");
+        let p = dir.join("history.sqlite");
+        drop(ScoreHistoryStore::open(&p, None).unwrap());
+        let holder = Connection::open(&p).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        assert!(
+            matches!(s.selfcheck(), SelfCheck::Pending(_)),
+            "{:?}",
+            s.selfcheck()
+        );
+        assert!(s.missing_triggers.is_empty());
+        // Writer releases shortly: the next write re-runs the check and succeeds.
+        let h = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            holder.execute_batch("COMMIT").unwrap();
+        });
+        s.record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        h.join().unwrap();
+        assert_eq!(s.selfcheck(), SelfCheck::Passed);
+        // Restore while another writer holds the lock for a while: also not disabled.
+        let bk = dir.join("bk");
+        let f = bk.join("x.sqlite.gz");
+        std::fs::create_dir_all(&bk).unwrap();
+        s.export_to(&f).unwrap();
+        drop(s);
+        let data2 = dir.join("d2");
+        std::fs::create_dir_all(&data2).unwrap();
+        let p2 = data2.join("history.sqlite");
+        drop(ScoreHistoryStore::open(&p2, None).unwrap());
+        let holder = Connection::open(&p2).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let h = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(3000));
+            holder.execute_batch("COMMIT").unwrap();
+        });
+        let r = restore(&f, &data2, &bk).unwrap();
+        h.join().unwrap();
+        assert_eq!((r.runs_added, r.rows_added), (1, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn busy_during_probe_with_empty_score_shadow_is_inconclusive_not_failed() {
+        // score_shadow empty => the probe must insert a score_shadow sentinel; a BUSY there
+        // (or anywhere in the probe) is inconclusive (Err), never a reported failure.
+        let dir = tmpdir("busy-shadow");
+        let p = dir.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        s.record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(s.shadow_count().unwrap(), 0);
+        drop(s);
+        let holder = Connection::open(&p).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let c = Connection::open(&p).unwrap();
+        c.busy_timeout(Duration::from_millis(50)).unwrap();
+        // Own transaction: BUSY at BEGIN IMMEDIATE.
+        assert!(trigger_behaviour_failures(&c).is_err());
+        // Caller's (deferred, read) transaction: BUSY inside the probes/sentinels.
+        c.execute_batch("BEGIN").unwrap();
+        let _: i64 = c
+            .query_row("SELECT count(*) FROM score_shadow", [], |r| r.get(0))
+            .unwrap();
+        let r = trigger_behaviour_failures(&c);
+        assert!(r.is_err(), "busy must be inconclusive, got {r:?}");
+        c.execute_batch("ROLLBACK").unwrap();
+        // Store-level: deferred, then passes once the writer is gone; sentinel rolled back.
+        let st = run_selfcheck(&c, trigger_behaviour_failures, 2, Duration::from_millis(20));
+        assert!(matches!(st, SelfCheck::Pending(_)), "{st:?}");
+        holder.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            run_selfcheck(&c, trigger_behaviour_failures, 2, Duration::from_millis(20)),
+            SelfCheck::Passed
+        );
+        assert_eq!(
+            table_count(&c, "score_shadow"),
+            0,
+            "sentinel never persists"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     type ColEdit<'a> = &'a dyn Fn(&str, &mut Vec<(String, String)>);
@@ -2916,6 +3180,8 @@ mod tests {
         s.missing_triggers
             .retain(|t| !t.starts_with("score_shadow"));
         assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        // Its behaviour probe only covered its own 3 tables (no score_shadow at v2).
+        *s.selfcheck.lock().unwrap() = SelfCheck::Passed;
         s.record_run(&meta(100), &[row("ADSK", "Act", 40, 60, 10, 30)])
             .unwrap();
         drop(s);
@@ -3039,7 +3305,7 @@ mod tests {
             .unwrap();
         assert_eq!(n, 3);
         // Behavioural self-check covers score_shadow (empty table gets a sentinel).
-        assert!(trigger_behaviour_failures(&c).is_empty());
+        assert!(trigger_behaviour_failures(&c).unwrap().is_empty());
         assert_eq!(table_count(&c, "score_shadow"), 0, "sentinel rolled back");
         // A same-name no-op trigger is caught by the SQL comparison.
         c.execute_batch(&format!(
@@ -3050,6 +3316,7 @@ mod tests {
         .unwrap();
         assert_eq!(missing_triggers(&c), vec!["score_shadow_no_update"]);
         assert!(trigger_behaviour_failures(&c)
+            .unwrap()
             .iter()
             .any(|f| f == "score_shadow: update"));
     }
