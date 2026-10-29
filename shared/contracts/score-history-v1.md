@@ -4,6 +4,7 @@ Source: `vantage-headless serve` → `GET /history?symbol=TICKER[&days=N][&chang
 (CLI: `vantage-headless history TICKER [--days N] [--changes] [--profile P] [--tz IANA] [--json]`).
 
 - `symbol` must match `^[A-Z0-9.\-^=]{1,16}$` after upper-casing (percent-encoded in the query); else HTTP 400.
+  Malformed percent-escapes or non-UTF-8 values → 400. `days` must be 1..=36500; else 400.
 - `profile` defaults to the server's current profile. Points and changes are always one profile and one model.
 - All API times are UTC: `captured_at` (epoch seconds) and `captured_at_utc` (ISO-8601, `Z`).
   Only the CLI renders local time (`--tz`, default `America/New_York`, with zone label such as `EDT`/`EST`);
@@ -42,5 +43,6 @@ Source: `vantage-headless serve` → `GET /history?symbol=TICKER[&days=N][&chang
 ## Semantics
 - One row per symbol per recorded run (android V3 ranking, as served by `/ranking`): every
   `--history-interval-hours` (default 6) and once after each US weekday close (~16:10 America/New_York).
-- History is **append-only and kept forever**: no retention, pruning or TTL.
+- History is **append-only and kept forever**: no retention, pruning or TTL. Rows are never overwritten
+  (restore only adds missing runs/rows).
 - Additive fields may appear; clients must ignore unknown keys. Breaking changes → `score-history-v2`.
