@@ -34,6 +34,7 @@ Source: `vantage-headless serve` → `GET /history?symbol=TICKER[&days=N][&chang
 - Non-null: `run_id`, `captured_at`, `captured_at_utc`, `profile`, `model`, `rule_version`, `rule_change`,
   `trigger` (`interval` | `close` | `snapshot`), `market_context`, `rank`, `decision`, `composite`, `price_cents`.
   Nullable: `fundamentals`, `technical`, `forecast`, `regime`, `confidence`, `trust_signal`, `target_cents`, `upside_bps`.
+  A non-finite (NaN/∞) target or upside is stored and served as `null`.
   Rows whose price is not finite are never stored (so `price_cents` is never 0 for "unknown").
 - `rule_version` comes from `SCORE_RULE_VERSION` (`apps/windows/src-tauri/src/score_history.rs`).
   `rule_change: true` marks the first point after a version boundary: a new series starts there and it is

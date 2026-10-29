@@ -257,6 +257,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let store = ScoreHistoryStore::open(&data_dir.join("history.sqlite"), Some(&dir))?;
             let dest = dir.join(format!("history.manual-{}.sqlite.gz", stamp_now()));
             let rep = store.export_to(&dest)?;
+            discount_screener_windows_lib::score_history::rotate_pre_backups(&dir)?;
             println!(
                 "backup {} integrity={} score_runs={} score_history={} score_shadow={}",
                 rep.path.display(),
