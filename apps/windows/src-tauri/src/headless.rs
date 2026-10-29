@@ -892,94 +892,181 @@ fn android_row(r: &SnapshotRow) -> crate::engine::CandidateRow {
     row
 }
 
-pub fn rank_android_v3(
-    snapshot: &OpportunitySnapshot,
-    universe: Option<&[String]>,
-) -> Vec<AndroidRow> {
-    use crate::engine::QualificationStatus;
+/// V3 scores for one snapshot row (the body `rank_android_v3` used inline on main).
+/// Returns the row and its confidence rank (sort tie-break).
+fn android_score(r: &SnapshotRow, row: &crate::engine::CandidateRow) -> (AndroidRow, u8) {
     use crate::opportunity_v3::{
         composite_score_v3_android, score_forecast_v3, score_forecast_v3_with,
         score_fundamentals_v3_android,
     };
+    let (f, sig) = score_fundamentals_v3_android(row, r.business_class);
+    let t = crate::android_chart::score_technicals_v3(r.year.as_ref());
+    let (fc, _) = match r.android_target {
+        Some((fair, count)) => score_forecast_v3_with(row, r.dcf_analysis.as_ref(), fair, count),
+        // No external signal → Kotlin has no Street target.
+        None if r.external.is_none() => {
+            score_forecast_v3_with(row, r.dcf_analysis.as_ref(), None, None)
+        }
+        // Snapshot written before `android_target` existed: desktop inputs.
+        None => score_forecast_v3(row, r.dcf_analysis.as_ref()),
+    };
+    let composite = composite_score_v3_android(f, t, fc, row.beta_millis);
+    let coverage = [f, t, fc].iter().filter(|x| x.is_some()).count() as u8;
+    let upside = android_upside_bps(row.market_price_cents, row.intrinsic_value_cents);
+    let p = android_project_row(
+        row.confidence,
+        row.market_price_cents,
+        composite,
+        r.android_street.as_ref(),
+        r.android_dcf.as_ref(),
+    );
+    (
+        AndroidRow {
+            symbol: row.symbol.clone(),
+            company: row.company_name.clone(),
+            sector: row.sector_name.clone(),
+            composite_score: composite,
+            coverage,
+            fundamentals: f,
+            technical: t,
+            forecast: fc,
+            decision: p.decision.map(str::to_string),
+            confidence: confidence_label(p.confidence.unwrap_or(row.confidence)).to_string(),
+            price_cents: row.market_price_cents,
+            intrinsic_cents: row.intrinsic_value_cents,
+            anchor_cents: p.anchor_cents,
+            anchor: p.anchor.to_string(),
+            gap_bps: p.gap_bps,
+            upside_bps: p.upside_bps,
+            trust_signal: p.trust_signal.map(str::to_string),
+            row_confidence: confidence_label(row.confidence).to_string(),
+            row_gap_bps: row.gap_bps.unwrap_or(0),
+            row_upside_bps: upside.unwrap_or(0),
+            projection_gap: p.projection_gap.map(str::to_string),
+            fundamentals_signals: sig,
+            // V3.1 shadow, computed from the official decision; never feeds back.
+            shadow: Some({
+                let (ratio, warmup) = crate::opportunity_v31::momentum_input(r.year.as_ref());
+                let src = crate::opportunity_v31::hist_source(r.year.as_ref());
+                let mut g =
+                    crate::opportunity_v31::shadow_grid(p.decision, composite, t, ratio, warmup);
+                for v in &mut g {
+                    v.hist_source = src.map(str::to_string);
+                }
+                g
+            }),
+        },
+        confidence_rank(row.confidence),
+    )
+}
+
+/// Outcome of evaluating one universe symbol in a run.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Evaluation {
+    pub symbol: String,
+    /// `ok` (qualified, ranked), `excluded` (scored diagnostically, not ranked) or `failed`.
+    pub status: &'static str,
+    /// `qualified`, `unprofitable`, `gap_below_min:<bps>`, `no_intrinsic_value`,
+    /// `not_loaded`, `invalid_price` or `score_error:<msg>`.
+    pub reason: String,
+    /// buildRows gap (bps) used by the qualification gate.
+    pub gate_gap_bps: Option<i32>,
+    /// Scores/projection. `decision` is `None` unless `status == "ok"`.
+    pub row: Option<AndroidRow>,
+    #[serde(skip)]
+    pub confidence_rank: u8,
+    /// Index of the symbol's row in the snapshot (`None` when not loaded).
+    pub snapshot_index: Option<usize>,
+}
+
+/// One [`Evaluation`] per universe symbol (snapshot order, then not-loaded symbols in
+/// universe order). Without a universe, one per snapshot row. Does not change V3:
+/// [`rank_android_v3`] is exactly the `ok` evaluations sorted as before.
+pub fn evaluate_android_v3(
+    snapshot: &OpportunitySnapshot,
+    universe: Option<&[String]>,
+) -> Vec<Evaluation> {
+    use crate::engine::QualificationStatus;
     let allowed: Option<std::collections::HashSet<&str>> =
         universe.map(|u| u.iter().map(|s| s.as_str()).collect());
-    let mut rows: Vec<(AndroidRow, u8)> = snapshot
-        .rows
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (i, r) in snapshot.rows.iter().enumerate() {
+        let sym = r.row.symbol.as_str();
+        if !allowed.as_ref().is_none_or(|a| a.contains(sym)) {
+            continue;
+        }
+        // Duplicate snapshot rows are evaluated (and ranked) exactly as on main.
+        seen.insert(sym.to_string());
+        let row = android_row(r);
+        let (status, reason) = match row.qualification {
+            QualificationStatus::Qualified => ("ok", "qualified".to_string()),
+            _ if row.market_price_cents <= 0 => ("failed", "invalid_price".to_string()),
+            QualificationStatus::Unprofitable => ("excluded", "unprofitable".to_string()),
+            QualificationStatus::GapTooSmall => match row.gap_bps {
+                None => ("excluded", "no_intrinsic_value".to_string()),
+                Some(g) => ("excluded", format!("gap_below_min:{g}")),
+            },
+        };
+        let gate_gap_bps = row.gap_bps;
+        let scored =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| android_score(r, &row)));
+        let (status, reason, row, confidence_rank) = match scored {
+            Ok((mut a, c)) => {
+                if status != "ok" {
+                    a.decision = None;
+                }
+                (status, reason, Some(a), c)
+            }
+            Err(p) => {
+                let msg = p
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "panic".into());
+                ("failed", format!("score_error:{msg}"), None, 0)
+            }
+        };
+        out.push(Evaluation {
+            symbol: sym.to_string(),
+            status,
+            reason,
+            gate_gap_bps,
+            row,
+            confidence_rank,
+            snapshot_index: Some(i),
+        });
+    }
+    for sym in universe.unwrap_or(&[]) {
+        if seen.insert(sym.clone()) {
+            out.push(Evaluation {
+                symbol: sym.clone(),
+                status: "failed",
+                reason: "not_loaded".into(),
+                gate_gap_bps: None,
+                row: None,
+                confidence_rank: 0,
+                snapshot_index: None,
+            });
+        }
+    }
+    out
+}
+
+/// The official Android V3 ranking: qualified evaluations, sorted as on main.
+pub fn rank_android_v3(
+    snapshot: &OpportunitySnapshot,
+    universe: Option<&[String]>,
+) -> Vec<AndroidRow> {
+    rank_evaluations(&evaluate_android_v3(snapshot, universe))
+}
+
+/// Ranking from evaluations: `ok` rows, main's sort.
+pub fn rank_evaluations(evals: &[Evaluation]) -> Vec<AndroidRow> {
+    let mut rows: Vec<(AndroidRow, u8)> = evals
         .iter()
-        .filter(|r| {
-            allowed
-                .as_ref()
-                .is_none_or(|a| a.contains(r.row.symbol.as_str()))
-        })
-        .map(|r| (r, android_row(r)))
-        .filter(|(_, row)| row.qualification == QualificationStatus::Qualified)
-        .map(|(r, row)| {
-            let row = &row;
-            let (f, sig) = score_fundamentals_v3_android(row, r.business_class);
-            let t = crate::android_chart::score_technicals_v3(r.year.as_ref());
-            let (fc, _) = match r.android_target {
-                Some((fair, count)) => {
-                    score_forecast_v3_with(row, r.dcf_analysis.as_ref(), fair, count)
-                }
-                // No external signal → Kotlin has no Street target.
-                None if r.external.is_none() => {
-                    score_forecast_v3_with(row, r.dcf_analysis.as_ref(), None, None)
-                }
-                // Snapshot written before `android_target` existed: desktop inputs.
-                None => score_forecast_v3(row, r.dcf_analysis.as_ref()),
-            };
-            let composite = composite_score_v3_android(f, t, fc, row.beta_millis);
-            let coverage = [f, t, fc].iter().filter(|x| x.is_some()).count() as u8;
-            let upside = android_upside_bps(row.market_price_cents, row.intrinsic_value_cents);
-            let p = android_project_row(
-                row.confidence,
-                row.market_price_cents,
-                composite,
-                r.android_street.as_ref(),
-                r.android_dcf.as_ref(),
-            );
-            (
-                AndroidRow {
-                    symbol: row.symbol.clone(),
-                    company: row.company_name.clone(),
-                    sector: row.sector_name.clone(),
-                    composite_score: composite,
-                    coverage,
-                    fundamentals: f,
-                    technical: t,
-                    forecast: fc,
-                    decision: p.decision.map(str::to_string),
-                    confidence: confidence_label(p.confidence.unwrap_or(row.confidence))
-                        .to_string(),
-                    price_cents: row.market_price_cents,
-                    intrinsic_cents: row.intrinsic_value_cents,
-                    anchor_cents: p.anchor_cents,
-                    anchor: p.anchor.to_string(),
-                    gap_bps: p.gap_bps,
-                    upside_bps: p.upside_bps,
-                    trust_signal: p.trust_signal.map(str::to_string),
-                    row_confidence: confidence_label(row.confidence).to_string(),
-                    row_gap_bps: row.gap_bps.unwrap_or(0),
-                    row_upside_bps: upside.unwrap_or(0),
-                    projection_gap: p.projection_gap.map(str::to_string),
-                    fundamentals_signals: sig,
-                    // V3.1 shadow, computed from the official decision; never feeds back.
-                    shadow: Some({
-                        let (ratio, warmup) =
-                            crate::opportunity_v31::momentum_input(r.year.as_ref());
-                        let src = crate::opportunity_v31::hist_source(r.year.as_ref());
-                        let mut g = crate::opportunity_v31::shadow_grid(
-                            p.decision, composite, t, ratio, warmup,
-                        );
-                        for v in &mut g {
-                            v.hist_source = src.map(str::to_string);
-                        }
-                        g
-                    }),
-                },
-                confidence_rank(row.confidence),
-            )
-        })
+        .filter(|e| e.status == "ok")
+        .filter_map(|e| e.row.clone().map(|r| (r, e.confidence_rank)))
         .collect();
     rows.sort_by(|(a, ac), (b, bc)| {
         b.composite_score
@@ -1022,7 +1109,10 @@ pub struct EngineStatus {
     pub symbols_loaded: usize,
     pub symbols_total: usize,
     pub last_error: Option<String>,
+    /// Rows in the official Android V3 ranking (qualified symbols only).
     pub ranked_rows: usize,
+    /// Rows in the snapshot the ranking was computed from (loaded symbols).
+    pub snapshot_rows: usize,
     pub source: &'static str,
     pub snapshot_captured_at_epoch: Option<i64>,
 }
@@ -1259,6 +1349,23 @@ impl HeadlessEngine {
         history_json(store, symbol, days, changes, now, &profile)
     }
 
+    /// See [`history_all_json`].
+    pub fn history_all_json(
+        &self,
+        symbol: Option<&str>,
+        run: Option<&str>,
+        profile: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let store = self
+            .history
+            .as_ref()
+            .ok_or("score history disabled (--history-interval-hours 0)")?;
+        let profile = profile
+            .map(canonical_profile)
+            .unwrap_or_else(|| canonical_profile(&self.profile()));
+        history_all_json(store, symbol, run, &profile)
+    }
+
     pub fn status(&self) -> EngineStatus {
         let fs = self.state.feed_status.lock().unwrap().clone();
         let (snap, source) = self.current_snapshot();
@@ -1270,7 +1377,8 @@ impl HeadlessEngine {
             symbols_loaded: fs.symbols_loaded,
             symbols_total: self.state.active_symbols.lock().unwrap().len(),
             last_error: fs.last_error,
-            ranked_rows: snap.len(),
+            ranked_rows: rank_android_v3(&snap, android_universe(&snap.profile).as_deref()).len(),
+            snapshot_rows: snap.len(),
             source,
             snapshot_captured_at_epoch: Some(snap.captured_at_epoch),
         }
@@ -1284,9 +1392,9 @@ pub trait HistorySource {
     fn year_charts_loaded(&self) -> usize;
     fn history_universe(&self) -> Vec<String>;
     fn history_profile(&self) -> String;
-    /// Android V3 ranking and its source (`live` / `persisted`).
-    fn history_ranking(&self) -> (Vec<RankedRow>, &'static str);
-    fn snapshot_symbols(&self) -> std::collections::HashSet<String>;
+    /// The ONE snapshot a run is computed from (ranking, evaluations and stored inputs),
+    /// its source (`live` / `persisted`) and the universe the ranking filters on.
+    fn history_snapshot(&self) -> (Arc<OpportunitySnapshot>, &'static str, Option<Vec<String>>);
 }
 
 impl HistorySource for HeadlessEngine {
@@ -1304,17 +1412,148 @@ impl HistorySource for HeadlessEngine {
     fn history_profile(&self) -> String {
         canonical_profile(&self.profile())
     }
-    fn history_ranking(&self) -> (Vec<RankedRow>, &'static str) {
-        let (rows, source) = self.android_ranking();
-        (android_to_ranked(&rows), source)
+    fn history_snapshot(&self) -> (Arc<OpportunitySnapshot>, &'static str, Option<Vec<String>>) {
+        let (snap, source) = self.current_snapshot();
+        let u = android_universe(&snap.profile);
+        (snap, source, u)
     }
-    fn snapshot_symbols(&self) -> std::collections::HashSet<String> {
-        self.capture()
-            .rows
-            .iter()
-            .map(|r| r.row.symbol.clone())
-            .collect()
+}
+
+/// Builds the stored evaluation of a run: one record per universe symbol (plus any
+/// loaded symbol outside it is ignored, exactly like the ranking), the exact serde
+/// bytes of every snapshot row, and the snapshot envelope.
+pub fn run_evaluation(
+    snap: &OpportunitySnapshot,
+    rank_universe: Option<&[String]>,
+    universe: &[String],
+) -> Result<(Vec<AndroidRow>, crate::score_history::RunEvaluation), String> {
+    use crate::score_history::{EvalRecord, RunEvaluation};
+    let mut evals = evaluate_android_v3(snap, rank_universe);
+    // not_loaded for the run universe too (it is the profile's universe).
+    let mut have: std::collections::HashSet<String> =
+        evals.iter().map(|e| e.symbol.clone()).collect();
+    for s in universe {
+        if have.insert(s.clone()) {
+            evals.push(Evaluation {
+                symbol: s.clone(),
+                status: "failed",
+                reason: "not_loaded".into(),
+                gate_gap_bps: None,
+                row: None,
+                confidence_rank: 0,
+                snapshot_index: None,
+            });
+        }
     }
+    let ranked = rank_evaluations(&evals);
+    let rank_of: std::collections::HashMap<&str, usize> = ranked
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.symbol.as_str(), i + 1))
+        .collect();
+    let records = evals
+        .iter()
+        .map(|e| {
+            let a = e.row.as_ref();
+            EvalRecord {
+                symbol: e.symbol.clone(),
+                status: e.status.into(),
+                reason: e.reason.clone(),
+                rank: (e.status == "ok")
+                    .then(|| rank_of.get(e.symbol.as_str()).map(|r| *r as i64))
+                    .flatten(),
+                gate_gap_bps: e.gate_gap_bps.map(i64::from),
+                composite: a.map(|r| r.composite_score as i64),
+                coverage: a.map(|r| r.coverage as i64),
+                fundamentals: a.and_then(|r| r.fundamentals).map(i64::from),
+                technical: a.and_then(|r| r.technical).map(i64::from),
+                technical_reason: technical_reason(snap, e),
+                forecast: a.and_then(|r| r.forecast).map(i64::from),
+                decision: a.and_then(|r| r.decision.clone()),
+                confidence: a.map(|r| r.confidence.clone()),
+                row_confidence: a.map(|r| r.row_confidence.clone()),
+                price_cents: a.map(|r| r.price_cents),
+                intrinsic_cents: a.map(|r| r.intrinsic_cents),
+                anchor_cents: a.and_then(|r| r.anchor_cents),
+                anchor: a.map(|r| r.anchor.clone()),
+                gap_bps: a.and_then(|r| r.gap_bps).map(i64::from),
+                upside_bps: a.and_then(|r| r.upside_bps).map(i64::from),
+                trust_signal: a.and_then(|r| r.trust_signal.clone()),
+                input_idx: e.snapshot_index,
+                inputs_hash: None,
+            }
+        })
+        .collect();
+    let (prefix, inputs, suffix) = snapshot_parts(snap)?;
+    Ok((
+        ranked,
+        RunEvaluation {
+            universe_size: universe.len().max(rank_universe.map_or(0, |u| u.len())),
+            evals: records,
+            inputs,
+            snapshot_prefix: prefix,
+            snapshot_suffix: suffix,
+        },
+    ))
+}
+
+/// Why an evaluation's diagnostic T is NULL (`None` when it was computed).
+fn technical_reason(snap: &OpportunitySnapshot, e: &Evaluation) -> Option<String> {
+    if e.row.as_ref().is_some_and(|r| r.technical.is_some()) {
+        return None;
+    }
+    let why = match e.snapshot_index.and_then(|i| snap.rows.get(i)) {
+        None => "not_loaded",
+        Some(_) if e.row.is_none() => "score_error",
+        Some(r) => match r.year.as_ref() {
+            None => "no_year_chart",
+            Some(y) if y.latest_close_cents.is_none() => "no_latest_close",
+            Some(_) => "no_indicators",
+        },
+    };
+    Some(why.to_string())
+}
+
+/// (envelope prefix, per-row (symbol, bytes), envelope suffix).
+pub type SnapshotParts = (Vec<u8>, Vec<(String, Vec<u8>)>, Vec<u8>);
+
+/// Splits the exact `OpportunitySnapshot::save` bytes into envelope prefix, per-row
+/// bytes and suffix, and checks that they join back to the same bytes.
+pub fn snapshot_parts(snap: &OpportunitySnapshot) -> Result<SnapshotParts, String> {
+    let full = serde_json::to_vec(snap).map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Vec<u8>)> = snap
+        .rows
+        .iter()
+        .map(|r| {
+            serde_json::to_vec(r)
+                .map(|b| (r.row.symbol.clone(), b))
+                .map_err(|e| e.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    let empty = OpportunitySnapshot {
+        profile: snap.profile.clone(),
+        captured_at_epoch: snap.captured_at_epoch,
+        rows: Vec::new(),
+    };
+    let env = serde_json::to_vec(&empty).map_err(|e| e.to_string())?;
+    let at = env
+        .windows(3)
+        .position(|w| w == b"[]}")
+        .filter(|_| env.ends_with(b"[]}"))
+        .ok_or("unexpected snapshot envelope")?;
+    let (prefix, suffix) = (env[..at + 1].to_vec(), env[at + 1..].to_vec());
+    let mut joined = prefix.clone();
+    for (i, (_, b)) in rows.iter().enumerate() {
+        if i > 0 {
+            joined.push(b',');
+        }
+        joined.extend_from_slice(b);
+    }
+    joined.extend_from_slice(&suffix);
+    if joined != full {
+        return Err("snapshot row bytes do not rebuild the snapshot".into());
+    }
+    Ok((prefix, rows, suffix))
 }
 
 /// One history tick: gathers [`crate::score_history::DueInputs`] from `src`, asks
@@ -1347,11 +1586,21 @@ pub fn record_history_tick(
     let charts_ready =
         universe.is_empty() || year_loaded as f64 >= universe.len() as f64 * HISTORY_YEAR_COVERAGE;
     let profile = src.history_profile();
-    let (ranked, source) = if pass_completed {
-        src.history_ranking()
+    let (snap, source, rank_universe) = if pass_completed {
+        src.history_snapshot()
     } else {
-        (Vec::new(), "live")
+        (
+            Arc::new(OpportunitySnapshot {
+                profile: String::new(),
+                captured_at_epoch: now,
+                rows: Vec::new(),
+            }),
+            "live",
+            None,
+        )
     };
+    let (android, eval) = run_evaluation(&snap, rank_universe.as_deref(), &universe)?;
+    let ranked = android_to_ranked(&android);
     let due = history_due(&DueInputs {
         now,
         pass_completed,
@@ -1367,7 +1616,8 @@ pub fn record_history_tick(
         Due::Interval => "interval",
         Due::Close(_) => "close",
     };
-    let have = src.snapshot_symbols();
+    let have: std::collections::HashSet<&str> =
+        snap.rows.iter().map(|r| r.row.symbol.as_str()).collect();
     let incomplete: Vec<String> = universe
         .iter()
         .filter(|s| !have.contains(s.as_str()))
@@ -1384,7 +1634,7 @@ pub fn record_history_tick(
         symbols_total: universe.len(),
         incomplete_symbols: incomplete,
     };
-    Ok(match store.record_run(&meta, &ranked)? {
+    Ok(match store.record_run_full(&meta, &ranked, Some(&eval))? {
         RecordOutcome::Recorded { rows, skipped } => HistoryWrite::Recorded {
             trigger,
             rows,
@@ -1416,6 +1666,38 @@ pub fn history_json(
             serde_json::to_value(crate::score_history::decision_changes(&points)).unwrap();
     }
     Ok(v)
+}
+
+/// `/history?all=1`: every universe symbol's evaluation for one run (latest of the
+/// profile when `run` is `None`), with the run stats; or, with `symbol`, that symbol's
+/// evaluations (ok / excluded / failed) across runs.
+pub fn history_all_json(
+    store: &crate::score_history::ScoreHistoryStore,
+    symbol: Option<&str>,
+    run: Option<&str>,
+    profile: &str,
+) -> Result<serde_json::Value, String> {
+    if let Some(sym) = symbol {
+        let sym = crate::score_history::validate_symbol(sym)?;
+        let ev = store.symbol_evaluations(&sym, profile, HISTORY_MODEL)?;
+        return Ok(serde_json::json!({
+            "symbol": sym, "profile": profile, "model": HISTORY_MODEL, "evaluations": ev
+        }));
+    }
+    let run_id = match run {
+        Some(r) => r.to_string(),
+        None => store
+            .latest_run_id(profile, HISTORY_MODEL)?
+            .ok_or_else(|| format!("no evaluated run for profile {profile}"))?,
+    };
+    let stats = store
+        .run_stats(&run_id)?
+        .ok_or_else(|| format!("run {run_id} has no evaluations"))?;
+    let evals = store.evaluations(&run_id)?;
+    Ok(serde_json::json!({
+        "run_id": run_id, "profile": profile, "model": HISTORY_MODEL,
+        "stats": stats, "rows": evals.len(), "evaluations": evals
+    }))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1945,31 +2227,21 @@ mod history_tick_tests {
         gen: Cell<u64>,
         year: Cell<usize>,
         source: Cell<&'static str>,
+        snap: Arc<OpportunitySnapshot>,
     }
 
-    fn rr(sym: &str) -> RankedRow {
-        RankedRow {
-            rank: 1,
-            symbol: sym.into(),
-            company: None,
-            sector: None,
-            composite_score: 40,
-            setup_score: 40,
-            setup_label: "Act".into(),
-            decision: "Act".into(),
-            confidence: None,
-            price: 10.0,
-            target: None,
-            gap_pct: None,
-            upside_pct: None,
-            fundamentals: None,
-            technical: None,
-            forecast: None,
-            regime: None,
-            trust_signal: None,
-            projection_gap: None,
-            shadow: None,
+    /// The fixture snapshot with its rows relabelled S0, S1, … (universe S0..S99).
+    fn fixture_snap() -> Arc<OpportunitySnapshot> {
+        let screener = crate::commands::opportunity_projection_tests::fixture_state();
+        let mut snap = OpportunitySnapshot::capture(&screener, "sp500");
+        for (k, r) in snap.rows.iter_mut().enumerate() {
+            r.row.symbol = format!("S{k}");
         }
+        Arc::new(snap)
+    }
+
+    fn universe() -> Vec<String> {
+        (0..100).map(|k| format!("S{k}")).collect()
     }
 
     impl HistorySource for Fake {
@@ -1980,16 +2252,15 @@ mod history_tick_tests {
             self.year.get()
         }
         fn history_universe(&self) -> Vec<String> {
-            (0..100).map(|k| format!("S{k}")).collect()
+            universe()
         }
         fn history_profile(&self) -> String {
             "sp500".into()
         }
-        fn history_ranking(&self) -> (Vec<RankedRow>, &'static str) {
-            (vec![rr("S0"), rr("S1")], self.source.get())
-        }
-        fn snapshot_symbols(&self) -> std::collections::HashSet<String> {
-            ["S0", "S1"].iter().map(|s| s.to_string()).collect()
+        fn history_snapshot(
+            &self,
+        ) -> (Arc<OpportunitySnapshot>, &'static str, Option<Vec<String>>) {
+            (self.snap.clone(), self.source.get(), Some(universe()))
         }
     }
 
@@ -2013,7 +2284,13 @@ mod history_tick_tests {
             gen: Cell::new(u64::MAX),
             year: Cell::new(100),
             source: Cell::new("live"),
+            snap: fixture_snap(),
         };
+        let expect = rank_android_v3(&f.snap, Some(&universe()))
+            .iter()
+            .filter(|r| r.price_cents > 0)
+            .count();
+        assert!(expect > 0, "fixture must rank something");
         assert_eq!(
             tick(&f, &s, &seen, NOW),
             HistoryWrite::Skipped("initial pass in progress")
@@ -2041,11 +2318,10 @@ mod history_tick_tests {
             matches!(
                 w,
                 HistoryWrite::Recorded {
-                    rows: 2,
                     trigger: "interval",
                     ..
                 }
-            ),
+            ) && matches!(w, HistoryWrite::Recorded { rows, .. } if rows == expect),
             "{w:?}"
         );
         // A new generation restarts since_pass.
@@ -2072,6 +2348,333 @@ mod history_tick_tests {
             tick(&f, &ok, &seen2, t),
             HistoryWrite::Recorded { .. }
         ));
-        assert_eq!(ok.counts().unwrap(), (1, 2));
+        assert_eq!(ok.counts().unwrap(), (1, expect as i64));
+    }
+
+    #[test]
+    fn tick_stores_one_evaluation_per_universe_symbol_and_exact_inputs() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let seen = Mutex::new(None);
+        let f = Fake {
+            gen: Cell::new(1),
+            year: Cell::new(100),
+            source: Cell::new("live"),
+            snap: fixture_snap(),
+        };
+        let w = tick(&f, &s, &seen, NOW);
+        assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+        let run = s.latest_run_id("sp500", HISTORY_MODEL).unwrap().unwrap();
+        let ev = s.evaluations(&run).unwrap();
+        // Rows = universe, including not-loaded (and any failed) symbols.
+        assert_eq!(ev.len(), 100);
+        let loaded = f.snap.rows.len();
+        let nl = ev.iter().filter(|e| e.reason == "not_loaded").count();
+        assert_eq!(nl, 100 - loaded);
+        assert!(ev
+            .iter()
+            .filter(|e| e.status == "failed")
+            .all(|e| e.decision.is_none() && e.rank.is_none()));
+        // ok rows are exactly the official ranking, in rank order.
+        let official = rank_android_v3(&f.snap, Some(&universe()));
+        let ok: Vec<&str> = ev
+            .iter()
+            .filter(|e| e.status == "ok")
+            .map(|e| e.symbol.as_str())
+            .collect();
+        let want: Vec<&str> = official.iter().map(|r| r.symbol.as_str()).collect();
+        assert_eq!(ok, want);
+        // Excluded rows carry diagnostic scores but never a decision.
+        for e in ev.iter().filter(|e| e.status == "excluded") {
+            assert!(e.decision.is_none() && e.rank.is_none(), "{e:?}");
+            assert!(e.composite.is_some(), "{e:?}");
+        }
+        let st = s.run_stats(&run).unwrap().unwrap();
+        assert_eq!(st.universe_size, 100);
+        assert_eq!(st.loaded as usize, loaded);
+        assert_eq!(st.ok + st.excluded + st.failed, 100);
+        assert_eq!(st.reasons.values().sum::<i64>(), 100);
+        assert_eq!(st.ok as usize, official.len());
+        // Byte-exact reconstruction of the snapshot the run was computed from.
+        let rebuilt = s.reconstruct_snapshot(&run).unwrap();
+        assert_eq!(rebuilt, serde_json::to_vec(&*f.snap).unwrap());
+        let back: OpportunitySnapshot = serde_json::from_slice(&rebuilt).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&rank_android_v3(&back, Some(&universe()))).unwrap(),
+            serde_json::to_vec(&official).unwrap()
+        );
+        // /history?all=1 shape.
+        let v = history_all_json(&s, None, None, "sp500").unwrap();
+        assert_eq!(v["rows"], 100);
+        assert_eq!(v["stats"]["universe_size"], 100);
+        let v = history_all_json(&s, Some("S99"), None, "sp500").unwrap();
+        assert_eq!(v["evaluations"][0]["reason"], "not_loaded");
+    }
+}
+
+#[cfg(test)]
+mod full_universe_parity_tests {
+    use super::*;
+
+    /// VERBATIM copy of main's `rank_android_v3` (2c19869, with the V3.1 shadow), the reference.
+    #[allow(clippy::all)]
+    fn rank_android_v3_main(
+        snapshot: &OpportunitySnapshot,
+        universe: Option<&[String]>,
+    ) -> Vec<AndroidRow> {
+        use crate::engine::QualificationStatus;
+        use crate::opportunity_v3::{
+            composite_score_v3_android, score_forecast_v3, score_forecast_v3_with,
+            score_fundamentals_v3_android,
+        };
+        let allowed: Option<std::collections::HashSet<&str>> =
+            universe.map(|u| u.iter().map(|s| s.as_str()).collect());
+        let mut rows: Vec<(AndroidRow, u8)> = snapshot
+            .rows
+            .iter()
+            .filter(|r| {
+                allowed
+                    .as_ref()
+                    .is_none_or(|a| a.contains(r.row.symbol.as_str()))
+            })
+            .map(|r| (r, android_row(r)))
+            .filter(|(_, row)| row.qualification == QualificationStatus::Qualified)
+            .map(|(r, row)| {
+                let row = &row;
+                let (f, sig) = score_fundamentals_v3_android(row, r.business_class);
+                let t = crate::android_chart::score_technicals_v3(r.year.as_ref());
+                let (fc, _) = match r.android_target {
+                    Some((fair, count)) => {
+                        score_forecast_v3_with(row, r.dcf_analysis.as_ref(), fair, count)
+                    }
+                    // No external signal → Kotlin has no Street target.
+                    None if r.external.is_none() => {
+                        score_forecast_v3_with(row, r.dcf_analysis.as_ref(), None, None)
+                    }
+                    // Snapshot written before `android_target` existed: desktop inputs.
+                    None => score_forecast_v3(row, r.dcf_analysis.as_ref()),
+                };
+                let composite = composite_score_v3_android(f, t, fc, row.beta_millis);
+                let coverage = [f, t, fc].iter().filter(|x| x.is_some()).count() as u8;
+                let upside = android_upside_bps(row.market_price_cents, row.intrinsic_value_cents);
+                let p = android_project_row(
+                    row.confidence,
+                    row.market_price_cents,
+                    composite,
+                    r.android_street.as_ref(),
+                    r.android_dcf.as_ref(),
+                );
+                (
+                    AndroidRow {
+                        symbol: row.symbol.clone(),
+                        company: row.company_name.clone(),
+                        sector: row.sector_name.clone(),
+                        composite_score: composite,
+                        coverage,
+                        fundamentals: f,
+                        technical: t,
+                        forecast: fc,
+                        decision: p.decision.map(str::to_string),
+                        confidence: confidence_label(p.confidence.unwrap_or(row.confidence))
+                            .to_string(),
+                        price_cents: row.market_price_cents,
+                        intrinsic_cents: row.intrinsic_value_cents,
+                        anchor_cents: p.anchor_cents,
+                        anchor: p.anchor.to_string(),
+                        gap_bps: p.gap_bps,
+                        upside_bps: p.upside_bps,
+                        trust_signal: p.trust_signal.map(str::to_string),
+                        row_confidence: confidence_label(row.confidence).to_string(),
+                        row_gap_bps: row.gap_bps.unwrap_or(0),
+                        row_upside_bps: upside.unwrap_or(0),
+                        projection_gap: p.projection_gap.map(str::to_string),
+                        fundamentals_signals: sig,
+                        // V3.1 shadow, computed from the official decision; never feeds back.
+                        shadow: Some({
+                            let (ratio, warmup) =
+                                crate::opportunity_v31::momentum_input(r.year.as_ref());
+                            let src = crate::opportunity_v31::hist_source(r.year.as_ref());
+                            let mut g = crate::opportunity_v31::shadow_grid(
+                                p.decision, composite, t, ratio, warmup,
+                            );
+                            for v in &mut g {
+                                v.hist_source = src.map(str::to_string);
+                            }
+                            g
+                        }),
+                    },
+                    confidence_rank(row.confidence),
+                )
+            })
+            .collect();
+        rows.sort_by(|(a, ac), (b, bc)| {
+            b.composite_score
+                .cmp(&a.composite_score)
+                .then(b.coverage.cmp(&a.coverage))
+                .then(bc.cmp(ac))
+                .then(b.row_upside_bps.cmp(&a.row_upside_bps))
+                .then(a.symbol.cmp(&b.symbol))
+        });
+        rows.into_iter().map(|(r, _)| r).collect()
+    }
+
+    #[test]
+    fn ranking_and_decisions_byte_identical_to_main() {
+        let screener = crate::commands::opportunity_projection_tests::fixture_state();
+        let snap = OpportunitySnapshot::capture(&screener, "fixture");
+        let all: Vec<String> = snap.rows.iter().map(|r| r.row.symbol.clone()).collect();
+        let half: Vec<String> = all.iter().step_by(2).cloned().collect();
+        let mut with_missing = half.clone();
+        with_missing.push("NOTLOADED".into());
+        for u in [
+            None,
+            Some(all.as_slice()),
+            Some(half.as_slice()),
+            Some(with_missing.as_slice()),
+        ] {
+            let main = serde_json::to_vec(&rank_android_v3_main(&snap, u)).unwrap();
+            let new = serde_json::to_vec(&rank_android_v3(&snap, u)).unwrap();
+            assert_eq!(main, new, "universe {u:?}");
+        }
+        let ev = evaluate_android_v3(&snap, Some(&with_missing));
+        assert_eq!(ev.len(), with_missing.len());
+        assert_eq!(ev.last().unwrap().reason, "not_loaded");
+        assert!(ev.iter().any(|e| e.status == "ok"));
+        assert!(
+            ev.iter().any(|e| e.status == "excluded"),
+            "fixture should exercise exclusions: {:?}",
+            ev.iter()
+                .map(|e| (&e.symbol, &e.reason))
+                .collect::<Vec<_>>()
+        );
+        for e in &ev {
+            if e.status != "ok" {
+                assert!(e.row.as_ref().is_none_or(|r| r.decision.is_none()));
+            }
+        }
+    }
+
+    fn sha_hex(b: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
+    }
+
+    /// Release-candidate driver (ignored; run by the RC's try.sh). Env:
+    /// RC_SNAPSHOT (optional snapshot copy, else the test fixture), RC_N (symbols),
+    /// RC_DB (history.sqlite to create), RC_RUNS (runs), RC_CHANGE (fraction of rows whose
+    /// price changes between runs). Prints one JSON line per run.
+    #[test]
+    #[ignore]
+    fn rc_full_universe() {
+        use crate::score_history::{RunMeta, ScoreHistoryStore};
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let base = match env("RC_SNAPSHOT") {
+            Some(p) => OpportunitySnapshot::load(Path::new(&p)).unwrap(),
+            None => OpportunitySnapshot::capture(
+                &crate::commands::opportunity_projection_tests::fixture_state(),
+                "sp500",
+            ),
+        };
+        let n: usize = env("RC_N").map_or(501, |v| v.parse().unwrap());
+        let runs: usize = env("RC_RUNS").map_or(2, |v| v.parse().unwrap());
+        let change: f64 = env("RC_CHANGE").map_or(1.0, |v| v.parse().unwrap());
+        let db = PathBuf::from(env("RC_DB").expect("RC_DB"));
+        // Universe: n symbols; ~1% are never loaded, one has an invalid price.
+        let missing = (n / 100).max(1);
+        let mut snap = OpportunitySnapshot {
+            profile: "sp500".into(),
+            captured_at_epoch: 1_793_538_000,
+            rows: Vec::new(),
+        };
+        for k in 0..n - missing {
+            let mut r = base.rows[k % base.rows.len()].clone();
+            r.row.symbol = format!("SYN{k:04}");
+            snap.rows.push(r);
+        }
+        snap.rows[n - missing - 1].row.market_price_cents = 0;
+        let universe: Vec<String> = (0..n).map(|k| format!("SYN{k:04}")).collect();
+        let store = ScoreHistoryStore::open(&db, None).unwrap();
+        for run in 0..runs {
+            if run > 0 {
+                let m = (snap.rows.len() as f64 * change) as usize;
+                for r in snap.rows.iter_mut().take(m) {
+                    if r.row.market_price_cents > 0 {
+                        r.row.market_price_cents += 1;
+                    }
+                }
+                snap.captured_at_epoch += 6 * 3600;
+            }
+            let (ranked, eval) = run_evaluation(&snap, Some(&universe), &universe).unwrap();
+            let main = rank_android_v3_main(&snap, Some(&universe));
+            let meta = RunMeta {
+                captured_at: snap.captured_at_epoch,
+                profile: "sp500".into(),
+                model: HISTORY_MODEL.into(),
+                semantics: "android".into(),
+                market_context: false,
+                binary_version: "rc".into(),
+                // 4 runs/day at 6 h; the 4th of each day is the post-close run.
+                trigger: if run % 4 == 3 { "close" } else { "interval" }.into(),
+                symbols_total: n,
+                incomplete_symbols: vec![],
+            };
+            store
+                .record_run_full(&meta, &android_to_ranked(&ranked), Some(&eval))
+                .unwrap();
+            let id = meta.run_id();
+            let original = serde_json::to_vec(&snap).unwrap();
+            let st = store.run_stats(&id).unwrap().unwrap();
+            let rebuilt = if st.inputs_stored {
+                store.reconstruct_snapshot(&id).unwrap()
+            } else {
+                assert!(store.reconstruct_snapshot(&id).is_err());
+                original.clone()
+            };
+            let rows = store.evaluations(&id).unwrap().len();
+            println!(
+                "RC {}",
+                serde_json::json!({
+                    "run": run, "run_id": id, "universe": n, "evaluation_rows": rows,
+                    "stats": st,
+                    "ranking_sha256_branch": sha_hex(&serde_json::to_vec(&ranked).unwrap()),
+                    "ranking_sha256_main": sha_hex(&serde_json::to_vec(&main).unwrap()),
+                    "ranked_rows": ranked.len(),
+                    "snapshot_bytes": original.len(),
+                    "snapshot_sha256": sha_hex(&original),
+                    "reconstructed_sha256": sha_hex(&rebuilt),
+                    "inputs_stored": st.inputs_stored,
+                    "reconstruction_byte_identical": st.inputs_stored.then_some(rebuilt == original),
+                })
+            );
+            assert_eq!(rows, n);
+            assert!(rebuilt == original);
+            assert_eq!(
+                serde_json::to_vec(&ranked).unwrap(),
+                serde_json::to_vec(&main).unwrap()
+            );
+        }
+        drop(store);
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        let sz = |t: &str| -> i64 {
+            c.query_row(
+                "SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name LIKE ?1",
+                [format!("{t}%")],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1)
+        };
+        println!(
+            "RC_SIZE {}",
+            serde_json::json!({
+                "db_bytes": std::fs::metadata(&db).unwrap().len(),
+                "score_inputs": sz("score_inputs"), "score_run_inputs": sz("score_run_inputs"),
+                "score_evaluations": sz("score_evaluations"), "score_run_stats": sz("score_run_stats"),
+                "score_history": sz("score_history"), "runs": runs, "change": change,
+            })
+        );
     }
 }

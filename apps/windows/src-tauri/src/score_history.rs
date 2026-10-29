@@ -38,24 +38,47 @@ use crate::headless::RankedRow;
 /// THE single place to bump when the decision rules change (e.g. "V3" -> "V3.1").
 pub const SCORE_RULE_VERSION: &str = "V3";
 
+/// Migration that adds the full-universe evaluation tables. THE single number to bump
+/// if another migration lands on main first (v3 is #68's score_shadow).
+pub const EVALUATIONS_MIGRATION: i64 = 4;
 /// Highest score-history migration this binary knows.
-pub const SCHEMA_VERSION: i64 = 3;
-/// Tables exported to backups and merged on restore.
-pub const HISTORY_TABLES: [&str; 4] = [
+pub const SCHEMA_VERSION: i64 = EVALUATIONS_MIGRATION;
+/// Tables exported to backups and merged on restore (indices 0..=2 are fixed).
+pub const HISTORY_TABLES: [&str; 8] = [
     "score_runs",
     "score_history",
     "score_history_migrations",
     "score_shadow",
+    "score_inputs",
+    "score_run_inputs",
+    "score_evaluations",
+    "score_run_stats",
 ];
 /// Tables the source guard protects (includes the planned shadow table).
-pub const GUARDED_TABLES: [&str; 4] = [
+pub const GUARDED_TABLES: [&str; 8] = [
     "score_runs",
     "score_history",
     "score_history_migrations",
+    "score_inputs",
+    "score_run_inputs",
+    "score_evaluations",
+    "score_run_stats",
     "score_shadow",
 ];
 /// Triggers that must exist before the store writes.
-pub const REQUIRED_TRIGGERS: [&str; 12] = [
+pub const REQUIRED_TRIGGERS: [&str; 24] = [
+    "score_inputs_no_delete",
+    "score_inputs_no_update",
+    "score_inputs_no_overwrite",
+    "score_run_inputs_no_delete",
+    "score_run_inputs_no_update",
+    "score_run_inputs_no_overwrite",
+    "score_evaluations_no_delete",
+    "score_evaluations_no_update",
+    "score_evaluations_no_overwrite",
+    "score_run_stats_no_delete",
+    "score_run_stats_no_update",
+    "score_run_stats_no_overwrite",
     "score_runs_no_delete",
     "score_runs_no_update",
     "score_runs_no_overwrite",
@@ -203,7 +226,461 @@ WHEN EXISTS (SELECT 1 FROM score_shadow WHERE run_id = NEW.run_id AND ticker = N
 BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 ",
     ),
+    (EVALUATIONS_MIGRATION, EVALUATIONS_DDL),
 ];
+
+/// Full-universe evaluations (see `docs/product/score-history.md`).
+/// - `score_inputs`: content-addressed raw snapshot rows (sha256 of the exact serde
+///   bytes; stored gzip), deduplicated across runs.
+/// - `score_run_inputs`: per run, every snapshot row in order -> exact reconstruction.
+/// - `score_evaluations`: one row per universe symbol per run (ok / excluded / failed).
+/// - `score_run_stats`: per-run counts plus the snapshot envelope bytes.
+const EVALUATIONS_DDL: &str = "
+CREATE TABLE IF NOT EXISTS score_inputs (
+    hash      TEXT PRIMARY KEY NOT NULL,
+    encoding  TEXT NOT NULL,
+    raw_size  INTEGER NOT NULL,
+    bytes     BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS score_run_inputs (
+    run_id  TEXT NOT NULL,
+    idx     INTEGER NOT NULL,
+    symbol  TEXT NOT NULL,
+    hash    TEXT NOT NULL,
+    PRIMARY KEY (run_id, idx)
+);
+CREATE TABLE IF NOT EXISTS score_evaluations (
+    run_id          TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    captured_at     INTEGER NOT NULL,
+    status          TEXT NOT NULL,
+    reason          TEXT NOT NULL,
+    rank            INTEGER,
+    gate_gap_bps    INTEGER,
+    composite       INTEGER,
+    coverage        INTEGER,
+    fundamentals    INTEGER,
+    technical       INTEGER,
+    technical_reason TEXT,
+    forecast        INTEGER,
+    decision        TEXT,
+    confidence      TEXT,
+    row_confidence  TEXT,
+    price_cents     INTEGER,
+    intrinsic_cents INTEGER,
+    anchor_cents    INTEGER,
+    anchor          TEXT,
+    gap_bps         INTEGER,
+    upside_bps      INTEGER,
+    trust_signal    TEXT,
+    inputs_hash     TEXT,
+    PRIMARY KEY (run_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS score_evaluations_symbol_time ON score_evaluations(symbol, captured_at);
+CREATE TABLE IF NOT EXISTS score_run_stats (
+    run_id          TEXT PRIMARY KEY NOT NULL,
+    universe_size   INTEGER NOT NULL,
+    loaded          INTEGER NOT NULL,
+    ok              INTEGER NOT NULL,
+    excluded        INTEGER NOT NULL,
+    failed          INTEGER NOT NULL,
+    reasons_json    TEXT NOT NULL,
+    snapshot_rows   INTEGER NOT NULL,
+    inputs_stored   INTEGER NOT NULL,
+    inputs_run_id   TEXT,
+    inputs_reason   TEXT NOT NULL,
+    snapshot_prefix BLOB NOT NULL,
+    snapshot_suffix BLOB NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS score_inputs_no_delete BEFORE DELETE ON score_inputs
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_inputs_no_update BEFORE UPDATE ON score_inputs
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_inputs_no_overwrite BEFORE INSERT ON score_inputs
+WHEN EXISTS (SELECT 1 FROM score_inputs WHERE hash = NEW.hash)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+CREATE TRIGGER IF NOT EXISTS score_run_inputs_no_delete BEFORE DELETE ON score_run_inputs
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_run_inputs_no_update BEFORE UPDATE ON score_run_inputs
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_run_inputs_no_overwrite BEFORE INSERT ON score_run_inputs
+WHEN EXISTS (SELECT 1 FROM score_run_inputs WHERE run_id = NEW.run_id AND idx = NEW.idx)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+CREATE TRIGGER IF NOT EXISTS score_evaluations_no_delete BEFORE DELETE ON score_evaluations
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_evaluations_no_update BEFORE UPDATE ON score_evaluations
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_evaluations_no_overwrite BEFORE INSERT ON score_evaluations
+WHEN EXISTS (SELECT 1 FROM score_evaluations WHERE run_id = NEW.run_id AND symbol = NEW.symbol)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+CREATE TRIGGER IF NOT EXISTS score_run_stats_no_delete BEFORE DELETE ON score_run_stats
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_run_stats_no_update BEFORE UPDATE ON score_run_stats
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_run_stats_no_overwrite BEFORE INSERT ON score_run_stats
+WHEN EXISTS (SELECT 1 FROM score_run_stats WHERE run_id = NEW.run_id)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+";
+
+/// One universe symbol's evaluation, as stored in `score_evaluations`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvalRecord {
+    pub symbol: String,
+    /// `ok` / `excluded` / `failed`.
+    pub status: String,
+    pub reason: String,
+    pub rank: Option<i64>,
+    pub gate_gap_bps: Option<i64>,
+    pub composite: Option<i64>,
+    pub coverage: Option<i64>,
+    pub fundamentals: Option<i64>,
+    pub technical: Option<i64>,
+    /// Why `technical` is NULL (`no_year_chart`, `no_latest_close`, `no_indicators`,
+    /// `not_loaded`, `score_error`); `None` when it was computed.
+    pub technical_reason: Option<String>,
+    pub forecast: Option<i64>,
+    /// V3 decision; always `None` unless `status == "ok"`.
+    pub decision: Option<String>,
+    pub confidence: Option<String>,
+    pub row_confidence: Option<String>,
+    pub price_cents: Option<i64>,
+    pub intrinsic_cents: Option<i64>,
+    pub anchor_cents: Option<i64>,
+    pub anchor: Option<String>,
+    pub gap_bps: Option<i64>,
+    pub upside_bps: Option<i64>,
+    pub trust_signal: Option<String>,
+    /// Index into [`RunEvaluation::inputs`] (the snapshot row), `None` when not loaded.
+    #[serde(skip)]
+    pub input_idx: Option<usize>,
+    #[serde(default)]
+    pub inputs_hash: Option<String>,
+}
+
+/// Everything a full-universe run stores besides `score_runs` / `score_history`.
+#[derive(Clone, Debug, Default)]
+pub struct RunEvaluation {
+    pub universe_size: usize,
+    pub evals: Vec<EvalRecord>,
+    /// Every snapshot row, in snapshot order: (symbol, exact serde bytes).
+    pub inputs: Vec<(String, Vec<u8>)>,
+    /// Snapshot bytes before the first row / after the last row, so that
+    /// `prefix + rows.join(",") + suffix` is byte-identical to the snapshot.
+    pub snapshot_prefix: Vec<u8>,
+    pub snapshot_suffix: Vec<u8>,
+}
+
+/// Per-run counts (`score_run_stats`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunStats {
+    pub run_id: String,
+    pub universe_size: i64,
+    pub loaded: i64,
+    pub ok: i64,
+    pub excluded: i64,
+    pub failed: i64,
+    /// Count per reason (`gap_below_min:<bps>` counted as `gap_below_min`).
+    pub reasons: std::collections::BTreeMap<String, i64>,
+    pub snapshot_rows: i64,
+    /// Whether this run stored its own full inputs.
+    #[serde(default)]
+    pub inputs_stored: bool,
+    /// Run whose inputs this run stored or points to (most recent run with inputs).
+    #[serde(default)]
+    pub inputs_run_id: Option<String>,
+    /// `first`, `close`, `material:<what>` or `skipped:unchanged`.
+    #[serde(default)]
+    pub inputs_reason: String,
+}
+
+impl RunStats {
+    fn from_evals(run_id: &str, e: &RunEvaluation) -> Self {
+        let mut reasons = std::collections::BTreeMap::new();
+        let n = |st: &str| e.evals.iter().filter(|x| x.status == st).count() as i64;
+        let (ok, excluded, failed) = (n("ok"), n("excluded"), n("failed"));
+        for x in &e.evals {
+            let key = x.reason.split(':').next().unwrap_or("").to_string();
+            *reasons.entry(key).or_insert(0) += 1;
+        }
+        Self {
+            run_id: run_id.to_string(),
+            universe_size: e.universe_size as i64,
+            loaded: e.evals.iter().filter(|x| x.input_idx.is_some()).count() as i64,
+            ok,
+            excluded,
+            failed,
+            reasons,
+            snapshot_rows: e.inputs.len() as i64,
+            inputs_stored: false,
+            inputs_run_id: None,
+            inputs_reason: String::new(),
+        }
+    }
+}
+
+/// Writes a run's evaluations, inputs and stats inside the caller's transaction.
+fn write_evaluation(
+    tx: &Connection,
+    meta: &RunMeta,
+    run_id: &str,
+    e: &RunEvaluation,
+) -> Result<(), String> {
+    let captured_at = meta.captured_at;
+    let (store_inputs, inputs_reason, prev) = inputs_policy(tx, meta, e)?;
+    let mut hashes = Vec::with_capacity(e.inputs.len());
+    if store_inputs {
+        let mut blob = tx
+            .prepare(
+                "INSERT INTO score_inputs (hash, encoding, raw_size, bytes) \
+                 SELECT ?1, 'zstd', ?2, ?3 \
+                 WHERE NOT EXISTS (SELECT 1 FROM score_inputs WHERE hash = ?1)",
+            )
+            .map_err(err)?;
+        let mut link = tx
+            .prepare(
+                "INSERT INTO score_run_inputs (run_id, idx, symbol, hash) VALUES (?1,?2,?3,?4)",
+            )
+            .map_err(err)?;
+        for (i, (sym, raw)) in e.inputs.iter().enumerate() {
+            let h = sha256_hex(raw);
+            let exists = tx
+                .query_row(
+                    "SELECT 1 FROM score_inputs WHERE hash = ?1",
+                    params![h],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(err)?
+                .is_some();
+            if !exists {
+                blob.execute(params![h, raw.len() as i64, zstd_bytes(raw)?])
+                    .map_err(|x| format!("input {sym}: {x}"))?;
+            }
+            link.execute(params![run_id, i as i64, sym, h])
+                .map_err(|x| format!("input link {sym}: {x}"))?;
+            hashes.push(h);
+        }
+    }
+    {
+        let mut st = tx
+            .prepare(
+                "INSERT INTO score_evaluations (run_id, symbol, captured_at, status, reason, rank, \
+                 gate_gap_bps, composite, coverage, fundamentals, technical, technical_reason, \
+                 forecast, decision, confidence, row_confidence, price_cents, intrinsic_cents, \
+                 anchor_cents, anchor, gap_bps, upside_bps, trust_signal, inputs_hash) VALUES \
+                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+            )
+            .map_err(err)?;
+        let mut seen = std::collections::HashSet::new();
+        for x in &e.evals {
+            // Duplicate snapshot symbols: the first evaluation is the stored one.
+            if !seen.insert(x.symbol.as_str()) {
+                continue;
+            }
+            let decision = if x.status == "ok" {
+                x.decision.clone()
+            } else {
+                None
+            };
+            st.execute(rusqlite::params_from_iter([
+                &run_id as &dyn rusqlite::ToSql,
+                &x.symbol,
+                &captured_at,
+                &x.status,
+                &x.reason,
+                &x.rank,
+                &x.gate_gap_bps,
+                &x.composite,
+                &x.coverage,
+                &x.fundamentals,
+                &x.technical,
+                &x.technical_reason,
+                &x.forecast,
+                &decision,
+                &x.confidence,
+                &x.row_confidence,
+                &x.price_cents,
+                &x.intrinsic_cents,
+                &x.anchor_cents,
+                &x.anchor,
+                &x.gap_bps,
+                &x.upside_bps,
+                &x.trust_signal,
+                &x.input_idx.and_then(|i| hashes.get(i)),
+            ]))
+            .map_err(|y| format!("evaluation {}: {y}", x.symbol))?;
+        }
+    }
+    let mut stats = RunStats::from_evals(run_id, e);
+    // Stored counts are per distinct symbol (matches score_evaluations).
+    let distinct: std::collections::HashSet<&str> =
+        e.evals.iter().map(|x| x.symbol.as_str()).collect();
+    if distinct.len() != e.evals.len() {
+        let mut seen = std::collections::HashSet::new();
+        let uniq = RunEvaluation {
+            evals: e
+                .evals
+                .iter()
+                .filter(|x| seen.insert(x.symbol.as_str()))
+                .cloned()
+                .collect(),
+            ..e.clone()
+        };
+        stats = RunStats::from_evals(run_id, &uniq);
+    }
+    tx.execute(
+        "INSERT INTO score_run_stats (run_id, universe_size, loaded, ok, excluded, failed, \
+         reasons_json, snapshot_rows, inputs_stored, inputs_run_id, inputs_reason, \
+         snapshot_prefix, snapshot_suffix) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            run_id,
+            stats.universe_size,
+            stats.loaded,
+            stats.ok,
+            stats.excluded,
+            stats.failed,
+            serde_json::to_string(&stats.reasons).unwrap(),
+            stats.snapshot_rows,
+            store_inputs as i64,
+            if store_inputs {
+                Some(run_id.to_string())
+            } else {
+                prev
+            },
+            inputs_reason,
+            e.snapshot_prefix,
+            e.snapshot_suffix,
+        ],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+/// Material-change signature of one evaluation: (status, reason class, decision).
+/// `gap_below_min:<bps>` counts as `gap_below_min`; scores, ranks and prices do not count.
+const INPUTS_MAX_GAP_SECS: i64 = 24 * 3600;
+
+fn material_key(status: &str, reason: &str, decision: Option<&str>) -> String {
+    format!(
+        "{status}|{}|{}",
+        reason.split(':').next().unwrap_or(""),
+        decision.unwrap_or("")
+    )
+}
+
+/// Deterministic full-input policy (see docs/product/score-history.md):
+/// 1. `first`: no earlier run of this profile+model stored inputs;
+/// 2. `close`: the post-close run (trigger `close`) always stores them;
+/// 3. `daily`: the most recent inputs are >= 24 h older than this run (covers days whose
+///    close slot was satisfied by an interval run, and restarts);
+/// 4. `material:<what>`: vs the most recent run with inputs, the set of loaded symbols
+///    changed (`loaded_set`) or any symbol's (status, reason class, decision) changed
+///    (`evaluation`);
+/// 5. otherwise `skipped:unchanged`, pointing at that most recent run.
+///
+/// Returns (store, reason, most recent run with inputs).
+fn inputs_policy(
+    tx: &Connection,
+    meta: &RunMeta,
+    e: &RunEvaluation,
+) -> Result<(bool, String, Option<String>), String> {
+    let prev: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT s.run_id, r.captured_at FROM score_run_stats s JOIN score_runs r ON r.run_id = s.run_id \
+             WHERE s.inputs_stored = 1 AND r.profile = ?1 AND r.model = ?2 \
+             ORDER BY r.captured_at DESC, r.run_id DESC LIMIT 1",
+            params![meta.profile, meta.model],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(err)?;
+    let Some((p, p_at)) = prev else {
+        return Ok((true, "first".into(), None));
+    };
+    if meta.trigger == "close" {
+        return Ok((true, "close".into(), Some(p)));
+    }
+    if meta.captured_at - p_at >= INPUTS_MAX_GAP_SECS {
+        return Ok((true, "daily".into(), Some(p)));
+    }
+    let mut st = tx
+        .prepare(
+            "SELECT symbol, status, reason, decision, reason != 'not_loaded' \
+             FROM score_evaluations WHERE run_id = ?1",
+        )
+        .map_err(err)?;
+    let old: std::collections::BTreeMap<String, (String, bool)> = st
+        .query_map(params![p], |r| {
+            let (sym, status, reason, dec, loaded): (String, String, String, Option<String>, bool) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+            Ok((
+                sym,
+                (material_key(&status, &reason, dec.as_deref()), loaded),
+            ))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?;
+    let mut seen = std::collections::HashSet::new();
+    let new: std::collections::BTreeMap<String, (String, bool)> = e
+        .evals
+        .iter()
+        .filter(|x| seen.insert(x.symbol.as_str()))
+        .map(|x| {
+            let dec = if x.status == "ok" {
+                x.decision.as_deref()
+            } else {
+                None
+            };
+            (
+                x.symbol.clone(),
+                (
+                    material_key(&x.status, &x.reason, dec),
+                    x.reason != "not_loaded",
+                ),
+            )
+        })
+        .collect();
+    let loaded = |m: &std::collections::BTreeMap<String, (String, bool)>| -> Vec<String> {
+        m.iter()
+            .filter(|(_, v)| v.1)
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    if loaded(&old) != loaded(&new) {
+        return Ok((true, "material:loaded_set".into(), Some(p)));
+    }
+    let keys = |m: &std::collections::BTreeMap<String, (String, bool)>| -> Vec<(String, String)> {
+        m.iter().map(|(k, v)| (k.clone(), v.0.clone())).collect()
+    };
+    if keys(&old) != keys(&new) {
+        return Ok((true, "material:evaluation".into(), Some(p)));
+    }
+    Ok((false, "skipped:unchanged".into(), Some(p)))
+}
+
+/// zstd level for input blobs (deterministic; decoding does not depend on it).
+const INPUT_ZSTD_LEVEL: i32 = 19;
+
+fn zstd_bytes(b: &[u8]) -> Result<Vec<u8>, String> {
+    zstd::bulk::compress(b, INPUT_ZSTD_LEVEL).map_err(err)
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
+}
+
+fn gunzip_bytes(b: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(b)
+        .read_to_end(&mut out)
+        .map_err(err)?;
+    Ok(out)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RunMeta {
@@ -484,6 +961,36 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Result<Vec<String>, String>
                 }
                 Ok(())
             }
+            "score_inputs" => c
+                .execute(
+                    "INSERT INTO score_inputs (hash, encoding, raw_size, bytes) \
+                     VALUES ('__selfcheck__', 'raw', 0, x'')",
+                    [],
+                )
+                .map(|_| ()),
+            "score_run_inputs" => c
+                .execute(
+                    "INSERT INTO score_run_inputs (run_id, idx, symbol, hash) \
+                     VALUES ('__selfcheck__', 0, '__SELFCHECK__', '__selfcheck__')",
+                    [],
+                )
+                .map(|_| ()),
+            "score_evaluations" => c
+                .execute(
+                    "INSERT INTO score_evaluations (run_id, symbol, captured_at, status, reason) \
+                     VALUES ('__selfcheck__', '__SELFCHECK__', 0, 'failed', 'selfcheck')",
+                    [],
+                )
+                .map(|_| ()),
+            "score_run_stats" => c
+                .execute(
+                    "INSERT INTO score_run_stats (run_id, universe_size, loaded, ok, excluded, \
+                     failed, reasons_json, snapshot_rows, inputs_stored, inputs_reason, \
+                     snapshot_prefix, snapshot_suffix) \
+                     VALUES ('__selfcheck__', 0, 0, 0, 0, 0, '{}', 0, 0, 'selfcheck', x'', x'')",
+                    [],
+                )
+                .map(|_| ()),
             "score_shadow" => {
                 if table_count(c, "score_runs") == 0 {
                     c.execute(
@@ -885,6 +1392,17 @@ impl ScoreHistoryStore {
     /// Appends one run with plain INSERTs. A run id that already exists is a no-op
     /// ([`RecordOutcome::Duplicate`]); nothing is ever overwritten.
     pub fn record_run(&self, meta: &RunMeta, rows: &[RankedRow]) -> Result<RecordOutcome, String> {
+        self.record_run_full(meta, rows, None)
+    }
+
+    /// [`Self::record_run`] plus, when `eval` is given, every universe symbol's
+    /// evaluation, the deduplicated raw inputs and the run stats, all in ONE transaction.
+    pub fn record_run_full(
+        &self,
+        meta: &RunMeta,
+        rows: &[RankedRow],
+        eval: Option<&RunEvaluation>,
+    ) -> Result<RecordOutcome, String> {
         self.check_writable()?;
         let run_id = meta.run_id();
         let (good, bad): (Vec<&RankedRow>, Vec<&RankedRow>) = rows
@@ -989,12 +1507,210 @@ impl ScoreHistoryStore {
                 }
             }
         }
+        if let Some(e) = eval {
+            write_evaluation(&tx, meta, &run_id, e)?;
+        }
         tx.commit().map_err(err)?;
         Ok(RecordOutcome::Recorded {
             rows: good.len(),
             skipped: bad.iter().map(|r| r.symbol.clone()).collect(),
         })
     }
+    /// Per-run counts, `None` for runs recorded without evaluations.
+    pub fn run_stats(&self, run_id: &str) -> Result<Option<RunStats>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        c.query_row(
+            "SELECT universe_size, loaded, ok, excluded, failed, reasons_json, snapshot_rows, \
+             inputs_stored, inputs_run_id, inputs_reason FROM score_run_stats WHERE run_id = ?1",
+            params![run_id],
+            |r| {
+                Ok(RunStats {
+                    run_id: run_id.to_string(),
+                    universe_size: r.get(0)?,
+                    loaded: r.get(1)?,
+                    ok: r.get(2)?,
+                    excluded: r.get(3)?,
+                    failed: r.get(4)?,
+                    reasons: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+                    snapshot_rows: r.get(6)?,
+                    inputs_stored: r.get::<_, i64>(7)? != 0,
+                    inputs_run_id: r.get(8)?,
+                    inputs_reason: r.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(err)
+    }
+
+    /// All evaluations of one run (rank order for `ok`, then symbol).
+    pub fn evaluations(&self, run_id: &str) -> Result<Vec<EvalRecord>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let mut st = c
+            .prepare(
+                "SELECT symbol, status, reason, rank, gate_gap_bps, composite, coverage, \
+                 fundamentals, technical, forecast, decision, confidence, row_confidence, \
+                 price_cents, intrinsic_cents, anchor_cents, anchor, gap_bps, upside_bps, \
+                 trust_signal, inputs_hash, technical_reason FROM score_evaluations \
+                 WHERE run_id = ?1 \
+                 ORDER BY rank IS NULL, rank, symbol",
+            )
+            .map_err(err)?;
+        let out = st
+            .query_map(params![run_id], |r| {
+                Ok(EvalRecord {
+                    symbol: r.get(0)?,
+                    status: r.get(1)?,
+                    reason: r.get(2)?,
+                    rank: r.get(3)?,
+                    gate_gap_bps: r.get(4)?,
+                    composite: r.get(5)?,
+                    coverage: r.get(6)?,
+                    fundamentals: r.get(7)?,
+                    technical: r.get(8)?,
+                    forecast: r.get(9)?,
+                    decision: r.get(10)?,
+                    confidence: r.get(11)?,
+                    row_confidence: r.get(12)?,
+                    price_cents: r.get(13)?,
+                    intrinsic_cents: r.get(14)?,
+                    anchor_cents: r.get(15)?,
+                    anchor: r.get(16)?,
+                    gap_bps: r.get(17)?,
+                    upside_bps: r.get(18)?,
+                    trust_signal: r.get(19)?,
+                    input_idx: None,
+                    inputs_hash: r.get(20)?,
+                    technical_reason: r.get(21)?,
+                })
+            })
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
+        Ok(out)
+    }
+
+    /// One symbol's evaluations across runs (oldest first), any status.
+    pub fn symbol_evaluations(
+        &self,
+        symbol: &str,
+        profile: &str,
+        model: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let runs: Vec<(String, i64)> = {
+            let c = self.conn.lock().map_err(|_| "lock")?;
+            let mut st = c
+                .prepare(
+                    "SELECT e.run_id, e.captured_at FROM score_evaluations e \
+                     JOIN score_runs r ON r.run_id = e.run_id \
+                     WHERE e.symbol = ?1 AND r.profile = ?2 AND r.model = ?3 \
+                     ORDER BY e.captured_at, e.run_id",
+                )
+                .map_err(err)?;
+            let v = st
+                .query_map(params![symbol, profile, model], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .map_err(err)?
+                .collect::<Result<_, _>>()
+                .map_err(err)?;
+            v
+        };
+        let mut out = Vec::new();
+        for (run, at) in runs {
+            if let Some(e) = self
+                .evaluations(&run)?
+                .into_iter()
+                .find(|e| e.symbol == symbol)
+            {
+                let mut v = serde_json::to_value(&e).map_err(err)?;
+                v["run_id"] = run.into();
+                v["captured_at"] = at.into();
+                v["captured_at_utc"] = iso_utc(at).into();
+                out.push(v);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Latest run ids (newest first) for a profile+model.
+    pub fn latest_run_id(&self, profile: &str, model: &str) -> Result<Option<String>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        c.query_row(
+            "SELECT r.run_id FROM score_runs r JOIN score_run_stats s ON s.run_id = r.run_id \
+             WHERE r.profile = ?1 AND r.model = ?2 ORDER BY r.captured_at DESC, r.run_id DESC LIMIT 1",
+            params![profile, model],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(err)
+    }
+
+    /// Rebuilds the exact snapshot bytes a run was computed from. Every blob's sha256 is
+    /// re-checked; any mismatch or gap is an error.
+    pub fn reconstruct_snapshot(&self, run_id: &str) -> Result<Vec<u8>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        type Head = (i64, Vec<u8>, Vec<u8>, i64, Option<String>);
+        let (n, prefix, suffix, stored, link): Head = c
+            .query_row(
+                "SELECT snapshot_rows, snapshot_prefix, snapshot_suffix, inputs_stored, \
+                 inputs_run_id FROM score_run_stats WHERE run_id = ?1",
+                params![run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .map_err(err)?
+            .ok_or_else(|| format!("run {run_id} has no evaluations"))?;
+        if stored == 0 {
+            return Err(format!(
+                "run {run_id} did not store full inputs; most recent inputs: {}",
+                link.as_deref().unwrap_or("none")
+            ));
+        }
+        let mut st = c
+            .prepare(
+                "SELECT ri.idx, ri.hash, i.encoding, i.raw_size, i.bytes FROM score_run_inputs ri \
+                 LEFT JOIN score_inputs i ON i.hash = ri.hash WHERE ri.run_id = ?1 ORDER BY ri.idx",
+            )
+            .map_err(err)?;
+        type Blob = (i64, String, Option<String>, Option<i64>, Option<Vec<u8>>);
+        let parts: Vec<Blob> = st
+            .query_map(params![run_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        if parts.len() as i64 != n {
+            return Err(format!(
+                "run {run_id}: {} input rows, expected {n}",
+                parts.len()
+            ));
+        }
+        let mut out = prefix;
+        for (i, (idx, hash, enc, size, bytes)) in parts.into_iter().enumerate() {
+            if idx != i as i64 {
+                return Err(format!("run {run_id}: input index gap at {i}"));
+            }
+            let bytes = bytes.ok_or_else(|| format!("run {run_id}: blob {hash} missing"))?;
+            let raw = match enc.as_deref() {
+                Some("zstd") => zstd::stream::decode_all(bytes.as_slice()).map_err(err)?,
+                Some("gzip") => gunzip_bytes(&bytes)?,
+                Some("raw") => bytes,
+                e => return Err(format!("blob {hash}: unknown encoding {e:?}")),
+            };
+            if sha256_hex(&raw) != hash || Some(raw.len() as i64) != size {
+                return Err(format!("blob {hash}: content does not match its hash"));
+            }
+            if i > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(&raw);
+        }
+        out.extend_from_slice(&suffix);
+        Ok(out)
+    }
+
     /// Oldest-first history of one symbol over the last `days` days (`None` = all),
     /// ordered by (captured_at, run_id), with `rule_change` marked per profile+model.
     pub fn history(
@@ -1097,7 +1813,7 @@ impl ScoreHistoryStore {
         .map_err(err)
     }
 
-    /// Exports `score_runs`, `score_history` and `score_history_migrations` (nothing else)
+    /// Exports the [`HISTORY_TABLES`] (nothing else)
     /// into a fresh SQLite file, gzips it to `dest` (`*.sqlite.gz`, must not exist) and
     /// verifies it: integrity ok and row counts >= the live counts taken before the export.
     pub fn export_to(&self, dest: &Path) -> Result<BackupReport, String> {
@@ -1389,11 +2105,25 @@ fn remove_all(dir: &Path, names: Vec<String>) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Merged tables and their keys.
-const MERGE_TABLES: [(&str, &[&str]); 3] = [
+const MERGE_TABLES: [(&str, &[&str]); 7] = [
     ("score_runs", &["run_id"]),
     ("score_history", &["run_id", "symbol"]),
     // Migration v3; optional in the source (a pre-v3 backup has no such table).
     ("score_shadow", &["run_id", "ticker", "config_id"]),
+    ("score_inputs", &["hash"]),
+    ("score_run_inputs", &["run_id", "idx"]),
+    ("score_evaluations", &["run_id", "symbol"]),
+    ("score_run_stats", &["run_id"]),
+];
+
+/// Tables introduced after v1, as (version, table). A backup older than `version` may
+/// lack the table entirely; it is then skipped (nothing to merge).
+const LATER_TABLES: &[(i64, &str)] = &[
+    (3, "score_shadow"),
+    (EVALUATIONS_MIGRATION, "score_inputs"),
+    (EVALUATIONS_MIGRATION, "score_run_inputs"),
+    (EVALUATIONS_MIGRATION, "score_evaluations"),
+    (EVALUATIONS_MIGRATION, "score_run_stats"),
 ];
 
 /// Columns introduced by migrations after v1, as (version, table, column). An older
@@ -1498,11 +2228,13 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
         }
         let mut sqls = Vec::new();
         for (t, key) in MERGE_TABLES {
-            if t == "score_shadow" && !has_table(&c, "src", t) {
-                if src_v >= 3 {
-                    return Err(format!("backup is schema v{src_v} but has no {t}"));
+            if !has_table(&c, "src", t) {
+                let later = LATER_TABLES.iter().any(|(v, lt)| *lt == t && *v > src_v);
+                if later {
+                    sqls.push(String::new());
+                    continue;
                 }
-                continue;
+                return Err(format!("backup is schema v{src_v} but has no {t}"));
             }
             let cols = merge_columns(&columns(&c, "main", t)?, &columns(&c, "src", t)?, t, src_v)?;
             let list = cols.join(", ");
@@ -1540,10 +2272,13 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
         let res = (|| -> rusqlite::Result<(usize, usize, usize)> {
             let runs = c.execute(&plan[0], [])?;
             let rows = c.execute(&plan[1], [])?;
-            let shadow = match plan.get(2) {
+            let shadow = match plan.get(2).filter(|q| !q.is_empty()) {
                 Some(q) => c.execute(q, [])?,
                 None => 0,
             };
+            for sql in plan.iter().skip(3).filter(|q| !q.is_empty()) {
+                c.execute(sql, [])?;
+            }
             c.execute_batch("COMMIT")?;
             Ok((runs, rows, shadow))
         })();
@@ -1792,17 +2527,15 @@ mod tests {
             "score_runs ADD COLUMN note TEXT;".into(),
         ]
         .join(" ");
-        let extra: &[(i64, &str)] = &[
-            MIGRATIONS[0],
-            MIGRATIONS[1],
-            MIGRATIONS[2],
-            (4, add_col.as_str()),
-        ];
+        let next = SCHEMA_VERSION + 1;
+        let mut extra: Vec<(i64, &str)> = MIGRATIONS.to_vec();
+        extra.push((next, add_col.as_str()));
+        let extra = extra.as_slice();
         drop(s);
         let s = ScoreHistoryStore::open_with(&p, Some(&bdir), extra).unwrap();
         let bk2 = s.migration_backup.clone().unwrap();
         assert_eq!(verify_file(&bk2, true).unwrap().score_runs, 1);
-        assert_eq!(s.schema_version().unwrap(), 4);
+        assert_eq!(s.schema_version().unwrap(), next);
         assert_eq!(s.counts().unwrap(), (1, 1));
         let c = Connection::open(&p).unwrap();
         let uv: i64 = c
@@ -1912,6 +2645,7 @@ mod tests {
     fn delete_update_replace_and_upsert_abort() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
         assert!(s.missing_triggers.is_empty());
+        // With evaluations and a shadow grid, so every table has a row.
         let mut r = row("ADSK", "Act", 30, 60, 0, 30);
         r.shadow = Some(crate::opportunity_v31::shadow_grid(
             Some("Act"),
@@ -1920,7 +2654,8 @@ mod tests {
             Some(0.0),
             false,
         ));
-        s.record_run(&meta(1), &[r]).unwrap();
+        s.record_run_full(&meta(1), &[r], Some(&tiny_eval(&["ADSK", "BK"])))
+            .unwrap();
         assert_eq!(s.shadow_count().unwrap(), 6);
         let c = s.conn.lock().unwrap();
         for t in HISTORY_TABLES {
@@ -2229,6 +2964,210 @@ mod tests {
     type ColEdit<'a> = &'a dyn Fn(&str, &mut Vec<(String, String)>);
 
     /// Writes a backup whose score tables use `cols` (name, type) in that order.
+    /// A synthetic evaluation: first symbol loaded and ok, the rest not loaded.
+    fn tiny_eval(syms: &[&str]) -> RunEvaluation {
+        let raw = format!("{{\"symbol\":\"{}\",\"p\":1}}", syms[0]).into_bytes();
+        let mut evals = vec![EvalRecord {
+            symbol: syms[0].into(),
+            status: "ok".into(),
+            reason: "qualified".into(),
+            rank: Some(1),
+            composite: Some(30),
+            decision: Some("Act".into()),
+            input_idx: Some(0),
+            ..Default::default()
+        }];
+        for x in &syms[1..] {
+            evals.push(EvalRecord {
+                symbol: (*x).into(),
+                status: "failed".into(),
+                reason: "not_loaded".into(),
+                ..Default::default()
+            });
+        }
+        RunEvaluation {
+            universe_size: syms.len(),
+            evals,
+            inputs: vec![(syms[0].into(), raw)],
+            snapshot_prefix: b"{\"rows\":[".to_vec(),
+            snapshot_suffix: b"]}".to_vec(),
+        }
+    }
+
+    #[test]
+    fn evaluations_stats_dedup_and_exact_reconstruction() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let e = tiny_eval(&["ADSK", "BK", "ZZ"]);
+        s.record_run_full(&meta(1), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        s.record_run_full(&meta(2), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let r1 = meta(1).run_id();
+        assert_eq!(s.evaluations(&r1).unwrap().len(), 3);
+        let st = s.run_stats(&r1).unwrap().unwrap();
+        assert_eq!(
+            (st.universe_size, st.loaded, st.ok, st.excluded, st.failed),
+            (3, 1, 1, 0, 2)
+        );
+        assert_eq!(st.reasons.get("not_loaded"), Some(&2));
+        // Run 1 stores inputs (`first`, zstd); run 2 is unchanged: no inputs, explicit link.
+        let r2 = meta(2).run_id();
+        assert!(st.inputs_stored);
+        assert_eq!(st.inputs_reason, "first");
+        let st2 = s.run_stats(&r2).unwrap().unwrap();
+        assert!(!st2.inputs_stored);
+        assert_eq!(st2.inputs_reason, "skipped:unchanged");
+        assert_eq!(st2.inputs_run_id.as_deref(), Some(r1.as_str()));
+        assert_eq!(
+            s.evaluations(&r2).unwrap().len(),
+            3,
+            "evaluations on every run"
+        );
+        let msg = s.reconstruct_snapshot(&r2).unwrap_err();
+        assert!(msg.contains(&r1), "{msg}");
+        let c = s.conn.lock().unwrap();
+        let enc: String = c
+            .query_row("SELECT encoding FROM score_inputs LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(enc, "zstd");
+        assert_eq!(table_count(&c, "score_run_inputs"), 1);
+        drop(c);
+        let want = [b"{\"rows\":[".as_slice(), &e.inputs[0].1, b"]}"].concat();
+        assert_eq!(s.reconstruct_snapshot(&r1).unwrap(), want);
+        // The post-close run always stores inputs; identical bytes dedup to one blob.
+        let mut close = meta(4);
+        close.trigger = "close".into();
+        s.record_run_full(&close, &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let st4 = s.run_stats(&close.run_id()).unwrap().unwrap();
+        assert_eq!(
+            (st4.inputs_stored, st4.inputs_reason.as_str()),
+            (true, "close")
+        );
+        assert_eq!(s.reconstruct_snapshot(&close.run_id()).unwrap(), want);
+        let c = s.conn.lock().unwrap();
+        assert_eq!(table_count(&c, "score_inputs"), 1);
+        assert_eq!(table_count(&c, "score_run_inputs"), 2);
+        drop(c);
+        // Excluded/failed decisions are never stored even if a caller passes one.
+        let mut bad = tiny_eval(&["X", "Y"]);
+        bad.evals[1].decision = Some("Act".into());
+        s.record_run_full(&meta(3), &[], Some(&bad)).unwrap();
+        let ev = s.evaluations(&meta(3).run_id()).unwrap();
+        assert!(ev
+            .iter()
+            .find(|x| x.symbol == "Y")
+            .unwrap()
+            .decision
+            .is_none());
+    }
+
+    #[test]
+    fn material_change_policy_is_deterministic() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let base = tiny_eval(&["A", "B", "C"]);
+        let rec = |at: i64, e: &RunEvaluation| {
+            s.record_run_full(&meta(at), &[], Some(e)).unwrap();
+            s.run_stats(&meta(at).run_id()).unwrap().unwrap()
+        };
+        assert_eq!(rec(1, &base).inputs_reason, "first");
+        // Score / price / rank moves alone are NOT material.
+        let mut e = base.clone();
+        e.evals[0].composite = Some(99);
+        e.evals[0].price_cents = Some(12345);
+        e.evals[0].rank = Some(7);
+        e.inputs[0].1 = b"{\"symbol\":\"A\",\"p\":2}".to_vec();
+        assert_eq!(rec(2, &e).inputs_reason, "skipped:unchanged");
+        // gap_below_min:<bps> value changes are not material either (same class).
+        let mut x = base.clone();
+        x.evals[0].status = "excluded".into();
+        x.evals[0].reason = "gap_below_min:100".into();
+        x.evals[0].decision = None;
+        assert_eq!(rec(3, &x).inputs_reason, "material:evaluation");
+        x.evals[0].reason = "gap_below_min:150".into();
+        assert_eq!(rec(4, &x).inputs_reason, "skipped:unchanged");
+        // A decision change is material.
+        let mut d = base.clone();
+        d.evals[0].decision = Some("Watch".into());
+        assert_eq!(rec(5, &d).inputs_reason, "material:evaluation");
+        // A newly loaded symbol is material (loaded set).
+        let mut l = d.clone();
+        l.evals[1].status = "excluded".into();
+        l.evals[1].reason = "unprofitable".into();
+        assert_eq!(rec(6, &l).inputs_reason, "material:loaded_set");
+        // Skipped runs link to the most recent run that stored inputs.
+        let st = rec(7, &l);
+        assert_eq!(st.inputs_run_id, Some(meta(6).run_id()));
+        // Unchanged but >= 24 h since the last inputs: `daily`.
+        assert_eq!(rec(6 + 86_400, &l).inputs_reason, "daily");
+    }
+
+    /// Never prune: no API deletes history, a year of runs survives reopen, and the
+    /// only file-removing paths touch backup files, never the live tables.
+    #[test]
+    fn no_pruning_path_and_every_run_survives() {
+        let dir = tmpdir("noprune");
+        let p = dir.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, Some(&dir.join("bk"))).unwrap();
+        let e = tiny_eval(&["A", "B"]);
+        for d in 0..400 {
+            s.record_run_full(
+                &meta(1_000 + d * 86_400),
+                &[row("A", "Act", 30, 60, 0, 30)],
+                Some(&e),
+            )
+            .unwrap();
+        }
+        drop(s);
+        let s = ScoreHistoryStore::open(&p, Some(&dir.join("bk"))).unwrap();
+        assert_eq!(s.run_count().unwrap(), 400);
+        let c = s.conn.lock().unwrap();
+        for t in HISTORY_TABLES.iter().skip(4) {
+            assert!(table_count(&c, t) > 0, "{t}");
+        }
+        assert_eq!(table_count(&c, "score_evaluations"), 800);
+        drop(c);
+        // Source scan: no prune/purge/retention API and no delete verb in this module
+        // outside tests (the guard test covers SQL on every guarded table).
+        let src = include_str!("score_history.rs");
+        let body = &src[..src.find("#[cfg(test)]").unwrap()];
+        for w in ["fn prune", "fn purge", "retention_days", "fn truncate"] {
+            assert!(!body.contains(w), "{w}");
+        }
+        let del = ["DELETE", "FROM"].join(" ");
+        assert!(!body.contains(&del), "no delete statement in the store");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v2_backup_restores_into_current_and_evaluations_survive_restore() {
+        let root = tmpdir("v2into");
+        let bdir = root.join("bk");
+        // A v2 backup (no evaluation tables) merges into the current schema.
+        let f = root.join("v2.sqlite");
+        custom_backup(&f, 2, |_, _| {});
+        let data = root.join("d");
+        let r = restore(&f, &data, &bdir).unwrap();
+        assert_eq!((r.runs_added, r.rows_added), (1, 1));
+        // Full round trip: export a store with evaluations, restore into an empty dir.
+        let src = ScoreHistoryStore::open(&root.join("src.sqlite"), Some(&bdir)).unwrap();
+        let e = tiny_eval(&["ADSK", "BK"]);
+        src.record_run_full(&meta(5), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let bk = root.join("full.sqlite.gz");
+        src.export_to(&bk).unwrap();
+        let want = src.reconstruct_snapshot(&meta(5).run_id()).unwrap();
+        let data2 = root.join("d2");
+        restore(&bk, &data2, &bdir).unwrap();
+        let s = ScoreHistoryStore::open(&data2.join("history.sqlite"), Some(&bdir)).unwrap();
+        assert_eq!(s.reconstruct_snapshot(&meta(5).run_id()).unwrap(), want);
+        assert_eq!(s.evaluations(&meta(5).run_id()).unwrap().len(), 2);
+        assert_eq!(s.run_stats(&meta(5).run_id()).unwrap().unwrap().failed, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn custom_backup(path: &Path, version: i64, edit: impl Fn(&str, &mut Vec<(String, String)>)) {
         let live = ScoreHistoryStore::open_in_memory().unwrap();
         let lc = live.conn.lock().unwrap();
@@ -2259,6 +3198,9 @@ mod tests {
                 .join(", ");
             b.execute_batch(&format!("{} {t} ({ddl});", "CREATE TABLE"))
                 .unwrap();
+        }
+        if version >= EVALUATIONS_MIGRATION {
+            b.execute_batch(EVALUATIONS_DDL).unwrap();
         }
         let has = |t: &str, c: &str| {
             b.query_row(
@@ -2749,15 +3691,9 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(
-            names,
-            [
-                "score_history",
-                "score_history_migrations",
-                "score_runs",
-                "score_shadow"
-            ]
-        );
+        let mut want: Vec<&str> = HISTORY_TABLES.to_vec();
+        want.sort();
+        assert_eq!(names, want);
         drop(b);
         drop(pl);
         std::fs::remove_dir_all(&data).unwrap();
@@ -3240,8 +4176,15 @@ mod tests {
         let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..2]).unwrap();
         assert_eq!(s.schema_version().unwrap(), 2);
         // #67's binary only required its own 9 triggers; model that writer.
+        let later = [
+            "score_shadow",
+            "score_inputs",
+            "score_run_inputs",
+            "score_evaluations",
+            "score_run_stats",
+        ];
         s.missing_triggers
-            .retain(|t| !t.starts_with("score_shadow"));
+            .retain(|t| !later.iter().any(|p| t.starts_with(p)));
         assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
         // Its behaviour probe only covered its own 3 tables (no score_shadow at v2).
         *s.selfcheck.lock().unwrap() = SelfCheck::Passed;
@@ -3255,7 +4198,7 @@ mod tests {
             (rep.score_runs, rep.score_history, rep.score_shadow),
             (1, 1, -1)
         );
-        assert_eq!(s.schema_version().unwrap(), 3);
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
         assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
         assert_eq!(
             (s.counts().unwrap(), s.shadow_count().unwrap()),
@@ -3355,8 +4298,8 @@ mod tests {
     #[test]
     fn fresh_db_is_v3_with_all_triggers() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
-        assert_eq!(s.schema_version().unwrap(), 3);
-        assert_eq!(REQUIRED_TRIGGERS.len(), 12);
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(REQUIRED_TRIGGERS.len(), 24);
         assert!(s.missing_triggers.is_empty());
         let c = s.conn.lock().unwrap();
         let n: i64 = c
