@@ -2,15 +2,17 @@
 
 ## Unreleased
 
-### V3.1 decision rule (Android core + headless)
+### V3.1 decision rule — SHADOW MODE (Android core + headless)
 
-- Act is now checked on `S_adj = S · exp(−1.5 · max(0,−T)/100) · exp(−0.3 · max(0,−m))` instead of
-  the raw V3 composite S; `m` = clip(MACD histogram / close / 0.005, −1, 1) on the Year chart.
-  Avoid logic and ranking (raw S) are unchanged. See `docs/architecture/decision-rule-v3-1.md`.
-- Headless JSON rows carry `s_adj` and `m`; `/ranking` reports `rule_version: "V3.1"`.
-  Android `ProjectedOpportunityRow` exposes `sAdj` and `macdMomentum`.
-- JVM parity diff checks the V3.1 constants on both sides and compares `sAdj`/`m` (tol 1e-9).
-- m bound is its own constant (`MOMENTUM_HISTOGRAM_BOUND` / `V31_MOMENTUM_HISTOGRAM_BOUND`, default 0.005, overridable per call), independent of `V3_TECH_HISTOGRAM_BOUND`; calibration + recommended 0.05 in the V3.1 doc.
+- Official Act/Watch/Avoid, ranking and `rule_version` stay **V3** (byte-identical to main, shadow fields excluded).
+- Shadow grid `V31_SHADOW_CONFIGS` (bound {0.005, 0.02, 0.05} × λ_M {0.15, 0.3}, λ_T 1.5, stable `config_id`s):
+  rows carry an optional `shadow` array (`config_id, bound, lambda_t, lambda_m, m, s_adj, shadow_decision`).
+- Headless records it in an additive, append-only `score_shadow` table (history.sqlite migration v2; abort triggers,
+  CI guard, pre-migration backup, backup row-count verification), in the same transaction as the official run.
+  Android computes shadow values for parity only (no store).
+- `vantage-headless history-shadow-report`: demoted vs kept forward returns at 5/20/60 recorded trading days.
+- Parity diff checks the shadow constants and config list on both sides and every config per row (tol 1e-9).
+  See `docs/architecture/decision-rule-v3-1.md`.
 
 ### Added
 - Score history (headless, #67): append-only `score_runs` / `score_history` tables in `<data-dir>/history.sqlite`,

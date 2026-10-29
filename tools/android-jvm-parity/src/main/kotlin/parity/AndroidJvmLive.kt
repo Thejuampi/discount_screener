@@ -274,7 +274,7 @@ fun rankProjectWrite(s: State, outDir: File) {
             it.symbol to ProjectedOpportunityDecisionFacts(
                 it.compositeScore,
                 it.technicalScore,
-                V31ActAdjustment.macdMomentum(s.summaries[it.symbol]?.get(ChartRange.Year)),
+                V31ActAdjustment.histogramRatio(s.summaries[it.symbol]?.get(ChartRange.Year)),
             )
         },
         chartCandles = detailSymbols.mapNotNull { sym -> s.candles[sym]?.let { SymbolRangeKey(sym, ChartRange.Year) to it } }.toMap(),
@@ -302,8 +302,18 @@ fun rankProjectWrite(s: State, outDir: File) {
                 put("anchorCents", p.fairValueAnchor.valueCents); put("anchorSource", p.fairValueAnchor.toString().take(160))
                 put("trustSignal", p.trustSignal?.kind?.name)
                 put("decision", p.decision?.name)
-                put("sAdj", p.sAdj); put("m", p.macdMomentum); put("ruleVersion", V31ActAdjustment.RULE_VERSION)
                 put("judgmentPrimaryCents", p.valuationJudgment?.primaryCents)
+                // V3.1 SHADOW (not official output); diff_headless compares it separately.
+                p.shadow?.let { grid ->
+                    put("shadow", buildJsonArray {
+                        grid.forEach { g ->
+                            add(buildJsonObject {
+                                put("configId", g.configId); put("bound", g.bound); put("lambdaT", g.lambdaT); put("lambdaM", g.lambdaM)
+                                put("m", g.m); put("sAdj", g.sAdj); put("shadowDecision", g.shadowDecision?.name)
+                            })
+                        }
+                    })
+                }
             })
         }
     }

@@ -187,7 +187,7 @@ class HeadlessV3ParityGoldenTest {
                 it.symbol to ProjectedOpportunityDecisionFacts(
                     it.compositeScore,
                     it.technicalScore,
-                    com.discountscreener.core.engine.V31ActAdjustment.macdMomentum(charts[it.symbol]?.get(ChartRange.Year)),
+                    com.discountscreener.core.engine.V31ActAdjustment.histogramRatio(charts[it.symbol]?.get(ChartRange.Year)),
                 )
             },
             chartSummariesBySymbol = charts,

@@ -3210,7 +3210,7 @@ class DefaultDashboardRepository(
             row.symbol to ProjectedOpportunityDecisionFacts(
                 compositeScore = row.compositeScore,
                 technicalScore = row.technicalScore,
-                macdMomentum = V31ActAdjustment.macdMomentum(chartSummaries[row.symbol]?.get(ChartRange.Year)),
+                macdHistogramRatio = V31ActAdjustment.histogramRatio(chartSummaries[row.symbol]?.get(ChartRange.Year)),
             )
         }
 

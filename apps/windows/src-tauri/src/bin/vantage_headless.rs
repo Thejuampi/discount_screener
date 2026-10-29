@@ -106,6 +106,7 @@ history TICKER [--days N] [--changes] [--profile P] [--tz IANA] [--json]\n\
      history-record-snapshot --data-dir DIR [--history-backup-dir B]   (offline: record the persisted snapshot)\n\
      history-backup --data-dir DIR [--history-backup-dir B] [--verify]   (verified backup now; --verify checks all)\n\
      history-restore FILE --data-dir DIR [--history-backup-dir B] [--force]   (daemon must be stopped)\n\
+     history-shadow-report --data-dir DIR [--profile P] [--min-n N] [--json]   (V3.1 shadow: demoted vs kept, 5/20/60d)\n\
 serve:  --history-interval-hours H (default 6; 0 disables score history)\n\
      \x20       --history-backup-dir B (default $VANTAGE_HISTORY_BACKUP_DIR or the store dir) --no-feed (offline)"
 }
@@ -255,11 +256,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let dest = dir.join(format!("history.manual-{}.sqlite", stamp_now()));
             let rep = store.backup_to(&dest)?;
             println!(
-                "backup {} integrity={} score_runs={} score_history={}",
+                "backup {} integrity={} score_runs={} score_history={} score_shadow={}",
                 rep.path.display(),
                 rep.integrity,
                 rep.score_runs,
-                rep.score_history
+                rep.score_history,
+                rep.score_shadow
             );
             if o.flags.contains_key("verify") {
                 let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -273,10 +275,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 for f in files {
                     match verify_file(&f) {
                         Ok(r) => println!(
-                            "  ok  {} score_runs={} score_history={}",
+                            "  ok  {} score_runs={} score_history={} score_shadow={}",
                             f.display(),
                             r.score_runs,
-                            r.score_history
+                            r.score_history,
+                            r.score_shadow
                         ),
                         Err(e) => {
                             bad += 1;
@@ -287,6 +290,28 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 if bad > 0 {
                     return Err(format!("{bad} backup(s) failed verification"));
                 }
+            }
+            Ok(())
+        }
+        "history-shadow-report" => {
+            use discount_screener_windows_lib::score_shadow_report::{
+                render, shadow_report, DEFAULT_HORIZONS, DEFAULT_MIN_N,
+            };
+            let data_dir = data_dir_flag(&o)?;
+            let min_n = match o.flags.get("min-n") {
+                Some(v) => v.parse().map_err(|_| "bad --min-n")?,
+                None => DEFAULT_MIN_N,
+            };
+            let r = shadow_report(
+                &data_dir.join("history.sqlite"),
+                o.flags.get("profile").map(String::as_str),
+                &DEFAULT_HORIZONS,
+                min_n,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap());
+            } else {
+                print!("{}", render(&r));
             }
             Ok(())
         }
@@ -305,11 +330,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
             let r = verify_file(&live)?;
             println!(
-                "restored {} -> {} (score_runs={} score_history={})",
+                "restored {} -> {} (score_runs={} score_history={} score_shadow={})",
                 file,
                 live.display(),
                 r.score_runs,
-                r.score_history
+                r.score_history,
+                r.score_shadow
             );
             Ok(())
         }
@@ -652,10 +678,11 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
             }
             match engine.backup_history_if_due(now_epoch()) {
                 Ok(Some(r)) => eprintln!(
-                    "score history: daily backup {} ok ({} runs, {} rows)",
+                    "score history: daily backup {} ok ({} runs, {} rows, {} shadow rows)",
                     r.path.display(),
                     r.score_runs,
-                    r.score_history
+                    r.score_history,
+                    r.score_shadow
                 ),
                 Ok(None) => {}
                 Err(e) => eprintln!("score history backup: {e}"),
@@ -856,7 +883,6 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
                 "profile": engine.profile(),
                 "model": model.as_str(),
                 "semantics": used,
-                "rule_version": discount_screener_windows_lib::opportunity_v31::V31_RULE_VERSION,
                 "ranked_total": total,
                 "market_context": engine.status().market_context,
                 "source": source,
@@ -980,6 +1006,7 @@ mod tests {
             regime: None,
             trust_signal: None,
             projection_gap: None,
+            shadow: None,
         };
         // 2026-11-01 05:20Z (01:20 EDT) and one hour later (01:20 EST): DST change.
         for (at, d, c, p) in [
@@ -1112,8 +1139,7 @@ mod tests {
             regime: None,
             trust_signal: None,
             projection_gap: None,
-            s_adj: None,
-            m: None,
+            shadow: None,
         };
         let t = render_table(&[mk("APT21794-USD"), mk("A")]);
         let pos: Vec<usize> = t

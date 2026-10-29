@@ -25,6 +25,7 @@ import com.discountscreener.core.model.ProviderState
 import com.discountscreener.core.model.ProjectedProviderState
 import com.discountscreener.core.model.ProjectedProvenanceState
 import com.discountscreener.core.model.ProjectedRowDecision
+import com.discountscreener.core.model.ProjectedShadowDecision
 import com.discountscreener.core.model.ProjectedRowExplanation
 import com.discountscreener.core.model.ProjectedRowExplanationKind
 import com.discountscreener.core.model.ProjectedRowFreshness
@@ -187,6 +188,14 @@ class ScreenDataProjectionEngine {
         var blockingIssue = hasBlockingProviderIssue(row.symbol, true, request)
         var currentTrustSignal = trustSignal(detail, anchor, dcfAnalysis, blockingIssue)
         var decisionFacts = request.opportunityDecisionFactsBySymbol[row.symbol] ?: ProjectedOpportunityDecisionFacts()
+        val decision = rowDecision(
+            marketPriceCents = row.marketPriceCents,
+            anchor = anchor,
+            confidence = confidence,
+            trustSignal = currentTrustSignal,
+            opportunityDecisionFacts = decisionFacts,
+            scoringModel = request.route.opportunityScoringModel,
+        )
         return ProjectedOpportunityRow(
             symbol = row.symbol,
             candidateRow = row,
@@ -196,19 +205,22 @@ class ScreenDataProjectionEngine {
             confidence = confidence,
             freshness = freshness,
             trustSignal = currentTrustSignal,
-            decision = rowDecision(
-                marketPriceCents = row.marketPriceCents,
-                anchor = anchor,
-                confidence = confidence,
-                trustSignal = currentTrustSignal,
-                opportunityDecisionFacts = decisionFacts,
-                scoringModel = request.route.opportunityScoringModel,
-            ),
-            sAdj = v31AdjustedScore(decisionFacts, request.route.opportunityScoringModel),
-            macdMomentum = decisionFacts.macdMomentum,
+            decision = decision,
+            shadow = v31Shadow(decision, decisionFacts, request.route.opportunityScoringModel),
             quantLensSummary = quantLensRowSummary(row.symbol, detail, dcfAnalysis),
             valuationJudgment = named.judgment,
         )
+    }
+
+    /** V3.1 shadow grid from the official decision; AggressiveV3 with a composite only. */
+    internal fun v31Shadow(
+        official: ProjectedRowDecision?,
+        facts: ProjectedOpportunityDecisionFacts,
+        scoringModel: OpportunityScoringModel,
+    ): List<ProjectedShadowDecision>? {
+        if (scoringModel != OpportunityScoringModel.AggressiveV3) return null
+        val composite = facts.compositeScore ?: return null
+        return V31ActAdjustment.grid(official, composite, facts.technicalScore, facts.macdHistogramRatio)
     }
 
     private fun projectedDetail(request: ScreenDataProjectionRequest): ProjectedDetailData? {
@@ -762,17 +774,7 @@ class ScreenDataProjectionEngine {
         else -> ProjectedRowDecision.Watch
     }
 
-    /** V3.1 S_adj for AggressiveV3 rows with a composite; null otherwise (raw S rule applies). */
-    internal fun v31AdjustedScore(
-        facts: ProjectedOpportunityDecisionFacts,
-        scoringModel: OpportunityScoringModel,
-    ): Double? {
-        if (scoringModel != OpportunityScoringModel.AggressiveV3) return null
-        val composite = facts.compositeScore ?: return null
-        return V31ActAdjustment.adjustedScore(composite, facts.technicalScore, facts.macdMomentum)
-    }
-
-    internal fun opportunityDecision(
+    private fun opportunityDecision(
         upsideBps: Int,
         confidence: ProjectedConfidence,
         trustSignal: ProjectedTrustSignal?,
@@ -780,8 +782,6 @@ class ScreenDataProjectionEngine {
         scoringModel: OpportunityScoringModel,
     ): ProjectedRowDecision? {
         var compositeScore = facts.compositeScore
-        // V3.1: Act is checked on S_adj (technical/momentum-penalised); Avoid stays on raw S.
-        val actScore = v31AdjustedScore(facts, scoringModel)
         val avoidBelow = OpportunityEngine.avoidBelowScore(scoringModel)
         val actAtOrAbove = OpportunityEngine.actAtOrAboveScore(scoringModel)
         return when {
@@ -790,8 +790,7 @@ class ScreenDataProjectionEngine {
             upsideBps <= 0 -> ProjectedRowDecision.Avoid
             compositeScore != null && compositeScore < avoidBelow -> ProjectedRowDecision.Avoid
             trustSignal != null -> ProjectedRowDecision.Watch
-            confidence == ProjectedConfidence.High &&
-                (actScore ?: (compositeScore ?: actAtOrAbove).toDouble()) >= actAtOrAbove -> ProjectedRowDecision.Act
+            confidence == ProjectedConfidence.High && (compositeScore ?: actAtOrAbove) >= actAtOrAbove -> ProjectedRowDecision.Act
             else -> ProjectedRowDecision.Watch
         }
     }

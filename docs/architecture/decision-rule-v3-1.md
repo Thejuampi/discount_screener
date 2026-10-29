@@ -1,66 +1,59 @@
-# Decision rule V3.1 — technically adjusted Act check
+# Decision rule V3.1 — SHADOW MODE
 
-Decided by Juan on 2026-10-29. Applies to the AggressiveV3 Opportunities decision in Android core
-and in headless (android semantics). Market context stays OFF in headless by default.
+Status: **shadow only** (Juan, 2026-10-29: observe before picking a default). The official
+Act/Watch/Avoid decision, ranking and `rule_version` (`V3`) are exactly V3 on Android and headless.
+V3.1 is computed next to it for a fixed grid of configs and recorded for later evaluation.
 
-## Rule
+## Shadow rule (per config)
 
-    S_adj = S · exp(−λ_T · max(0, −T) / 100) · exp(−λ_M · max(0, −m))
+```
+m        = clip((histogram / close) / bound, -1, 1)
+S_adj    = S · exp(−λ_T · max(0, −T) / 100) · exp(−λ_M · max(0, −m))
+shadow   = Watch  if official == Act and S_adj < 30
+           official otherwise            (Avoid / Watch untouched; S_adj ≤ S so it can only demote)
+```
 
-- `S`: raw V3 composite (unchanged; **ranking still sorts on raw S**).
-- `T`: V3 technical bucket (−100..100).
-- `m`: MACD momentum in [−1, 1] (below).
-- Defaults `λ_T = 1.5`, `λ_M = 0.3`.
+S = V3 composite, T = V3 technical bucket, histogram = MACD(12,26) − signal(9) of the Year
+(`1y`/`1wk`) chart summary in cents (rounded half-even on both sides), close = that summary's
+latest close. λ_T = 1.5 for every config.
 
-Decision chain (only the Act line changed):
+## Config grid (stable ids — append only, never renumber)
 
-1. confidence Low, upside ≤ 0, or **raw** S < 0 → Avoid (unchanged)
-2. trust signal present → Watch (unchanged)
-3. confidence High and **S_adj ≥ 30** → Act
-4. otherwise Watch
+| config_id | bound | λ_M |
+|---|---|---|
+| b0050_lm015 | 0.005 | 0.15 |
+| b0050_lm030 | 0.005 | 0.30 |
+| b0200_lm015 | 0.02 | 0.15 |
+| b0200_lm030 | 0.02 | 0.30 |
+| b0500_lm015 | 0.05 | 0.15 |
+| b0500_lm030 | 0.05 | 0.30 |
 
-Only negative T and m penalise; T ≥ 0 and m ≥ 0 give `S_adj == S`. A missing T or m contributes no
-penalty. Weak technicals can turn Act into Watch, never into Avoid.
+Id = `b<bound·10⁴, 4 digits>_lm<λ_M·100, 3 digits>` (a Rust test enforces it).
 
-Examples: S 36, T −18, m ≥ 0 → 27.47 (Watch). S 31, T 0, m −1 → 22.97 (Watch).
-
-## Momentum m
-
-    m = clip((histogram / close) / 0.005, −1, 1)
-
-`histogram` = MACD(12, 26) − signal(9), from the same Android `ChartRange.Year` (`1y`/`1wk`) summary
-the technical bucket already reads, in cents (rounded half-even on both sides); `close` = that
-summary's latest close.
-
-Why: the histogram is the momentum *change* (what the MACD panel shows as bearish/bullish),
-dividing by price makes it comparable across tickers. The bound is V3.1's own named constant
-(`V31ActAdjustment.MOMENTUM_HISTOGRAM_BOUND` / `V31_MOMENTUM_HISTOGRAM_BOUND`, default 0.005),
-independent of `V3_TECH_HISTOGRAM_BOUND`; both functions accept another bound for sensitivity
-runs, and `diff_headless.py` checks the defaults match.
-
-### Bound calibration (2026-10-29 snapshots, weekly bars, ranked rows)
-
-| universe | rows | p50 | p75 | p90 | p95 | p99 |
-|---|---|---|---|---|---|---|
-| sp500 | 93 | 1.81% | 2.45% | 4.08% | 4.79% | 5.67% |
-| russell | 410 | 1.55% | 2.81% | 4.19% | 5.45% | 9.34% |
-
-At 0.005, |m| = 1 for 90% (sp500) / 82% (russell) of rows, so m is effectively a sign.
-Recommended bound: **0.05** (≈ p95 sp500, ≈ p92 russell → 4.3% / 7.1% saturated): m then
-grades momentum instead of flagging it. The default stays 0.005 until Juan/Director approve the
-change, since it moves Act decisions (russell 11 → 16 Act). Full table: `tools/android-jvm-parity/v31_bound_sensitivity.py`. ATR scaling was considered but ATR is not part of the Android summary on both sides;
-price scaling needs no new indicator and is bit-identical.
+Bound context (2026-10-29 snapshots, weekly bars, ranked rows), |hist/close| percentiles:
+sp500 p50 1.81% / p75 2.45% / p90 4.08% / p95 4.79% / p99 5.67%;
+russell 1.55% / 2.81% / 4.19% / 5.45% / 9.34%. At 0.005 |m| = 1 for 80–90% of rows (m ≈ sign),
+at 0.05 for < 10%.
 
 ## Where
 
 | | Android core | Headless |
 |---|---|---|
-| constants + formulas | `core/engine/V31ActAdjustment.kt` | `src/opportunity_v31.rs` |
-| decision chain | `ScreenDataProjectionEngine.opportunityDecision` | `headless.rs` `android_project_row` |
-| output | `ProjectedOpportunityRow.sAdj`, `.macdMomentum` | `AndroidRow`/`RankedRow` `s_adj`, `m`; `/ranking` `rule_version` |
+| constants, grid, formulas | `core/engine/V31ActAdjustment.kt` | `src/opportunity_v31.rs` |
+| wiring | `ScreenDataProjectionEngine.v31Shadow` → `ProjectedOpportunityRow.shadow` | `rank_android_v3` → `AndroidRow.shadow` / `RankedRow.shadow` |
+| inputs | `ProjectedOpportunityDecisionFacts.technicalScore`, `.macdHistogramRatio` (never read by the official decision) | `technical`, `histogram_ratio(year)` |
+| storage | none (Android has no score-history store; it computes shadow values for parity only) | `score_shadow` in `history.sqlite` |
+
+JSON: rows gain an optional `shadow` array (`config_id, bound, lambda_t, lambda_m, m, s_adj,
+shadow_decision`); no existing field changes and `/ranking` is unchanged otherwise.
 
 ## Parity
 
-`tools/android-jvm-parity/diff_headless.py` checks the constants (λ_T, λ_M, bound, version) are
-equal in both sources, compares `sAdj`/`m` per row with absolute tolerance `1e-9` and the decision
-exactly.
+`tools/android-jvm-parity/diff_headless.py` checks `SHADOW_RULE_VERSION`, `LAMBDA_T`,
+`ACT_THRESHOLD` and the full config list (ids, bounds, λ_M, order) in both sources, compares all
+official fields exactly as before, and compares every shadow config per row (`m`, `sAdj` within
+1e-9; `shadowDecision` exact).
+
+## Evaluation
+
+See [decision-rule-v3-1-shadow-evaluation.md](decision-rule-v3-1-shadow-evaluation.md).

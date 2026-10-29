@@ -32,7 +32,7 @@ def rust_rank(fixture):
                  rowGapBps=r["row_gap_bps"], rowUpsideBps=r["row_upside_bps"],
                  projectedGapBps=r["gap_bps"], projectedUpsideBps=r["upside_bps"],
                  trustSignal=r["trust_signal"], decision=r["decision"], gap=r["projection_gap"],
-                 sAdj=r.get("s_adj"), m=r.get("m"), ruleVersion=r.get("rule_version"))
+                 shadow=shadow_camel(r.get("shadow")))
             for r in json.load(open(fout))]
 
 def from_ranking(path):
@@ -44,31 +44,71 @@ def from_ranking(path):
                  projectedConfidence=CAP.get(r.get("confidence") or "", r.get("confidence")),
                  projectedUpsideBps=pct(r.get("upside_pct")), projectedGapBps=pct(r.get("gap_pct")),
                  trustSignal=r.get("trust_signal"), decision=r.get("decision") or None, gap=r.get("projection_gap"),
-                 sAdj=r.get("s_adj"), m=r.get("m"))
+                 shadow=shadow_camel(r.get("shadow")))
             for r in rows]
 
-# V3.1 floats (S_adj, m) are compared with this absolute tolerance; decisions must match exactly.
+# ---- V3.1 SHADOW (not official output) -------------------------------------------------------
+# Official fields are compared exactly, as before. The `shadow` grid is compared per config_id:
+# floats (m, sAdj) with absolute tolerance FLOAT_TOL, everything else exactly.
 FLOAT_TOL = 1e-9
-FLOAT_FIELDS = ("sAdj", "m")
-V31_NAMES = ["LAMBDA_T", "LAMBDA_M", "MOMENTUM_HISTOGRAM_BOUND", "RULE_VERSION"]
+SHADOW_FLOATS = ("m", "sAdj")
+V31_KT = "apps/android/core/src/main/kotlin/com/discountscreener/core/engine/V31ActAdjustment.kt"
+V31_RS = "apps/windows/src-tauri/src/opportunity_v31.rs"
+
+def shadow_camel(grid):
+    if grid is None:
+        return None
+    return [dict(configId=g["config_id"], bound=g["bound"], lambdaT=g["lambda_t"], lambdaM=g["lambda_m"],
+                 m=g["m"], sAdj=g["s_adj"], shadowDecision=g["shadow_decision"]) for g in grid]
 
 def v31_constants():
-    """V3.1 constants, Kotlin V31ActAdjustment vs Rust opportunity_v31, read from source."""
+    """Shadow constants AND the config list, Kotlin V31ActAdjustment vs Rust opportunity_v31 (source)."""
     import re
-    kt = open(os.path.join(ROOT, "apps/android/core/src/main/kotlin/com/discountscreener/core/engine/V31ActAdjustment.kt")).read()
-    rs = open(os.path.join(ROOT, "apps/windows/src-tauri/src/opportunity_v31.rs")).read()
+    kt, rs = open(os.path.join(ROOT, V31_KT)).read(), open(os.path.join(ROOT, V31_RS)).read()
     bad = []
-    for n in V31_NAMES:
+    for n in ("SHADOW_RULE_VERSION", "LAMBDA_T", "ACT_THRESHOLD"):
         k = re.search(rf"const val {n} = (\S+)", kt)
         r = re.search(rf"pub const V31_{n}: [^=]+= ([^;]+);", rs)
         kv, rv = (k.group(1).strip('"') if k else None), (r.group(1).strip('"') if r else None)
         print(f"  {n}: android={kv} headless={rv}" + ("" if kv == rv and kv else "  MISMATCH"))
         if kv != rv or not kv:
             bad.append(n)
-    return bad
+    kc = [(i, float(b), float(l)) for i, b, l in re.findall(r'ShadowConfig\("(\w+)", ([\d.]+), ([\d.]+)\)', kt)]
+    rc = [(i, float(b), float(l)) for i, b, l in
+          re.findall(r'ShadowConfig \{ id: "(\w+)", bound: ([\d.]+), lambda_m: ([\d.]+) \}', rs)]
+    ok = kc == rc and len(kc) == 6
+    print(f"  SHADOW_CONFIGS: android={kc}\n                  headless={rc}" + ("" if ok else "  MISMATCH"))
+    if not ok:
+        bad.append("SHADOW_CONFIGS")
+    return bad, [c[0] for c in kc]
+
+def shadow_diff(sym, ka, ra, ids):
+    if ka is None and ra is None:
+        return []
+    if ka is None or ra is None:
+        return [f"{sym}: shadow android={'-' if ka is None else len(ka)} headless={'-' if ra is None else len(ra)}"]
+    kb, rb = {g["configId"]: g for g in ka}, {g["configId"]: g for g in ra}
+    out = []
+    if [g["configId"] for g in ka] != ids or [g["configId"] for g in ra] != ids:
+        out.append(f"{sym}: shadow config ids android={list(kb)} headless={list(rb)} want={ids}")
+    for cid in ids:
+        k, r = kb.get(cid), rb.get(cid)
+        if k is None or r is None:
+            continue
+        for f, kv in k.items():
+            rv = r.get(f)
+            if f in SHADOW_FLOATS and isinstance(kv, (int, float)) and isinstance(rv, (int, float)):
+                if abs(kv - rv) > FLOAT_TOL:
+                    out.append(f"{sym}: shadow[{cid}].{f} android={kv} headless={rv} (tol {FLOAT_TOL})")
+            elif kv != rv:
+                out.append(f"{sym}: shadow[{cid}].{f} android={kv} headless={rv}")
+    return out
+
+
+SHADOW_IDS = []
 
 def diff(kotlin, rust):
-    out, gaps = [], 0
+    out, gaps, shadow_rows = [], 0, [0]
     if len(kotlin) != len(rust):
         out.append(f"count kotlin={len(kotlin)} headless={len(rust)}")
     ks = {r["symbol"]: (i, r) for i, r in enumerate(kotlin)}
@@ -82,29 +122,29 @@ def diff(kotlin, rust):
         if ks[s][0] != rs[s][0]:
             out.append(f"{s}: rank android={ks[s][0]+1} headless={rs[s][0]+1}")
         for f, v in r.items():
-            if f in ("symbol", "gap") or f not in k:
+            if f in ("symbol", "gap", "shadow") or f not in k:
                 continue
             if r.get("gap") and f in ("projectedGapBps", "projectedUpsideBps", "decision") and v is None:
                 gaps += 1
                 continue
-            if f in FLOAT_FIELDS and isinstance(k[f], (int, float)) and isinstance(v, (int, float)):
-                if abs(k[f] - v) > FLOAT_TOL:
-                    out.append(f"{s}: {f} android={k[f]} headless={v} (tol {FLOAT_TOL})")
-                continue
             if k[f] != v:
                 out.append(f"{s}: {f} android={k[f]} headless={v}")
+        shadow_rows[0] += k.get("shadow") is not None
+        out += shadow_diff(s, k.get("shadow"), r.get("shadow"), SHADOW_IDS)
         a, b = k.get("projectedUpsideBps"), r.get("projectedUpsideBps")
         if a is not None and b is not None and abs(a - b) / 100 > max_pp:
             max_pp, worst = abs(a - b) / 100, s
     print(f"android={len(kotlin)} headless={len(rust)} common={len(order)} rank_moves={order_moves} "
-          f"max_upside_delta_pp={max_pp:.2f} ({worst}) flagged_identity_gaps={gaps} diffs={len(out)}")
+          f"max_upside_delta_pp={max_pp:.2f} ({worst}) flagged_identity_gaps={gaps} "
+          f"shadow_rows={shadow_rows[0]}x{len(SHADOW_IDS)}cfg diffs={len(out)}")
     for line in out:
         print("  " + line)
     return out
 
 if __name__ == "__main__":
-    print("V3.1 constants:")
-    if v31_constants():
+    print("V3.1 shadow constants:")
+    bad, SHADOW_IDS[:] = v31_constants()
+    if bad:
         sys.exit(1)
     mode = sys.argv[1]
     kotlin = json.load(open(sys.argv[3] if mode == "replay" else sys.argv[2]))

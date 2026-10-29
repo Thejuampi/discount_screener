@@ -1,7 +1,7 @@
 # Score history (headless)
 
 Where: inside the app database, `<data-dir>/history.sqlite` (the same file the desktop app uses), in the
-additive tables `score_runs` and `score_history` (plus the `score_history_migrations` log).
+additive tables `score_runs`, `score_history` and (schema v2, V3.1 shadow mode) `score_shadow` (plus the `score_history_migrations` log).
 Headless default data-dir: `$XDG_STATE_HOME/vantage-headless` (or `~/.local/state/vantage-headless`);
 production on the box: `/workspace/vh-data/history.sqlite`.
 
@@ -22,7 +22,7 @@ production on the box: `/workspace/vh-data/history.sqlite`.
 
 ## Protections
 - **Append-only, kept forever.** No retention/pruning/TTL code. `BEFORE DELETE` / `BEFORE UPDATE` triggers
-  `RAISE(ABORT)` on `score_runs`, `score_history` and `score_history_migrations`. A unit test scans `src/` and
+  `RAISE(ABORT)` on `score_runs`, `score_history`, `score_shadow` and `score_history_migrations`. A unit test scans `src/` and
   fails on any DELETE/UPDATE/DROP/REPLACE/non-additive ALTER aimed at those tables.
 - No app cleanup path touches them: the only time-based deletes in the app DB are provider caches/budgets
   (FMP/TipRanks); the desktop app has no "clear cache"/reset feature; headless has no reset command.

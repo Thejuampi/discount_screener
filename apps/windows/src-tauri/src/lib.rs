@@ -46,6 +46,7 @@ mod scalping;
 mod schwab;
 mod schwab_api;
 pub mod score_history;
+pub mod score_shadow_report;
 mod sec_company_facts_sieve;
 mod sec_driver_normalization_policy_generated;
 mod sec_normalization;

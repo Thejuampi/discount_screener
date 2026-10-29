@@ -453,12 +453,9 @@ pub struct RankedRow {
     /// Set when the on-screen value needs a DCF identity value headless does not compute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_gap: Option<String>,
-    /// V3.1 adjusted composite (android semantics only).
+    /// V3.1 SHADOW grid (android semantics only). NOT official output: decision/rank ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub s_adj: Option<f64>,
-    /// V3.1 MACD momentum m (android semantics only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub m: Option<f64>,
+    pub shadow: Option<Vec<crate::opportunity_v31::ShadowValue>>,
 }
 
 /// Short-side setup label from the (already short-oriented) Short V3 composite.
@@ -511,8 +508,7 @@ pub fn to_ranked(rows: &[OpportunityRow], model: ScoringModel) -> Vec<RankedRow>
             regime: r.regime_score,
             trust_signal: None,
             projection_gap: None,
-            s_adj: None,
-            m: None,
+            shadow: None,
         })
         .collect()
 }
@@ -540,8 +536,7 @@ pub fn android_to_ranked(rows: &[AndroidRow]) -> Vec<RankedRow> {
             regime: None,
             trust_signal: r.trust_signal.clone(),
             projection_gap: r.projection_gap.clone(),
-            s_adj: r.s_adj,
-            m: r.m,
+            shadow: r.shadow.clone(),
         })
         .collect()
 }
@@ -653,14 +648,9 @@ pub struct AndroidRow {
     /// does not compute (Street unusable + live residual/FCFF DCF).
     pub projection_gap: Option<String>,
     pub fundamentals_signals: Vec<String>,
-    /// V3.1 adjusted composite S_adj (Act check); ranking stays on `composite_score`.
-    #[serde(default)]
-    pub s_adj: Option<f64>,
-    /// V3.1 MACD momentum m in [-1, 1].
-    #[serde(default)]
-    pub m: Option<f64>,
-    #[serde(default)]
-    pub rule_version: Option<String>,
+    /// V3.1 SHADOW grid. NOT official output: decision/rank ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<Vec<crate::opportunity_v31::ShadowValue>>,
 }
 
 /// `quant_lens.row_upside_min_bps` / `row_upside_max_bps` (valuation-policy.yaml).
@@ -677,8 +667,6 @@ pub struct AndroidProjection {
     pub trust_signal: Option<&'static str>,
     pub decision: Option<&'static str>,
     pub projection_gap: Option<&'static str>,
-    /// V3.1 adjusted composite used for the Act check.
-    pub s_adj: f64,
 }
 
 /// Kotlin `checkedGapBps`: (fair - market) * 10000 / fair, fair > 0.
@@ -706,12 +694,9 @@ pub fn android_project_row(
     row_confidence: crate::engine::ConfidenceBand,
     price_cents: i64,
     composite: i32,
-    technical: Option<i32>,
-    momentum: Option<f64>,
     street: Option<&AndroidStreet>,
     dcf: Option<&AndroidDcfFacts>,
 ) -> AndroidProjection {
-    let s_adj = crate::opportunity_v31::adjusted_score(composite, technical, momentum);
     use crate::engine::ConfidenceBand::*;
     let lower = dcf.is_some_and(|d| d.provider_uncertain || d.restored_only || d.source_free);
     let confidence = if lower {
@@ -786,8 +771,7 @@ pub fn android_project_row(
             "Avoid"
         } else if trust_signal.is_some() {
             "Watch"
-        } else if confidence == High && s_adj >= 30.0 {
-            // V3.1: Act on S_adj; Avoid above stays on raw S.
+        } else if confidence == High && composite >= 30 {
             "Act"
         } else {
             "Watch"
@@ -802,7 +786,6 @@ pub fn android_project_row(
         trust_signal,
         decision,
         projection_gap,
-        s_adj,
     }
 }
 
@@ -948,13 +931,10 @@ pub fn rank_android_v3(
             let composite = composite_score_v3_android(f, t, fc, row.beta_millis);
             let coverage = [f, t, fc].iter().filter(|x| x.is_some()).count() as u8;
             let upside = android_upside_bps(row.market_price_cents, row.intrinsic_value_cents);
-            let m = crate::opportunity_v31::macd_momentum(r.year.as_ref());
             let p = android_project_row(
                 row.confidence,
                 row.market_price_cents,
                 composite,
-                t,
-                m,
                 r.android_street.as_ref(),
                 r.android_dcf.as_ref(),
             );
@@ -982,10 +962,14 @@ pub fn rank_android_v3(
                     row_gap_bps: row.gap_bps.unwrap_or(0),
                     row_upside_bps: upside.unwrap_or(0),
                     projection_gap: p.projection_gap.map(str::to_string),
-                    s_adj: Some(p.s_adj),
-                    m,
-                    rule_version: Some(crate::opportunity_v31::V31_RULE_VERSION.to_string()),
                     fundamentals_signals: sig,
+                    // V3.1 shadow, computed from the official decision; never feeds back.
+                    shadow: Some(crate::opportunity_v31::shadow_grid(
+                        p.decision,
+                        composite,
+                        t,
+                        crate::opportunity_v31::histogram_ratio(r.year.as_ref()),
+                    )),
                 },
                 confidence_rank(row.confidence),
             )
@@ -1821,37 +1805,6 @@ mod android_parity_tests {
     }
 
     #[test]
-    fn android_v31_act_uses_s_adj() {
-        use crate::engine::ConfidenceBand::*;
-        let street = AndroidStreet {
-            fair: 15_000,
-            low: Some(12_000),
-            high: Some(20_000),
-            weighted: None,
-            weighted_count: None,
-            opinions: Some(10),
-            age: 0,
-        };
-        let d = |c, comp, t, m| android_project_row(c, 10_000, comp, t, m, Some(&street), None);
-        // SSRM: S 36, T -18 → S_adj ≈ 27.4 → Watch (Act without T).
-        let ssrm = d(High, 36, Some(-18), None);
-        assert!((ssrm.s_adj - 36.0 * (-0.27f64).exp()).abs() < 1e-12);
-        assert_eq!(ssrm.decision, Some("Watch"));
-        assert_eq!(d(High, 36, None, None).decision, Some("Act"));
-        // T ≥ 0 and m ≥ 0: S_adj == S.
-        let up = d(High, 36, Some(0), Some(0.4));
-        assert_eq!((up.s_adj, up.decision), (36.0, Some("Act")));
-        assert_eq!(d(High, 30, Some(10), Some(1.0)).decision, Some("Act"));
-        // Momentum alone.
-        assert_eq!(d(High, 31, Some(0), Some(-1.0)).decision, Some("Watch"));
-        assert_eq!(d(High, 31, Some(0), Some(-0.1)).decision, Some("Act"));
-        // Avoid unchanged (raw S), weak technicals never make Avoid.
-        assert_eq!(d(High, -1, Some(-90), Some(-1.0)).decision, Some("Avoid"));
-        assert_eq!(d(Low, 80, Some(50), Some(1.0)).decision, Some("Avoid"));
-        assert_eq!(d(High, 40, Some(-100), Some(-1.0)).decision, Some("Watch"));
-    }
-
-    #[test]
     fn android_projection_gates() {
         use crate::engine::ConfidenceBand::*;
         let street = AndroidStreet {
@@ -1870,7 +1823,7 @@ mod android_parity_tests {
             identity: AndroidIdentity::None,
         };
         let p = |c, comp, s: Option<&AndroidStreet>, d: Option<&AndroidDcfFacts>| {
-            android_project_row(c, 10_000, comp, None, None, s, d)
+            android_project_row(c, 10_000, comp, s, d)
         };
         assert_eq!(p(High, 30, Some(&street), None).decision, Some("Act"));
         assert_eq!(p(High, 29, Some(&street), None).decision, Some("Watch"));

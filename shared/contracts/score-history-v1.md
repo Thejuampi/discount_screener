@@ -44,3 +44,22 @@ Source: `vantage-headless serve` → `GET /history?symbol=TICKER[&days=N][&chang
   `--history-interval-hours` (default 6) and once after each US weekday close (~16:10 America/New_York).
 - History is **append-only and kept forever**: no retention, pruning or TTL.
 - Additive fields may appear; clients must ignore unknown keys. Breaking changes → `score-history-v2`.
+
+## Storage: `score_shadow` (schema v2, V3.1 shadow mode)
+
+Not exposed by `/history`. Additive, append-only (DELETE/UPDATE abort triggers), written in the same
+transaction as the official `score_runs`/`score_history` rows.
+
+| column | type | notes |
+|---|---|---|
+| run_id | TEXT NOT NULL | → score_runs.run_id |
+| ticker | TEXT NOT NULL | = score_history.symbol |
+| config_id | TEXT NOT NULL | e.g. `b0200_lm030` (see docs/architecture/decision-rule-v3-1.md) |
+| bound | REAL NOT NULL | |
+| lambda_t | REAL NOT NULL | |
+| lambda_m | REAL NOT NULL | |
+| m | REAL | null when histogram/close missing |
+| s_adj | REAL NOT NULL | |
+| shadow_decision | TEXT | Act/Watch/Avoid; only ever differs from the official decision as Act → Watch |
+
+PRIMARY KEY (run_id, ticker, config_id). Read with `vantage-headless history-shadow-report`.

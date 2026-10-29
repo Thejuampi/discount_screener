@@ -32,9 +32,9 @@ use crate::headless::RankedRow;
 pub const SCORE_RULE_VERSION: &str = "V3";
 
 /// Highest score-history migration this binary knows.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 /// The two append-only tables.
-pub const HISTORY_TABLES: [&str; 2] = ["score_runs", "score_history"];
+pub const HISTORY_TABLES: [&str; 3] = ["score_runs", "score_history", "score_shadow"];
 
 /// Production default for daily backups (outside the data-dir). Override with
 /// `--history-backup-dir` or [`BACKUP_DIR_ENV`].
@@ -72,9 +72,10 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
 ";
 
 /// Additive migrations only (CREATE … / ALTER TABLE … ADD COLUMN). Never drop, rename or rewrite.
-pub const MIGRATIONS: &[(i64, &str)] = &[(
-    1,
-    "
+pub const MIGRATIONS: &[(i64, &str)] = &[
+    (
+        1,
+        "
 CREATE TABLE IF NOT EXISTS score_runs (
     run_id             TEXT PRIMARY KEY NOT NULL,
     captured_at        INTEGER NOT NULL,
@@ -119,7 +120,30 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS score_history_no_update BEFORE UPDATE ON score_history
 BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
 ",
-)];
+    ),
+    (
+        2,
+        "
+CREATE TABLE IF NOT EXISTS score_shadow (
+    run_id          TEXT NOT NULL REFERENCES score_runs(run_id),
+    ticker          TEXT NOT NULL,
+    config_id       TEXT NOT NULL,
+    bound           REAL NOT NULL,
+    lambda_t        REAL NOT NULL,
+    lambda_m        REAL NOT NULL,
+    m               REAL,
+    s_adj           REAL NOT NULL,
+    shadow_decision TEXT,
+    PRIMARY KEY (run_id, ticker, config_id)
+);
+CREATE INDEX IF NOT EXISTS score_shadow_config ON score_shadow(config_id, ticker);
+CREATE TRIGGER IF NOT EXISTS score_shadow_no_delete BEFORE DELETE ON score_shadow
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_shadow_no_update BEFORE UPDATE ON score_shadow
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+",
+    ),
+];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RunMeta {
@@ -199,6 +223,9 @@ pub struct BackupReport {
     pub integrity: String,
     pub score_runs: i64,
     pub score_history: i64,
+    /// V3.1 shadow rows (-1 when the table is absent, e.g. a pre-v2 backup).
+    #[serde(default)]
+    pub score_shadow: i64,
 }
 
 pub fn iso_utc(epoch: i64) -> String {
@@ -293,6 +320,11 @@ pub fn verify_file(path: &Path) -> Result<BackupReport, String> {
         },
         score_history: if has("score_history") {
             table_count(&c, "score_history")
+        } else {
+            -1
+        },
+        score_shadow: if has("score_shadow") {
+            table_count(&c, "score_shadow")
         } else {
             -1
         },
@@ -445,6 +477,34 @@ impl ScoreHistoryStore {
                 .map_err(|e| format!("insert {}: {e}", r.symbol))?;
             }
         }
+        if good
+            .iter()
+            .any(|r| r.shadow.as_ref().is_some_and(|g| !g.is_empty()))
+        {
+            // V3.1 shadow grid, same transaction as the official rows (all or nothing).
+            let mut st = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO score_shadow (run_id, ticker, config_id, bound, lambda_t, \
+                     lambda_m, m, s_adj, shadow_decision) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                )
+                .map_err(err)?;
+            for r in &good {
+                for v in r.shadow.iter().flatten() {
+                    st.execute(params![
+                        run_id,
+                        r.symbol,
+                        v.config_id,
+                        v.bound,
+                        v.lambda_t,
+                        v.lambda_m,
+                        v.m.filter(|x| x.is_finite()),
+                        v.s_adj,
+                        v.shadow_decision,
+                    ])
+                    .map_err(|e| format!("insert shadow {} {}: {e}", r.symbol, v.config_id))?;
+                }
+            }
+        }
         tx.commit().map_err(err)?;
         Ok(RecordOutcome::Recorded {
             rows: good.len(),
@@ -527,6 +587,12 @@ impl ScoreHistoryStore {
         ))
     }
 
+    /// Rows in the V3.1 `score_shadow` table.
+    pub fn shadow_count(&self) -> Result<i64, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        Ok(table_count(&c, "score_shadow"))
+    }
+
     pub fn run_count(&self) -> Result<i64, String> {
         Ok(self.counts()?.0)
     }
@@ -548,21 +614,23 @@ impl ScoreHistoryStore {
     /// Verified `VACUUM INTO` copy of the whole app DB to `dest` (must not exist).
     pub fn backup_to(&self, dest: &Path) -> Result<BackupReport, String> {
         let c = self.conn.lock().map_err(|_| "lock")?;
-        let (runs, rows) = (
+        let (runs, rows, shadow) = (
             table_count(&c, "score_runs"),
             table_count(&c, "score_history"),
+            table_count(&c, "score_shadow"),
         );
         vacuum_into(&c, dest)?;
         drop(c);
         let rep = verify_file(dest)?;
-        if rep.score_runs != runs || rep.score_history != rows {
+        if rep.score_runs != runs || rep.score_history != rows || rep.score_shadow != shadow {
             let bad = dest.with_extension("sqlite.failed");
             let _ = std::fs::rename(dest, &bad);
             return Err(format!(
-                "backup {} row counts {}/{} != live {runs}/{rows} (moved to {})",
+                "backup {} row counts {}/{}/{} != live {runs}/{rows}/{shadow} (moved to {})",
                 dest.display(),
                 rep.score_runs,
                 rep.score_history,
+                rep.score_shadow,
                 bad.display()
             ));
         }
@@ -913,6 +981,7 @@ mod tests {
             regime: None,
             trust_signal: None,
             projection_gap: None,
+            shadow: None,
         }
     }
 
@@ -982,13 +1051,14 @@ mod tests {
         // A later additive migration: backed up first (with the v1 data), data kept.
         let extra: &[(i64, &str)] = &[
             MIGRATIONS[0],
-            (2, "ALTER TABLE score_runs ADD COLUMN note TEXT;"),
+            MIGRATIONS[1],
+            (3, "ALTER TABLE score_runs ADD COLUMN note TEXT;"),
         ];
         drop(s);
         let s = ScoreHistoryStore::open_with(&p, Some(&bdir), extra).unwrap();
         let bk2 = s.migration_backup.clone().unwrap();
         assert_eq!(verify_file(&bk2).unwrap().score_runs, 1);
-        assert_eq!(s.schema_version().unwrap(), 2);
+        assert_eq!(s.schema_version().unwrap(), 3);
         assert_eq!(s.counts().unwrap(), (1, 1));
         let c = Connection::open(&p).unwrap();
         let uv: i64 = c
@@ -1097,8 +1167,15 @@ mod tests {
     #[test]
     fn delete_and_update_abort() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
-        s.record_run(&meta(1), &[row("ADSK", "Act", 30, 60, 0, 30)])
-            .unwrap();
+        let mut r = row("ADSK", "Act", 30, 60, 0, 30);
+        r.shadow = Some(crate::opportunity_v31::shadow_grid(
+            Some("Act"),
+            30,
+            Some(0),
+            Some(0.0),
+        ));
+        s.record_run(&meta(1), &[r]).unwrap();
+        assert_eq!(s.shadow_count().unwrap(), 6);
         let c = s.conn.lock().unwrap();
         for t in HISTORY_TABLES
             .iter()
@@ -1113,6 +1190,7 @@ mod tests {
         }
         drop(c);
         assert_eq!(s.counts().unwrap(), (1, 1));
+        assert_eq!(s.shadow_count().unwrap(), 6);
     }
 
     /// CI guard: no source file may DELETE/UPDATE/DROP/rename the history tables.
@@ -1434,5 +1512,64 @@ mod tests {
         assert!(validate_symbol("A B").is_err());
         assert!(validate_symbol("A';--").is_err());
         assert!(validate_symbol(&"A".repeat(17)).is_err());
+    }
+
+    #[test]
+    fn shadow_rows_written_with_the_run_and_append_only() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let mut a = row("ADSK", "Act", 36, 60, -20, 30);
+        a.shadow = Some(crate::opportunity_v31::shadow_grid(
+            Some("Act"),
+            36,
+            Some(-20),
+            Some(-0.0307),
+        ));
+        let w = row("ZZZ", "Watch", 20, 60, 0, 30); // no grid: no shadow rows
+        s.record_run(&meta(1), &[a.clone(), w]).unwrap();
+        assert_eq!(
+            (s.counts().unwrap(), s.shadow_count().unwrap()),
+            ((1, 2), 6)
+        );
+        // Duplicate run id: no-op for official and shadow rows alike.
+        s.record_run(&meta(1), &[a]).unwrap();
+        assert_eq!(s.shadow_count().unwrap(), 6);
+        let c = s.conn.lock().unwrap();
+        let ids: Vec<String> = c
+            .prepare("SELECT config_id FROM score_shadow ORDER BY config_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let want: Vec<String> = crate::opportunity_v31::V31_SHADOW_CONFIGS
+            .iter()
+            .map(|c| c.id.to_string())
+            .collect();
+        assert_eq!(ids, want);
+    }
+
+    #[test]
+    fn v1_file_is_backed_up_then_gains_score_shadow() {
+        let dir = tmpdir("shadow-mig");
+        let (p, bdir) = (dir.join("history.sqlite"), dir.join("bk"));
+        let s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..1]).unwrap();
+        s.record_run(&meta(100), &[row("ADSK", "Act", 40, 60, 10, 30)])
+            .unwrap();
+        drop(s);
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let bk = s.migration_backup.clone().expect("backup before v1 -> v2");
+        let rep = verify_file(&bk).unwrap();
+        assert_eq!(
+            (rep.score_runs, rep.score_history, rep.score_shadow),
+            (1, 1, -1)
+        );
+        assert_eq!(s.schema_version().unwrap(), 2);
+        assert_eq!(
+            (s.counts().unwrap(), s.shadow_count().unwrap()),
+            ((1, 1), 0)
+        );
+        let r2 = s.backup_to(&dir.join("after.sqlite")).unwrap();
+        assert_eq!(r2.score_shadow, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

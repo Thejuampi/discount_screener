@@ -28,10 +28,22 @@ data class ScreenDataProjectionRequest(
 @Serializable
 data class ProjectedOpportunityDecisionFacts(
     val compositeScore: Int? = null,
-    /** V3 technical bucket T (V3.1 Act adjustment input). */
+    /** SHADOW input only (V3.1): V3 technical bucket T. Never read by the official decision. */
     val technicalScore: Int? = null,
-    /** V3.1 MACD momentum m in [-1, 1] ([com.discountscreener.core.engine.V31ActAdjustment.macdMomentum]). */
-    val macdMomentum: Double? = null,
+    /** SHADOW input only (V3.1): Year-chart MACD histogram / close. Never read by the official decision. */
+    val macdHistogramRatio: Double? = null,
+)
+
+/** One V3.1 shadow config result. Diagnostic only: never drives the official decision or ranking. */
+@Serializable
+data class ProjectedShadowDecision(
+    val configId: String,
+    val bound: Double,
+    val lambdaT: Double,
+    val lambdaM: Double,
+    val m: Double?,
+    val sAdj: Double,
+    val shadowDecision: ProjectedRowDecision?,
 )
 
 @Serializable
@@ -136,10 +148,8 @@ data class ProjectedOpportunityRow(
     val freshness: ProjectedRowFreshness = ProjectedRowFreshness.Loading,
     val trustSignal: ProjectedTrustSignal? = null,
     val decision: ProjectedRowDecision? = null,
-    /** V3.1 adjusted composite S_adj used for the Act check (AggressiveV3 only; ranking stays on raw S). */
-    val sAdj: Double? = null,
-    /** V3.1 MACD momentum m in [-1, 1]. */
-    val macdMomentum: Double? = null,
+    /** V3.1 SHADOW grid (AggressiveV3 rows with a composite); null otherwise. Not official output. */
+    val shadow: List<ProjectedShadowDecision>? = null,
     val quantLensSummary: QuantLensRowSummary? = null,
     val valuationJudgment: ProjectedValuationJudgment? = null,
 ) {

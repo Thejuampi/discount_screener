@@ -22,10 +22,10 @@ import com.discountscreener.core.model.ProjectedFairValueAnchor
 import com.discountscreener.core.model.ProjectedFairValueLabels
 import com.discountscreener.core.model.ProjectedFairValueRole
 import com.discountscreener.core.model.ProjectedOpportunityDecisionFacts
-import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProjectedProviderCategory
 import com.discountscreener.core.model.ProjectedProvenanceState
 import com.discountscreener.core.model.ProjectedRowDecision
+import com.discountscreener.core.model.OpportunityScoringModel
 import com.discountscreener.core.model.ProjectedRowFreshness
 import com.discountscreener.core.model.ProjectedTrustSignalKind
 import com.discountscreener.core.model.ProjectionProfileFacts
@@ -385,71 +385,31 @@ class ScreenDataProjectionEngineTest {
         assertEquals(ProjectedRowDecision.Avoid, result.opportunityRows.single().decision)
     }
 
-    private fun v31Row(composite: Int, technical: Int?, m: Double?, confidence: ConfidenceBand = ConfidenceBand.High) =
-        candidateRow().copy(confidence = confidence).let { candidate ->
-            ScreenDataProjectionEngine().project(
-                emptyRequest(
-                    candidateRows = listOf(candidate),
-                    opportunityDecisionFactsBySymbol = mapOf(
-                        candidate.symbol to ProjectedOpportunityDecisionFacts(composite, technical, m),
-                    ),
-                    scoringModel = OpportunityScoringModel.AggressiveV3,
-                ),
-            ).requireSuccess().opportunityRows.single()
-        }
-
-    /** The Act/Watch/Avoid chain itself, with no trust signal and positive upside. */
-    private fun v31Decision(composite: Int, technical: Int?, m: Double?, confidence: ProjectedConfidence = ProjectedConfidence.High) =
-        ScreenDataProjectionEngine().opportunityDecision(
-            upsideBps = 2_000,
-            confidence = confidence,
-            trustSignal = null,
-            facts = ProjectedOpportunityDecisionFacts(composite, technical, m),
-            scoringModel = OpportunityScoringModel.AggressiveV3,
-        )
-
     @Test
-    fun v31_ssrm_t_minus_18_drops_act_to_watch() {
-        var row = v31Row(composite = 36, technical = -18, m = null)
-        assertEquals(36.0 * kotlin.math.exp(-0.27), row.sAdj!!, 1e-12)
-        assertEquals(ProjectedRowDecision.Watch, v31Decision(36, -18, null))
-        assertEquals(ProjectedRowDecision.Act, v31Decision(36, null, null))
-    }
-
-    @Test
-    fun v31_non_negative_t_and_m_keep_raw_s_and_act() {
-        var row = v31Row(composite = 36, technical = 0, m = 0.4)
-        assertEquals(36.0, row.sAdj!!, 0.0)
-        assertEquals(0.4, row.macdMomentum!!, 0.0)
-        assertEquals(ProjectedRowDecision.Act, v31Decision(36, 0, 0.4))
-        assertEquals(ProjectedRowDecision.Act, v31Decision(30, 10, 1.0))
-    }
-
-    @Test
-    fun v31_negative_momentum_alone_can_drop_act() {
-        // 31 * exp(-0.3) = 22.97 < 30
-        assertEquals(ProjectedRowDecision.Watch, v31Decision(31, 0, -1.0))
-        assertEquals(ProjectedRowDecision.Act, v31Decision(31, 0, -0.1))
-    }
-
-    @Test
-    fun v31_avoid_is_unchanged() {
-        assertEquals(ProjectedRowDecision.Avoid, v31Decision(-1, -90, -1.0))
-        assertEquals(ProjectedRowDecision.Avoid, v31Decision(80, 50, 1.0, ProjectedConfidence.Low))
-        // A strong name with weak technicals is Watch, never Avoid: Avoid stays on raw S.
-        assertEquals(ProjectedRowDecision.Watch, v31Decision(40, -100, -1.0))
-    }
-
-    @Test
-    fun v31_legacy_model_ignores_adjustment() {
-        var candidate = candidateRow().copy(confidence = ConfidenceBand.High)
-        var row = ScreenDataProjectionEngine().project(
-            emptyRequest(
-                candidateRows = listOf(candidate),
-                opportunityDecisionFactsBySymbol = mapOf(candidate.symbol to ProjectedOpportunityDecisionFacts(36, -90, -1.0)),
-            ),
+    fun v31_shadow_inputs_never_change_the_official_decision() {
+        val candidate = candidateRow().copy(confidence = ConfidenceBand.High)
+        fun project(facts: ProjectedOpportunityDecisionFacts) = ScreenDataProjectionEngine().project(
+            emptyRequest(candidateRows = listOf(candidate), opportunityDecisionFactsBySymbol = mapOf(candidate.symbol to facts)),
         ).requireSuccess().opportunityRows.single()
-        assertEquals(null, row.sAdj)
+        for (c in listOf(7, 29, 30, 36, 80)) {
+            val plain = project(ProjectedOpportunityDecisionFacts(compositeScore = c))
+            val withShadow = project(ProjectedOpportunityDecisionFacts(compositeScore = c, technicalScore = -100, macdHistogramRatio = -0.5))
+            assertEquals(plain.decision, withShadow.decision)
+            assertEquals(plain.copy(shadow = null), withShadow.copy(shadow = null))
+        }
+    }
+
+    @Test
+    fun v31_shadow_grid_is_aggressive_v3_only_and_demotes_ssrm() {
+        val e = ScreenDataProjectionEngine()
+        val ssrm = ProjectedOpportunityDecisionFacts(compositeScore = 36, technicalScore = -20, macdHistogramRatio = -87.0 / 2833.0)
+        val g = e.v31Shadow(ProjectedRowDecision.Act, ssrm, OpportunityScoringModel.AggressiveV3)!!
+        assertEquals(V31ActAdjustment.SHADOW_CONFIGS.map { it.id }, g.map { it.configId })
+        assertTrue(g.all { it.shadowDecision == ProjectedRowDecision.Watch })
+        assertEquals(null, e.v31Shadow(ProjectedRowDecision.Act, ProjectedOpportunityDecisionFacts(), OpportunityScoringModel.AggressiveV3))
+        OpportunityScoringModel.entries.filter { it != OpportunityScoringModel.AggressiveV3 }.forEach {
+            assertEquals(null, e.v31Shadow(ProjectedRowDecision.Act, ssrm, it))
+        }
     }
 
     @Test
@@ -669,10 +629,9 @@ class ScreenDataProjectionEngineTest {
         nowEpochSeconds: Long = 0L,
         candidateRows: List<CandidateRow> = emptyList(),
         opportunityDecisionFactsBySymbol: Map<String, ProjectedOpportunityDecisionFacts> = emptyMap(),
-        scoringModel: OpportunityScoringModel = OpportunityScoringModel.Legacy,
     ) = ScreenDataProjectionRequest(
         profile = ProjectionProfileFacts(currentProfile = "test"),
-        route = ProjectionRoute(selectedRange = ChartRange.Month, opportunityScoringModel = scoringModel),
+        route = ProjectionRoute(selectedRange = ChartRange.Month),
         nowEpochSeconds = nowEpochSeconds,
         candidateRows = candidateRows,
         opportunityDecisionFactsBySymbol = opportunityDecisionFactsBySymbol,
