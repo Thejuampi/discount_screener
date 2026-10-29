@@ -1207,85 +1207,22 @@ impl HeadlessEngine {
 
     /// Records one score-history run when [`crate::score_history::history_due`] says so
     /// (interval from the last run in `score_runs`, plus the weekday ~16:10 ET close
-    /// snapshot). Gathers the inputs from engine state; the decision itself is pure.
+    /// snapshot). Inputs come from engine state via [`HistorySource`].
     pub fn record_history_if_due(&self, now: i64) -> Result<HistoryWrite, String> {
-        use crate::score_history::{history_due, Due, DueInputs, RecordOutcome, RunMeta};
         let Some(store) = &self.history else {
             return Ok(HistoryWrite::Skipped("disabled"));
         };
-        let gen = self
-            .state
-            .initial_pass_completed_generation
-            .load(Ordering::SeqCst);
-        let pass_completed = gen != u64::MAX;
-        let since_pass = if pass_completed {
-            let mut p = self.pass_seen.lock().unwrap();
-            match *p {
-                Some((g, at)) if g == gen => now - at,
-                _ => {
-                    *p = Some((gen, now));
-                    0
-                }
-            }
-        } else {
-            0
-        };
-        let universe = android_universe(&self.profile()).unwrap_or_default();
-        let year_loaded = self.year.lock().unwrap().len();
-        let charts_ready = universe.is_empty()
-            || year_loaded as f64 >= universe.len() as f64 * HISTORY_YEAR_COVERAGE;
-        let profile = canonical_profile(&self.profile());
-        let (rows, source) = if pass_completed {
-            self.android_ranking()
-        } else {
-            (Vec::new(), "live")
-        };
-        let due = history_due(&DueInputs {
+        record_history_tick(
+            self,
+            store,
+            &self.pass_seen,
+            self.cfg.history_interval_secs,
+            self.cfg.market_context,
             now,
-            pass_completed,
-            since_pass,
-            charts_ready,
-            live: source == "live",
-            rows: rows.len(),
-            last_run: store.last_run_at(&profile, HISTORY_MODEL)?,
-            interval: self.cfg.history_interval_secs,
-        });
-        let trigger = match due {
-            Due::No(why) => return Ok(HistoryWrite::Skipped(why)),
-            Due::Interval => "interval",
-            Due::Close(_) => "close",
-        };
-        let ranked = android_to_ranked(&rows);
-        let snap = self.capture();
-        let have: std::collections::HashSet<&str> =
-            snap.rows.iter().map(|r| r.row.symbol.as_str()).collect();
-        let incomplete: Vec<String> = universe
-            .iter()
-            .filter(|s| !have.contains(s.as_str()))
-            .cloned()
-            .collect();
-        let meta = RunMeta {
-            captured_at: now,
-            profile,
-            model: HISTORY_MODEL.into(),
-            semantics: "android".into(),
-            market_context: self.cfg.market_context,
-            binary_version: env!("CARGO_PKG_VERSION").to_string(),
-            trigger: trigger.into(),
-            symbols_total: universe.len(),
-            incomplete_symbols: incomplete,
-        };
-        Ok(match store.record_run(&meta, &ranked)? {
-            RecordOutcome::Recorded { rows, skipped } => HistoryWrite::Recorded {
-                trigger,
-                rows,
-                skipped,
-            },
-            RecordOutcome::Duplicate => HistoryWrite::Duplicate(meta.run_id()),
-        })
+        )
     }
 
-    /// Daily verified backup of the app DB (history included) when configured.
+    /// Daily verified backup of the score tables when configured.
     pub fn backup_history_if_due(
         &self,
         now: i64,
@@ -1333,6 +1270,123 @@ impl HeadlessEngine {
     }
 }
 
+/// What [`record_history_tick`] reads from the engine (injectable in tests).
+pub trait HistorySource {
+    /// Generation of the completed initial pass, `u64::MAX` while it is running.
+    fn pass_generation(&self) -> u64;
+    fn year_charts_loaded(&self) -> usize;
+    fn history_universe(&self) -> Vec<String>;
+    fn history_profile(&self) -> String;
+    /// Android V3 ranking and its source (`live` / `persisted`).
+    fn history_ranking(&self) -> (Vec<RankedRow>, &'static str);
+    fn snapshot_symbols(&self) -> std::collections::HashSet<String>;
+}
+
+impl HistorySource for HeadlessEngine {
+    fn pass_generation(&self) -> u64 {
+        self.state
+            .initial_pass_completed_generation
+            .load(Ordering::SeqCst)
+    }
+    fn year_charts_loaded(&self) -> usize {
+        self.year.lock().unwrap().len()
+    }
+    fn history_universe(&self) -> Vec<String> {
+        android_universe(&self.profile()).unwrap_or_default()
+    }
+    fn history_profile(&self) -> String {
+        canonical_profile(&self.profile())
+    }
+    fn history_ranking(&self) -> (Vec<RankedRow>, &'static str) {
+        let (rows, source) = self.android_ranking();
+        (android_to_ranked(&rows), source)
+    }
+    fn snapshot_symbols(&self) -> std::collections::HashSet<String> {
+        self.capture()
+            .rows
+            .iter()
+            .map(|r| r.row.symbol.clone())
+            .collect()
+    }
+}
+
+/// One history tick: gathers [`crate::score_history::DueInputs`] from `src`, asks
+/// `history_due`, and appends the run when due.
+pub fn record_history_tick(
+    src: &dyn HistorySource,
+    store: &crate::score_history::ScoreHistoryStore,
+    pass_seen: &Mutex<Option<(u64, i64)>>,
+    interval: i64,
+    market_context: bool,
+    now: i64,
+) -> Result<HistoryWrite, String> {
+    use crate::score_history::{history_due, Due, DueInputs, RecordOutcome, RunMeta};
+    let gen = src.pass_generation();
+    let pass_completed = gen != u64::MAX;
+    let since_pass = if pass_completed {
+        let mut p = pass_seen.lock().unwrap();
+        match *p {
+            Some((g, at)) if g == gen => now - at,
+            _ => {
+                *p = Some((gen, now));
+                0
+            }
+        }
+    } else {
+        0
+    };
+    let universe = src.history_universe();
+    let year_loaded = src.year_charts_loaded();
+    let charts_ready =
+        universe.is_empty() || year_loaded as f64 >= universe.len() as f64 * HISTORY_YEAR_COVERAGE;
+    let profile = src.history_profile();
+    let (ranked, source) = if pass_completed {
+        src.history_ranking()
+    } else {
+        (Vec::new(), "live")
+    };
+    let due = history_due(&DueInputs {
+        now,
+        pass_completed,
+        since_pass,
+        charts_ready,
+        live: source == "live",
+        rows: ranked.len(),
+        last_run: store.last_run_at(&profile, HISTORY_MODEL)?,
+        interval,
+    });
+    let trigger = match due {
+        Due::No(why) => return Ok(HistoryWrite::Skipped(why)),
+        Due::Interval => "interval",
+        Due::Close(_) => "close",
+    };
+    let have = src.snapshot_symbols();
+    let incomplete: Vec<String> = universe
+        .iter()
+        .filter(|s| !have.contains(s.as_str()))
+        .cloned()
+        .collect();
+    let meta = RunMeta {
+        captured_at: now,
+        profile,
+        model: HISTORY_MODEL.into(),
+        semantics: "android".into(),
+        market_context,
+        binary_version: env!("CARGO_PKG_VERSION").to_string(),
+        trigger: trigger.into(),
+        symbols_total: universe.len(),
+        incomplete_symbols: incomplete,
+    };
+    Ok(match store.record_run(&meta, &ranked)? {
+        RecordOutcome::Recorded { rows, skipped } => HistoryWrite::Recorded {
+            trigger,
+            rows,
+            skipped,
+        },
+        RecordOutcome::Duplicate => HistoryWrite::Duplicate(meta.run_id()),
+    })
+}
+
 /// Shared by the daemon route and tests: history for `symbol` as JSON.
 pub fn history_json(
     store: &crate::score_history::ScoreHistoryStore,
@@ -1343,6 +1397,9 @@ pub fn history_json(
     profile: &str,
 ) -> Result<serde_json::Value, String> {
     let symbol = crate::score_history::validate_symbol(symbol)?;
+    if let Some(d) = days {
+        crate::score_history::validate_days(d)?;
+    }
     let points = store.history(&symbol, days, now, Some(HISTORY_MODEL), Some(profile))?;
     let mut v = serde_json::json!({
         "symbol": symbol, "profile": profile, "model": HISTORY_MODEL, "days": days, "points": points
@@ -1868,5 +1925,146 @@ mod android_parity_tests {
             ..street
         };
         assert_eq!(p(High, 45, Some(&huge), None).upside_bps, Some(100_000));
+    }
+}
+
+#[cfg(test)]
+mod history_tick_tests {
+    use super::*;
+    use crate::score_history::ScoreHistoryStore;
+    use std::cell::Cell;
+
+    struct Fake {
+        gen: Cell<u64>,
+        year: Cell<usize>,
+        source: Cell<&'static str>,
+    }
+
+    fn rr(sym: &str) -> RankedRow {
+        RankedRow {
+            rank: 1,
+            symbol: sym.into(),
+            company: None,
+            sector: None,
+            composite_score: 40,
+            setup_score: 40,
+            setup_label: "Act".into(),
+            decision: "Act".into(),
+            confidence: None,
+            price: 10.0,
+            target: None,
+            gap_pct: None,
+            upside_pct: None,
+            fundamentals: None,
+            technical: None,
+            forecast: None,
+            regime: None,
+            trust_signal: None,
+            projection_gap: None,
+            shadow: None,
+        }
+    }
+
+    impl HistorySource for Fake {
+        fn pass_generation(&self) -> u64 {
+            self.gen.get()
+        }
+        fn year_charts_loaded(&self) -> usize {
+            self.year.get()
+        }
+        fn history_universe(&self) -> Vec<String> {
+            (0..100).map(|k| format!("S{k}")).collect()
+        }
+        fn history_profile(&self) -> String {
+            "sp500".into()
+        }
+        fn history_ranking(&self) -> (Vec<RankedRow>, &'static str) {
+            (vec![rr("S0"), rr("S1")], self.source.get())
+        }
+        fn snapshot_symbols(&self) -> std::collections::HashSet<String> {
+            ["S0", "S1"].iter().map(|s| s.to_string()).collect()
+        }
+    }
+
+    const NOW: i64 = 1_793_538_000; // Sun 2026-11-01 13:00 UTC: no close slot nearby
+    const H6: i64 = 6 * 3600;
+
+    fn tick(
+        f: &Fake,
+        s: &ScoreHistoryStore,
+        seen: &Mutex<Option<(u64, i64)>>,
+        now: i64,
+    ) -> HistoryWrite {
+        record_history_tick(f, s, seen, H6, false, now).unwrap()
+    }
+
+    #[test]
+    fn engine_tick_gates_live_coverage_and_since_pass() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let seen = Mutex::new(None);
+        let f = Fake {
+            gen: Cell::new(u64::MAX),
+            year: Cell::new(100),
+            source: Cell::new("live"),
+        };
+        assert_eq!(
+            tick(&f, &s, &seen, NOW),
+            HistoryWrite::Skipped("initial pass in progress")
+        );
+        f.gen.set(1);
+        // Persisted (not live) ranking is never recorded.
+        f.source.set("persisted");
+        assert_eq!(
+            tick(&f, &s, &seen, NOW),
+            HistoryWrite::Skipped("no live ranking")
+        );
+        f.source.set("live");
+        // Coverage below 95%: waits, and since_pass counts from the first completed tick.
+        f.year.set(94);
+        assert_eq!(
+            tick(&f, &s, &seen, NOW + 1),
+            HistoryWrite::Skipped("waiting for year charts")
+        );
+        assert_eq!(
+            tick(&f, &s, &seen, NOW + HISTORY_YEAR_WAIT_SECS - 1),
+            HistoryWrite::Skipped("waiting for year charts")
+        );
+        let w = tick(&f, &s, &seen, NOW + HISTORY_YEAR_WAIT_SECS);
+        assert!(
+            matches!(
+                w,
+                HistoryWrite::Recorded {
+                    rows: 2,
+                    trigger: "interval",
+                    ..
+                }
+            ),
+            "{w:?}"
+        );
+        // A new generation restarts since_pass.
+        f.gen.set(2);
+        let t = NOW + HISTORY_YEAR_WAIT_SECS + H6;
+        assert_eq!(
+            tick(&f, &s, &seen, t),
+            HistoryWrite::Skipped("waiting for year charts")
+        );
+        // Exactly 95% coverage is enough.
+        f.year.set(95);
+        assert!(matches!(
+            tick(&f, &s, &seen, t),
+            HistoryWrite::Recorded { .. }
+        ));
+        // Interval from score_runs, and a repeated run id is a no-op.
+        assert_eq!(
+            tick(&f, &s, &seen, t + 60),
+            HistoryWrite::Skipped("interval not elapsed")
+        );
+        let ok = ScoreHistoryStore::open_in_memory().unwrap();
+        let seen2 = Mutex::new(None);
+        assert!(matches!(
+            tick(&f, &ok, &seen2, t),
+            HistoryWrite::Recorded { .. }
+        ));
+        assert_eq!(ok.counts().unwrap(), (1, 2));
     }
 }

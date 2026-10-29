@@ -68,8 +68,14 @@ jobs:
           (cd apps/windows/src-tauri && cargo test --no-default-features --lib android_)
           python3 tools/android-jvm-parity/diff_headless.py replay \
             shared/contracts/android-jvm-parity-recorded.json "${{ runner.temp }}/replay/opps.json"
-      - name: V3.1 shadow + score history unit tests (opportunity_v31, score_history, score_shadow_report)
+      - name: Score history (append-only guard, backups, restore, headless endpoint)
+        run: |
+          cd apps/windows/src-tauri
+          cargo test --no-default-features --lib score_history
+          cargo test --no-default-features --lib history_tick
+          cargo test --no-default-features --bin vantage-headless
+      - name: V3.1 shadow unit tests (opportunity_v31, score_shadow_report)
         run: |
           cd apps/windows/src-tauri
           cargo test --no-default-features --lib opportunity_v31
-          cargo test --no-default-features --lib score_
+          cargo test --no-default-features --lib score_shadow_report
