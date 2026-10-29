@@ -287,7 +287,7 @@ mod tests {
     use chrono::Datelike;
 
     fn row(sym: &str, price: f64, shadow: &str) -> crate::headless::RankedRow {
-        let mut g = crate::opportunity_v31::shadow_grid(Some("Act"), 40, Some(0), Some(0.0));
+        let mut g = crate::opportunity_v31::shadow_grid(Some("Act"), 40, Some(0), Some(0.0), false);
         for v in &mut g {
             v.shadow_decision = Some(shadow.to_string());
         }

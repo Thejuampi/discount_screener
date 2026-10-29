@@ -3,6 +3,8 @@
 Status: **shadow only** (Juan, 2026-10-29: observe before picking a default). The official
 Act/Watch/Avoid decision, ranking and `rule_version` (`V3`) are exactly V3 on Android and headless.
 V3.1 is computed next to it for a fixed grid of configs and recorded for later evaluation.
+**The m bound (and λ_M) is undecided.** Shadow mode exists to observe the grid on real forward
+returns before any default is chosen; nothing here is a recommendation.
 
 ## Shadow rule (per config)
 
@@ -14,8 +16,20 @@ shadow   = Watch  if official == Act and S_adj < 30
 ```
 
 S = V3 composite, T = V3 technical bucket, histogram = MACD(12,26) − signal(9) of the Year
-(`1y`/`1wk`) chart summary in cents (rounded half-even on both sides), close = that summary's
-latest close. λ_T = 1.5 for every config.
+(`1y`/`1wk`) chart, close = that summary's latest close (cents). λ_T = 1.5 for every config.
+
+- **Unrounded histogram.** The shadow uses the unrounded histogram (`histogramRawCents` /
+  `histogram_raw_cents`), never the official rounded `histogramCents`. That matters because the two
+  sides round the official cents differently (Kotlin `roundToLong` is half-up, Rust `round_even`
+  is half-even). Using raw values keeps the shadow identical on both sides, within 1e-9. The
+  official rounded field and its rounding are unchanged.
+- **Warm-up.** With fewer than 35 weekly bars (26 + 9 for MACD + signal), m is null, `warmup` is
+  true, and no momentum penalty applies. The T term still applies. The flag is stored per row.
+- **Partial week.** The last weekly bar is the current, possibly incomplete, week, exactly as the
+  official V3 technicals see it. So m can move intra-week. Each recorded run captures the value
+  at its own time.
+- **Missing inputs.** A missing T, missing m, or a summary from before `histogramRawCents` existed
+  gives no penalty for that term.
 
 ## Config grid (stable ids — append only, never renumber)
 
@@ -44,15 +58,18 @@ at 0.05 for < 10%.
 | inputs | `ProjectedOpportunityDecisionFacts.technicalScore`, `.macdHistogramRatio` (never read by the official decision) | `technical`, `histogram_ratio(year)` |
 | storage | none (Android has no score-history store; it computes shadow values for parity only) | `score_shadow` in `history.sqlite` |
 
-JSON: rows gain an optional `shadow` array (`config_id, bound, lambda_t, lambda_m, m, s_adj,
-shadow_decision`); no existing field changes and `/ranking` is unchanged otherwise.
+JSON: rows gain an optional `shadow` array (`rule_version` (`V3.1-shadow`), `config_id, bound,
+lambda_t, lambda_m, m, warmup, s_adj, shadow_decision`). Every row carries its own provenance; no existing field changes and `/ranking` is unchanged otherwise.
 
 ## Parity
 
-`tools/android-jvm-parity/diff_headless.py` checks `SHADOW_RULE_VERSION`, `LAMBDA_T`,
-`ACT_THRESHOLD` and the full config list (ids, bounds, λ_M, order) in both sources, compares all
-official fields exactly as before, and compares every shadow config per row (`m`, `sAdj` within
-1e-9; `shadowDecision` exact).
+`tools/android-jvm-parity/diff_headless.py` runs three checks, and a mismatch in any of them fails parity:
+
+1. **Source check.** `SHADOW_RULE_VERSION`, `LAMBDA_T`, `ACT_THRESHOLD`, `MIN_WEEKLY_BARS` and the full config list (ids, bounds, λ_M, order) must match between the two source files.
+2. **Runtime check.** The constants each side actually uses are compared: `v31_constants.json`, which the Kotlin parity run writes, against the headless dump test's output.
+3. **Row check.** All official fields are compared exactly, as before. Every shadow config is compared per row: `m` and `sAdj` within 1e-9; `ruleVersion`, `configId`, `bound`, `lambdaT`, `lambdaM`, `warmup` and `shadowDecision` exactly.
+
+Mutating a Kotlin default (a bound, λ_T, or the clip) fails parity. Unit tests on both sides pin λ_M (S=40, T=0, m=−1 → 40·e^−λ_M for every config) and λ_T. They also kill these mutations: dropping max(0,·), clip ±0.5, no clip, no clamp, and a changed bound. S_adj = 30 stays Act. CI runs the `opportunity_v31` and `score_` tests.
 
 ## Evaluation
 

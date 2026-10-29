@@ -188,6 +188,7 @@ class HeadlessV3ParityGoldenTest {
                     it.compositeScore,
                     it.technicalScore,
                     com.discountscreener.core.engine.V31ActAdjustment.histogramRatio(charts[it.symbol]?.get(ChartRange.Year)),
+                    com.discountscreener.core.engine.V31ActAdjustment.isWarmup(charts[it.symbol]?.get(ChartRange.Year)),
                 )
             },
             chartSummariesBySymbol = charts,

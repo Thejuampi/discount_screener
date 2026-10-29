@@ -25,7 +25,9 @@ def rust_rank(fixture):
     json.dump(fx, open(fin, "w"))
     subprocess.run(["cargo", "test", "-q", "--no-default-features", "--lib", "dump_fixture_ranking", "--", "--ignored"],
                    cwd=os.path.join(ROOT, "apps/windows/src-tauri"), check=True,
-                   env=dict(os.environ, FIXTURE_IN=fin, FIXTURE_OUT=fout), stdout=subprocess.DEVNULL)
+                   env=dict(os.environ, FIXTURE_IN=fin, FIXTURE_OUT=fout,
+                            FIXTURE_CONSTANTS_OUT=os.path.join(d, "v31_constants.json")), stdout=subprocess.DEVNULL)
+    RUST_CONSTANTS[0] = json.load(open(os.path.join(d, "v31_constants.json")))
     return [dict(symbol=r["symbol"], composite=r["composite_score"], coverage=r["coverage"],
                  fundamentals=r["fundamentals"], technicals=r["technical"], forecast=r["forecast"],
                  rowConfidence=CAP[r["row_confidence"]], projectedConfidence=CAP[r["confidence"]],
@@ -58,7 +60,7 @@ V31_RS = "apps/windows/src-tauri/src/opportunity_v31.rs"
 def shadow_camel(grid):
     if grid is None:
         return None
-    return [dict(configId=g["config_id"], bound=g["bound"], lambdaT=g["lambda_t"], lambdaM=g["lambda_m"],
+    return [dict(ruleVersion=g.get("rule_version"), configId=g["config_id"], warmup=g.get("warmup"), bound=g["bound"], lambdaT=g["lambda_t"], lambdaM=g["lambda_m"],
                  m=g["m"], sAdj=g["s_adj"], shadowDecision=g["shadow_decision"]) for g in grid]
 
 def v31_constants():
@@ -66,7 +68,7 @@ def v31_constants():
     import re
     kt, rs = open(os.path.join(ROOT, V31_KT)).read(), open(os.path.join(ROOT, V31_RS)).read()
     bad = []
-    for n in ("SHADOW_RULE_VERSION", "LAMBDA_T", "ACT_THRESHOLD"):
+    for n in ("SHADOW_RULE_VERSION", "LAMBDA_T", "ACT_THRESHOLD", "MIN_WEEKLY_BARS"):
         k = re.search(rf"const val {n} = (\S+)", kt)
         r = re.search(rf"pub const V31_{n}: [^=]+= ([^;]+);", rs)
         kv, rv = (k.group(1).strip('"') if k else None), (r.group(1).strip('"') if r else None)
@@ -106,6 +108,20 @@ def shadow_diff(sym, ka, ra, ids):
 
 
 SHADOW_IDS = []
+RUST_CONSTANTS = [None]
+
+def runtime_constants(kotlin_path):
+    """Runtime constants: Kotlin (v31_constants.json next to opps.json) vs headless (dump test).
+    Covers rule version, λ_T, threshold, warm-up bars and every config's id/bound/λ_M."""
+    kp = os.path.join(os.path.dirname(os.path.abspath(kotlin_path)), "v31_constants.json")
+    if not os.path.exists(kp):
+        print(f"  runtime constants: MISSING {kp}")
+        return ["runtime constants missing"]
+    k, r = json.load(open(kp)), RUST_CONSTANTS[0]
+    ok = k == r
+    print(f"  runtime constants: android={json.dumps(k, sort_keys=True)}\n"
+          f"                     headless={json.dumps(r, sort_keys=True)}" + ("" if ok else "  MISMATCH"))
+    return [] if ok else ["runtime constants differ"]
 
 def diff(kotlin, rust):
     out, gaps, shadow_rows = [], 0, [0]
@@ -149,4 +165,6 @@ if __name__ == "__main__":
     mode = sys.argv[1]
     kotlin = json.load(open(sys.argv[3] if mode == "replay" else sys.argv[2]))
     rust = rust_rank(sys.argv[2]) if mode == "replay" else from_ranking(sys.argv[3])
-    sys.exit(1 if diff(kotlin, rust) and mode == "replay" else 0)
+    rc_bad = runtime_constants(sys.argv[3]) if mode == "replay" else []
+    out = diff(kotlin, rust)
+    sys.exit(1 if (out or rc_bad) and mode == "replay" else 0)

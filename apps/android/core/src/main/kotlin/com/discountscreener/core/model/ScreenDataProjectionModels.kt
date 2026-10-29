@@ -32,16 +32,20 @@ data class ProjectedOpportunityDecisionFacts(
     val technicalScore: Int? = null,
     /** SHADOW input only (V3.1): Year-chart MACD histogram / close. Never read by the official decision. */
     val macdHistogramRatio: Double? = null,
+    /** SHADOW input only (V3.1): Year series has < 35 weekly bars, so m is null with no penalty. */
+    val macdWarmup: Boolean = false,
 )
 
 /** One V3.1 shadow config result. Diagnostic only: never drives the official decision or ranking. */
 @Serializable
 data class ProjectedShadowDecision(
+    val ruleVersion: String,
     val configId: String,
     val bound: Double,
     val lambdaT: Double,
     val lambdaM: Double,
     val m: Double?,
+    val warmup: Boolean,
     val sAdj: Double,
     val shadowDecision: ProjectedRowDecision?,
 )

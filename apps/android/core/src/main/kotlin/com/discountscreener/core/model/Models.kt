@@ -914,6 +914,8 @@ data class ChartRangeSummary(
     val plusDi: Double? = null,
     /** Wilder −DI at the latest bar. Null whenever [adx] is. */
     val minusDi: Double? = null,
+    /** Unrounded MACD histogram in cents. V3.1 shadow input only; [histogramCents] stays official. */
+    val histogramRawCents: Double? = null,
 )
 
 /**

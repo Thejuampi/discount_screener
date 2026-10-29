@@ -127,11 +127,13 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
 CREATE TABLE IF NOT EXISTS score_shadow (
     run_id          TEXT NOT NULL REFERENCES score_runs(run_id),
     ticker          TEXT NOT NULL,
+    rule_version    TEXT NOT NULL,
     config_id       TEXT NOT NULL,
     bound           REAL NOT NULL,
     lambda_t        REAL NOT NULL,
     lambda_m        REAL NOT NULL,
     m               REAL,
+    warmup          INTEGER NOT NULL,
     s_adj           REAL NOT NULL,
     shadow_decision TEXT,
     PRIMARY KEY (run_id, ticker, config_id)
@@ -484,8 +486,9 @@ impl ScoreHistoryStore {
             // V3.1 shadow grid, same transaction as the official rows (all or nothing).
             let mut st = tx
                 .prepare(
-                    "INSERT OR IGNORE INTO score_shadow (run_id, ticker, config_id, bound, lambda_t, \
-                     lambda_m, m, s_adj, shadow_decision) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    "INSERT OR IGNORE INTO score_shadow (run_id, ticker, rule_version, config_id, bound, \
+                     lambda_t, lambda_m, m, warmup, s_adj, shadow_decision) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 )
                 .map_err(err)?;
             for r in &good {
@@ -493,11 +496,13 @@ impl ScoreHistoryStore {
                     st.execute(params![
                         run_id,
                         r.symbol,
+                        v.rule_version,
                         v.config_id,
                         v.bound,
                         v.lambda_t,
                         v.lambda_m,
                         v.m.filter(|x| x.is_finite()),
+                        v.warmup,
                         v.s_adj,
                         v.shadow_decision,
                     ])
@@ -1173,6 +1178,7 @@ mod tests {
             30,
             Some(0),
             Some(0.0),
+            false,
         ));
         s.record_run(&meta(1), &[r]).unwrap();
         assert_eq!(s.shadow_count().unwrap(), 6);
@@ -1523,6 +1529,7 @@ mod tests {
             36,
             Some(-20),
             Some(-0.0307),
+            false,
         ));
         let w = row("ZZZ", "Watch", 20, 60, 0, 30); // no grid: no shadow rows
         s.record_run(&meta(1), &[a.clone(), w]).unwrap();
@@ -1546,6 +1553,22 @@ mod tests {
             .map(|c| c.id.to_string())
             .collect();
         assert_eq!(ids, want);
+        // Provenance per row: rule version, parameters and warm-up flag.
+        let prov: Vec<(String, f64, f64, f64, i64)> = c
+            .prepare(
+                "SELECT rule_version, bound, lambda_t, lambda_m, warmup FROM score_shadow \
+                 ORDER BY config_id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for (p, c) in prov.iter().zip(crate::opportunity_v31::V31_SHADOW_CONFIGS) {
+            assert_eq!(p, &("V3.1-shadow".to_string(), c.bound, 1.5, c.lambda_m, 0));
+        }
     }
 
     #[test]

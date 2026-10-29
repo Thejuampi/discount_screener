@@ -8,7 +8,7 @@ consistently; that is the evidence for choosing a default (or none).
 
 `history.sqlite` (headless, #67 + this PR): `score_runs` (profile, model, captured_at),
 `score_history` (official decision, `price_cents` per symbol per run), `score_shadow`
-(per run × ticker × config_id: m, s_adj, shadow_decision). Shadow rows are written in the same
+(per run × ticker × config_id: rule_version, bound, λ_T, λ_M, m, warmup, s_adj, shadow_decision). Shadow rows are written in the same
 transaction as the official run, so every shadow row has its official row and price.
 
 ## Method (`vantage-headless history-shadow-report`)

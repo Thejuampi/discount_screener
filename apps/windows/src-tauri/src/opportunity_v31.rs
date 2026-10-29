@@ -6,7 +6,11 @@
 //!     shadow = Watch if official == Act and S_adj < 30, else official
 //!
 //! T = V3 technical bucket; histogram = MACD(12,26) − signal(9) of the Android Year (`1y`/`1wk`)
-//! summary, in cents. S_adj ≤ S, so the shadow can only demote Act. Mirror of Kotlin
+//! summary, UNROUNDED (`histogram_raw_cents`, never the rounded `histogram_cents`, so the
+//! Rust round-half-even vs Kotlin round-half-up difference cannot reach the shadow). The last
+//! weekly bar is the current, possibly partial, week (same as the official technicals).
+//! Warm-up: with fewer than [`V31_MIN_WEEKLY_BARS`] bars (26 + 9 for MACD + signal) m is null,
+//! `warmup` is true and no momentum penalty applies; the T term still applies. S_adj ≤ S, so the shadow can only demote Act. Mirror of Kotlin
 //! `V31ActAdjustment` (apps/android/core); `tools/android-jvm-parity/diff_headless.py` checks the
 //! constants and the config list match.
 
@@ -16,6 +20,7 @@ use serde::{Deserialize, Serialize};
 pub const V31_SHADOW_RULE_VERSION: &str = "V3.1-shadow";
 pub const V31_LAMBDA_T: f64 = 1.5;
 pub const V31_ACT_THRESHOLD: f64 = 30.0;
+pub const V31_MIN_WEEKLY_BARS: usize = 35;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadowConfig {
@@ -61,21 +66,36 @@ pub const V31_SHADOW_CONFIGS: [ShadowConfig; 6] = [
 /// One shadow config result. Diagnostic only: never drives the official decision or ranking.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShadowValue {
+    pub rule_version: String,
     pub config_id: String,
     pub bound: f64,
     pub lambda_t: f64,
     pub lambda_m: f64,
     pub m: Option<f64>,
+    /// True when m is null because the Year series is still warming up (< 35 weekly bars).
+    pub warmup: bool,
     pub s_adj: f64,
     pub shadow_decision: Option<String>,
 }
 
-/// histogram / close of the Year summary; `None` when either is missing (close must be > 0).
-pub fn histogram_ratio(summary: Option<&AndroidChartSummary>) -> Option<f64> {
-    let s = summary?;
-    let hist = s.histogram_cents?;
-    let close = s.latest_close_cents.filter(|c| *c > 0)?;
-    Some(hist as f64 / close as f64)
+/// Momentum input from the Year summary: (unrounded histogram / close, warm-up flag).
+/// The ratio is `None` when the summary, the raw histogram or a positive close is missing, or
+/// during warm-up.
+pub fn momentum_input(summary: Option<&AndroidChartSummary>) -> (Option<f64>, bool) {
+    let Some(s) = summary else {
+        return (None, false);
+    };
+    if s.candle_count < V31_MIN_WEEKLY_BARS {
+        return (None, true);
+    }
+    let ratio = match (
+        s.histogram_raw_cents,
+        s.latest_close_cents.filter(|c| *c > 0),
+    ) {
+        (Some(h), Some(c)) if h.is_finite() => Some(h / c as f64),
+        _ => None,
+    };
+    (ratio, false)
 }
 
 pub fn momentum(ratio: Option<f64>, bound: f64) -> Option<f64> {
@@ -108,18 +128,22 @@ pub fn shadow_grid(
     composite: i32,
     technical: Option<i32>,
     ratio: Option<f64>,
+    warmup: bool,
 ) -> Vec<ShadowValue> {
+    let ratio = if warmup { None } else { ratio };
     V31_SHADOW_CONFIGS
         .iter()
         .map(|c| {
             let m = momentum(ratio, c.bound);
             let s_adj = adjusted_score(composite, technical, m, V31_LAMBDA_T, c.lambda_m);
             ShadowValue {
+                rule_version: V31_SHADOW_RULE_VERSION.to_string(),
                 config_id: c.id.to_string(),
                 bound: c.bound,
                 lambda_t: V31_LAMBDA_T,
                 lambda_m: c.lambda_m,
                 m,
+                warmup,
                 s_adj,
                 shadow_decision: shadow_decision(official, s_adj).map(str::to_string),
             }
@@ -203,10 +227,137 @@ mod tests {
         assert_eq!(shadow_decision(Some("Avoid"), 1.0), Some("Avoid"));
         assert_eq!(shadow_decision(Some("Watch"), 99.0), Some("Watch"));
         assert_eq!(shadow_decision(None, 1.0), None);
-        let g = shadow_grid(Some("Act"), 36, Some(-20), Some(-87.0 / 2833.0));
+        let g = shadow_grid(Some("Act"), 36, Some(-20), Some(-87.0 / 2833.0), false);
         assert_eq!(g.len(), 6);
         assert!(g
             .iter()
             .all(|v| v.shadow_decision.as_deref() == Some("Watch")));
+    }
+
+    fn summary(
+        n: usize,
+        raw: Option<f64>,
+        rounded: Option<i64>,
+        close: i64,
+    ) -> AndroidChartSummary {
+        AndroidChartSummary {
+            candle_count: n,
+            latest_close_cents: Some(close),
+            ema20_cents: None,
+            ema50_cents: None,
+            ema200_cents: None,
+            macd_cents: None,
+            signal_cents: None,
+            histogram_cents: rounded,
+            histogram_raw_cents: raw,
+            latest_wilder_rsi: None,
+            latest_rsi_slope: None,
+            volume_ratio_hundredths: None,
+        }
+    }
+
+    /// Pins the exact config list AND the defaults (kills "bound changed" / "λ changed").
+    #[test]
+    fn pinned_constants_and_config_values() {
+        assert_eq!(V31_SHADOW_RULE_VERSION, "V3.1-shadow");
+        assert_eq!(V31_LAMBDA_T, 1.5);
+        assert_eq!(V31_ACT_THRESHOLD, 30.0);
+        assert_eq!(V31_MIN_WEEKLY_BARS, 35);
+        let got: Vec<_> = V31_SHADOW_CONFIGS
+            .iter()
+            .map(|c| (c.id, c.bound, c.lambda_m))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("b0050_lm015", 0.005, 0.15),
+                ("b0050_lm030", 0.005, 0.30),
+                ("b0200_lm015", 0.02, 0.15),
+                ("b0200_lm030", 0.02, 0.30),
+                ("b0500_lm015", 0.05, 0.15),
+                ("b0500_lm030", 0.05, 0.30),
+            ]
+        );
+    }
+
+    /// λ_M pin: S=40, T=0, m=-1 → 40·e^(−λ_M), for every config (and its provenance fields).
+    #[test]
+    fn lambda_m_pinned_per_config() {
+        // ratio = -1 → m = -1 at every bound.
+        let g = shadow_grid(Some("Act"), 40, Some(0), Some(-1.0), false);
+        for (v, c) in g.iter().zip(V31_SHADOW_CONFIGS) {
+            assert_eq!(v.m, Some(-1.0));
+            assert!(
+                (v.s_adj - 40.0 * (-c.lambda_m).exp()).abs() < 1e-12,
+                "{}",
+                c.id
+            );
+            assert_eq!(
+                (v.config_id.as_str(), v.bound, v.lambda_m, v.lambda_t),
+                (c.id, c.bound, c.lambda_m, 1.5)
+            );
+            assert_eq!(v.rule_version, "V3.1-shadow");
+        }
+        assert!((g[1].s_adj - 40.0 * (-0.3f64).exp()).abs() < 1e-12);
+        assert!((g[0].s_adj - 40.0 * (-0.15f64).exp()).abs() < 1e-12);
+    }
+
+    /// λ_T pin: S=40, m=0, T=-20 → 40·e^(−0.3); T=-100 → 40·e^(−1.5); identical for every config.
+    #[test]
+    fn lambda_t_pinned() {
+        for (t, want) in [
+            (-20, 40.0 * (-0.3f64).exp()),
+            (-100, 40.0 * (-1.5f64).exp()),
+        ] {
+            for v in shadow_grid(Some("Act"), 40, Some(t), Some(0.0), false) {
+                assert!((v.s_adj - want).abs() < 1e-12, "T={t} {}", v.config_id);
+            }
+        }
+    }
+
+    /// Kills "max(0,·) dropped on T": positive T must not raise S.
+    #[test]
+    fn positive_t_never_boosts() {
+        assert_eq!(adjusted_score(40, Some(50), Some(0.0), 1.5, 0.3), 40.0);
+        assert_eq!(adjusted_score(40, Some(0), Some(1.0), 1.5, 0.3), 40.0);
+    }
+
+    /// Kills "clip ±0.5", "no clip" and "no clamp in S_adj".
+    #[test]
+    fn clip_is_exactly_plus_minus_one() {
+        assert_eq!(momentum(Some(-0.75 * 0.02), 0.02), Some(-0.75));
+        assert_eq!(momentum(Some(-3.0 * 0.02), 0.02), Some(-1.0));
+        assert_eq!(momentum(Some(3.0 * 0.02), 0.02), Some(1.0));
+        // m beyond -1 passed straight into S_adj is clamped there too.
+        let a = adjusted_score(40, Some(0), Some(-5.0), 1.5, 0.3);
+        assert!((a - 40.0 * (-0.3f64).exp()).abs() < 1e-12);
+        // Per-bound values (kills a changed bound): ratio -0.01 → m = -1, -0.5, -0.2.
+        let g = shadow_grid(Some("Act"), 40, Some(0), Some(-0.01), false);
+        let ms: Vec<_> = g.iter().map(|v| v.m.unwrap()).collect();
+        for (got, want) in ms.iter().zip([-1.0, -1.0, -0.5, -0.5, -0.2, -0.2]) {
+            assert!((got - want).abs() < 1e-12, "{ms:?}");
+        }
+    }
+
+    #[test]
+    fn warmup_nulls_m_without_penalty_and_raw_histogram_is_used() {
+        let (r, w) = momentum_input(Some(&summary(34, Some(-500.0), Some(-500), 10_000)));
+        assert_eq!((r, w), (None, true));
+        let g = shadow_grid(Some("Act"), 40, Some(0), r, w);
+        assert!(g
+            .iter()
+            .all(|v| v.m.is_none() && v.warmup && v.s_adj == 40.0));
+        // Unrounded: -0.5 cents (rounded would be 0 or -1 depending on the rounding mode).
+        let (r, w) = momentum_input(Some(&summary(35, Some(-0.5), Some(0), 10_000)));
+        assert_eq!((r, w), (Some(-0.5 / 10_000.0), false));
+        assert_eq!(momentum_input(None), (None, false));
+        assert_eq!(
+            momentum_input(Some(&summary(60, None, Some(-5), 10_000))),
+            (None, false)
+        );
+        // A grid called with warmup ignores any ratio.
+        assert!(shadow_grid(Some("Act"), 40, Some(0), Some(-1.0), true)
+            .iter()
+            .all(|v| v.m.is_none() && v.s_adj == 40.0));
     }
 }

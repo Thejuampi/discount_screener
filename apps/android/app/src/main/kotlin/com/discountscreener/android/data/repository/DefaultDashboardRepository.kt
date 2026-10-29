@@ -3211,6 +3211,7 @@ class DefaultDashboardRepository(
                 compositeScore = row.compositeScore,
                 technicalScore = row.technicalScore,
                 macdHistogramRatio = V31ActAdjustment.histogramRatio(chartSummaries[row.symbol]?.get(ChartRange.Year)),
+                macdWarmup = V31ActAdjustment.isWarmup(chartSummaries[row.symbol]?.get(ChartRange.Year)),
             )
         }
 

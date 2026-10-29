@@ -57,6 +57,8 @@ counts those separately instead of failing.
 ## V3.1 shadow
 
 `opps.json` rows carry an optional `shadow` array (one entry per `V31ActAdjustment.SHADOW_CONFIGS`).
-`diff_headless.py` first checks the shadow constants and the config list match between
-`V31ActAdjustment.kt` and `opportunity_v31.rs`, compares official fields exactly as before, then each
-shadow config per row (`m`/`sAdj` tol 1e-9, `shadowDecision` exact).
+`diff_headless.py` first checks that the shadow constants and the config list match. It checks
+both the source of `V31ActAdjustment.kt` vs `opportunity_v31.rs` and the runtime values
+(`v31_constants.json`, written next to `opps.json`, vs the headless dump). It then compares
+official fields exactly, as before, and then each shadow config per row: `m`/`sAdj` within
+tolerance 1e-9, everything else (rule version, bound, λs, warm-up, decision) exactly.

@@ -54,11 +54,13 @@ transaction as the official `score_runs`/`score_history` rows.
 |---|---|---|
 | run_id | TEXT NOT NULL | → score_runs.run_id |
 | ticker | TEXT NOT NULL | = score_history.symbol |
+| rule_version | TEXT NOT NULL | `V3.1-shadow` |
 | config_id | TEXT NOT NULL | e.g. `b0200_lm030` (see docs/architecture/decision-rule-v3-1.md) |
 | bound | REAL NOT NULL | |
 | lambda_t | REAL NOT NULL | |
 | lambda_m | REAL NOT NULL | |
-| m | REAL | null when histogram/close missing |
+| m | REAL | null when the raw histogram/close is missing or during warm-up |
+| warmup | INTEGER NOT NULL | 1 when the Year series has < 35 weekly bars (m null, no penalty) |
 | s_adj | REAL NOT NULL | |
 | shadow_decision | TEXT | Act/Watch/Avoid; only ever differs from the official decision as Act → Watch |
 

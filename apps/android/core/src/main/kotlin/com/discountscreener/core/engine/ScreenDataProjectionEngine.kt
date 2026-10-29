@@ -220,7 +220,7 @@ class ScreenDataProjectionEngine {
     ): List<ProjectedShadowDecision>? {
         if (scoringModel != OpportunityScoringModel.AggressiveV3) return null
         val composite = facts.compositeScore ?: return null
-        return V31ActAdjustment.grid(official, composite, facts.technicalScore, facts.macdHistogramRatio)
+        return V31ActAdjustment.grid(official, composite, facts.technicalScore, facts.macdHistogramRatio, facts.macdWarmup)
     }
 
     private fun projectedDetail(request: ScreenDataProjectionRequest): ProjectedDetailData? {

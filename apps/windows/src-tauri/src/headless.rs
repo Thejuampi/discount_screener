@@ -964,12 +964,11 @@ pub fn rank_android_v3(
                     projection_gap: p.projection_gap.map(str::to_string),
                     fundamentals_signals: sig,
                     // V3.1 shadow, computed from the official decision; never feeds back.
-                    shadow: Some(crate::opportunity_v31::shadow_grid(
-                        p.decision,
-                        composite,
-                        t,
-                        crate::opportunity_v31::histogram_ratio(r.year.as_ref()),
-                    )),
+                    shadow: Some({
+                        let (ratio, warmup) =
+                            crate::opportunity_v31::momentum_input(r.year.as_ref());
+                        crate::opportunity_v31::shadow_grid(p.decision, composite, t, ratio, warmup)
+                    }),
                 },
                 confidence_rank(row.confidence),
             )
@@ -1721,6 +1720,20 @@ mod android_parity_tests {
         };
         let rows = rank_fixture_at(std::path::Path::new(&inp));
         std::fs::write(out, serde_json::to_vec(&rows).unwrap()).unwrap();
+        // Runtime V3.1 shadow constants, compared with the Kotlin runtime ones by diff_headless.
+        if let Ok(path) = std::env::var("FIXTURE_CONSTANTS_OUT") {
+            use crate::opportunity_v31::*;
+            let c = serde_json::json!({
+                "ruleVersion": V31_SHADOW_RULE_VERSION,
+                "lambdaT": V31_LAMBDA_T,
+                "actThreshold": V31_ACT_THRESHOLD,
+                "minWeeklyBars": V31_MIN_WEEKLY_BARS,
+                "configs": V31_SHADOW_CONFIGS.iter().map(|c| serde_json::json!({
+                    "id": c.id, "bound": c.bound, "lambdaM": c.lambda_m,
+                })).collect::<Vec<_>>(),
+            });
+            std::fs::write(path, serde_json::to_vec(&c).unwrap()).unwrap();
+        }
     }
 
     /// The golden must actually exercise every sort key, or mutating one would
