@@ -2488,4 +2488,122 @@ mod full_universe_parity_tests {
             }
         }
     }
+
+    fn sha_hex(b: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
+    }
+
+    /// Release-candidate driver (ignored; run by the RC's try.sh). Env:
+    /// RC_SNAPSHOT (optional snapshot copy, else the test fixture), RC_N (symbols),
+    /// RC_DB (history.sqlite to create), RC_RUNS (runs), RC_CHANGE (fraction of rows whose
+    /// price changes between runs). Prints one JSON line per run.
+    #[test]
+    #[ignore]
+    fn rc_full_universe() {
+        use crate::score_history::{RunMeta, ScoreHistoryStore};
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let base = match env("RC_SNAPSHOT") {
+            Some(p) => OpportunitySnapshot::load(Path::new(&p)).unwrap(),
+            None => OpportunitySnapshot::capture(
+                &crate::commands::opportunity_projection_tests::fixture_state(),
+                "sp500",
+            ),
+        };
+        let n: usize = env("RC_N").map_or(501, |v| v.parse().unwrap());
+        let runs: usize = env("RC_RUNS").map_or(2, |v| v.parse().unwrap());
+        let change: f64 = env("RC_CHANGE").map_or(1.0, |v| v.parse().unwrap());
+        let db = PathBuf::from(env("RC_DB").expect("RC_DB"));
+        // Universe: n symbols; ~1% are never loaded, one has an invalid price.
+        let missing = (n / 100).max(1);
+        let mut snap = OpportunitySnapshot {
+            profile: "sp500".into(),
+            captured_at_epoch: 1_793_538_000,
+            rows: Vec::new(),
+        };
+        for k in 0..n - missing {
+            let mut r = base.rows[k % base.rows.len()].clone();
+            r.row.symbol = format!("SYN{k:04}");
+            snap.rows.push(r);
+        }
+        snap.rows[n - missing - 1].row.market_price_cents = 0;
+        let universe: Vec<String> = (0..n).map(|k| format!("SYN{k:04}")).collect();
+        let store = ScoreHistoryStore::open(&db, None).unwrap();
+        for run in 0..runs {
+            if run > 0 {
+                let m = (snap.rows.len() as f64 * change) as usize;
+                for r in snap.rows.iter_mut().take(m) {
+                    if r.row.market_price_cents > 0 {
+                        r.row.market_price_cents += 1;
+                    }
+                }
+                snap.captured_at_epoch += 6 * 3600;
+            }
+            let (ranked, eval) = run_evaluation(&snap, Some(&universe), &universe).unwrap();
+            let main = rank_android_v3_main(&snap, Some(&universe));
+            let meta = RunMeta {
+                captured_at: snap.captured_at_epoch,
+                profile: "sp500".into(),
+                model: HISTORY_MODEL.into(),
+                semantics: "android".into(),
+                market_context: false,
+                binary_version: "rc".into(),
+                trigger: "interval".into(),
+                symbols_total: n,
+                incomplete_symbols: vec![],
+            };
+            store
+                .record_run_full(&meta, &android_to_ranked(&ranked), Some(&eval))
+                .unwrap();
+            let id = meta.run_id();
+            let rebuilt = store.reconstruct_snapshot(&id).unwrap();
+            let original = serde_json::to_vec(&snap).unwrap();
+            let st = store.run_stats(&id).unwrap().unwrap();
+            let rows = store.evaluations(&id).unwrap().len();
+            println!(
+                "RC {}",
+                serde_json::json!({
+                    "run": run, "run_id": id, "universe": n, "evaluation_rows": rows,
+                    "stats": st,
+                    "ranking_sha256_branch": sha_hex(&serde_json::to_vec(&ranked).unwrap()),
+                    "ranking_sha256_main": sha_hex(&serde_json::to_vec(&main).unwrap()),
+                    "ranked_rows": ranked.len(),
+                    "snapshot_bytes": original.len(),
+                    "snapshot_sha256": sha_hex(&original),
+                    "reconstructed_sha256": sha_hex(&rebuilt),
+                    "reconstruction_byte_identical": rebuilt == original,
+                })
+            );
+            assert_eq!(rows, n);
+            assert!(rebuilt == original);
+            assert_eq!(
+                serde_json::to_vec(&ranked).unwrap(),
+                serde_json::to_vec(&main).unwrap()
+            );
+        }
+        drop(store);
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        let sz = |t: &str| -> i64 {
+            c.query_row(
+                "SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name LIKE ?1",
+                [format!("{t}%")],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1)
+        };
+        println!(
+            "RC_SIZE {}",
+            serde_json::json!({
+                "db_bytes": std::fs::metadata(&db).unwrap().len(),
+                "score_inputs": sz("score_inputs"), "score_run_inputs": sz("score_run_inputs"),
+                "score_evaluations": sz("score_evaluations"), "score_run_stats": sz("score_run_stats"),
+                "score_history": sz("score_history"), "runs": runs, "change": change,
+            })
+        );
+    }
 }
