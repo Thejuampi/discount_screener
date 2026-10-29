@@ -1,8 +1,9 @@
 //! Score history: one snapshot per recorded feed run per ticker. **Append-only.**
 //!
 //! Lives inside the app database, `<data-dir>/history.sqlite` (the same file the desktop
-//! app and headless use), in additive tables: `score_runs`, `score_history` and the
-//! migration log `score_history_migrations`.
+//! app and headless use), in additive tables: `score_runs`, `score_history`, the V3.1
+//! shadow grid `score_shadow` (migration v3, PR #68) and the migration log
+//! `score_history_migrations`.
 //!
 //! Protections (see `docs/product/score-history.md`):
 //! - No retention, pruning or TTL. `BEFORE DELETE` / `BEFORE UPDATE` triggers abort, and
@@ -38,9 +39,14 @@ use crate::headless::RankedRow;
 pub const SCORE_RULE_VERSION: &str = "V3";
 
 /// Highest score-history migration this binary knows.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 /// Tables exported to backups and merged on restore.
-pub const HISTORY_TABLES: [&str; 3] = ["score_runs", "score_history", "score_history_migrations"];
+pub const HISTORY_TABLES: [&str; 4] = [
+    "score_runs",
+    "score_history",
+    "score_history_migrations",
+    "score_shadow",
+];
 /// Tables the source guard protects (includes the planned shadow table).
 pub const GUARDED_TABLES: [&str; 4] = [
     "score_runs",
@@ -49,7 +55,7 @@ pub const GUARDED_TABLES: [&str; 4] = [
     "score_shadow",
 ];
 /// Triggers that must exist before the store writes.
-pub const REQUIRED_TRIGGERS: [&str; 9] = [
+pub const REQUIRED_TRIGGERS: [&str; 12] = [
     "score_runs_no_delete",
     "score_runs_no_update",
     "score_runs_no_overwrite",
@@ -59,6 +65,9 @@ pub const REQUIRED_TRIGGERS: [&str; 9] = [
     "score_history_migrations_no_delete",
     "score_history_migrations_no_update",
     "score_history_migrations_no_overwrite",
+    "score_shadow_no_delete",
+    "score_shadow_no_update",
+    "score_shadow_no_overwrite",
 ];
 
 /// Backups go to `--history-backup-dir`, else this env var, else
@@ -165,6 +174,35 @@ WHEN EXISTS (SELECT 1 FROM score_history_migrations WHERE version = NEW.version)
 BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 ",
     ),
+    (
+        3,
+        "
+CREATE TABLE IF NOT EXISTS score_shadow (
+    run_id          TEXT NOT NULL REFERENCES score_runs(run_id),
+    ticker          TEXT NOT NULL,
+    rule_version    TEXT NOT NULL,
+    config_id       TEXT NOT NULL,
+    bound           REAL NOT NULL,
+    lambda_t        REAL NOT NULL,
+    lambda_m        REAL NOT NULL,
+    m               REAL,
+    warmup          INTEGER NOT NULL,
+    s_adj           REAL NOT NULL,
+    shadow_decision TEXT,
+    hist_source     TEXT,
+    PRIMARY KEY (run_id, ticker, config_id)
+);
+CREATE INDEX IF NOT EXISTS score_shadow_config ON score_shadow(config_id, ticker);
+CREATE TRIGGER IF NOT EXISTS score_shadow_no_delete BEFORE DELETE ON score_shadow
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_shadow_no_update BEFORE UPDATE ON score_shadow
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS score_shadow_no_overwrite BEFORE INSERT ON score_shadow
+WHEN EXISTS (SELECT 1 FROM score_shadow WHERE run_id = NEW.run_id AND ticker = NEW.ticker
+             AND config_id = NEW.config_id)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+",
+    ),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -246,7 +284,14 @@ pub struct BackupReport {
     /// -1 when the table is absent (e.g. a pre-migration copy of an older DB).
     pub score_runs: i64,
     pub score_history: i64,
+    /// V3.1 shadow rows; -1 when the table is absent (pre-v3 file).
+    #[serde(default = "absent")]
+    pub score_shadow: i64,
     pub bytes: u64,
+}
+
+fn absent() -> i64 {
+    -1
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -254,6 +299,8 @@ pub struct RestoreReport {
     pub pre_restore_backup: Option<PathBuf>,
     pub runs_added: usize,
     pub rows_added: usize,
+    /// V3.1 shadow rows added (0 for a pre-v3 backup without `score_shadow`).
+    pub shadow_added: usize,
     /// Row counts found in the (verified) backup.
     pub backup_runs: i64,
     pub backup_rows: i64,
@@ -436,6 +483,23 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Result<Vec<String>, String>
                     )?;
                 }
                 Ok(())
+            }
+            "score_shadow" => {
+                if table_count(c, "score_runs") == 0 {
+                    c.execute(
+                        "INSERT INTO score_runs (run_id, captured_at, profile, model, rule_version, \
+                         semantics, market_context, binary_version, trigger, symbols_total, \
+                         symbols_ranked) VALUES ('__selfcheck__',0,'','','','',0,'','',0,0)",
+                        [],
+                    )?;
+                }
+                c.execute(
+                    "INSERT INTO score_shadow (run_id, ticker, rule_version, config_id, bound, \
+                     lambda_t, lambda_m, m, warmup, s_adj, shadow_decision) SELECT run_id, \
+                     '__SELFCHECK__', '', '', 0, 0, 0, NULL, 0, 0, '' FROM score_runs LIMIT 1",
+                    [],
+                )
+                .map(|_| ())
             }
             _ => c
                 .execute(
@@ -620,6 +684,7 @@ pub fn verify_file(path: &Path, require_tables: bool) -> Result<BackupReport, St
         integrity,
         score_runs: count("score_runs"),
         score_history: count("score_history"),
+        score_shadow: count("score_shadow"),
         bytes,
     };
     if require_tables && (rep.score_runs < 0 || rep.score_history < 0) {
@@ -892,6 +957,38 @@ impl ScoreHistoryStore {
                 .map_err(|e| format!("insert {}: {e}", r.symbol))?;
             }
         }
+        if good
+            .iter()
+            .any(|r| r.shadow.as_ref().is_some_and(|g| !g.is_empty()))
+        {
+            // V3.1 shadow grid: plain INSERTs in the same transaction as the official rows.
+            let mut st = tx
+                .prepare(
+                    "INSERT INTO score_shadow (run_id, ticker, rule_version, config_id, bound, \
+                     lambda_t, lambda_m, m, warmup, s_adj, shadow_decision, hist_source) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                )
+                .map_err(err)?;
+            for r in &good {
+                for v in r.shadow.iter().flatten() {
+                    st.execute(params![
+                        run_id,
+                        r.symbol,
+                        v.rule_version,
+                        v.config_id,
+                        v.bound,
+                        v.lambda_t,
+                        v.lambda_m,
+                        v.m.filter(|x| x.is_finite()),
+                        v.warmup,
+                        v.s_adj,
+                        v.shadow_decision,
+                        v.hist_source,
+                    ])
+                    .map_err(|e| format!("insert shadow {} {}: {e}", r.symbol, v.config_id))?;
+                }
+            }
+        }
         tx.commit().map_err(err)?;
         Ok(RecordOutcome::Recorded {
             rows: good.len(),
@@ -976,6 +1073,12 @@ impl ScoreHistoryStore {
         ))
     }
 
+    /// Rows in the V3.1 `score_shadow` table.
+    pub fn shadow_count(&self) -> Result<i64, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        Ok(table_count(&c, "score_shadow"))
+    }
+
     pub fn run_count(&self) -> Result<i64, String> {
         Ok(self.counts()?.0)
     }
@@ -1006,7 +1109,7 @@ impl ScoreHistoryStore {
         }
         let tmp = dest.with_extension(format!("export-{}.tmp", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let (runs, rows) = {
+        let (runs, rows, shadow) = {
             let b = Connection::open(&tmp).map_err(err)?;
             b.execute_batch(MIGRATION_LOG).map_err(err)?;
             for (_, sql) in MIGRATIONS {
@@ -1017,6 +1120,7 @@ impl ScoreHistoryStore {
             let counts = (
                 table_count(&c, "score_runs"),
                 table_count(&c, "score_history"),
+                table_count(&c, "score_shadow"),
             );
             c.execute("ATTACH DATABASE ?1 AS bk", params![tmp.to_string_lossy()])
                 .map_err(err)?;
@@ -1049,7 +1153,18 @@ impl ScoreHistoryStore {
         let zipped = gzip_file(&tmp, dest);
         let _ = std::fs::remove_file(&tmp);
         zipped?;
-        check_backup(dest, runs, rows)
+        let rep = check_backup(dest, runs, rows)?;
+        if rep.score_shadow < shadow {
+            let bad = PathBuf::from(format!("{}.failed", dest.display()));
+            let _ = std::fs::rename(dest, &bad);
+            return Err(format!(
+                "backup {} score_shadow {} < live {shadow} (moved to {})",
+                dest.display(),
+                rep.score_shadow,
+                bad.display()
+            ));
+        }
+        Ok(rep)
     }
 
     /// Daily backup `score-history-YYYY-MM-DD.sqlite.gz` (UTC day of `now`) when missing,
@@ -1274,9 +1389,11 @@ fn remove_all(dir: &Path, names: Vec<String>) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Merged tables and their keys.
-const MERGE_TABLES: [(&str, &[&str]); 2] = [
+const MERGE_TABLES: [(&str, &[&str]); 3] = [
     ("score_runs", &["run_id"]),
     ("score_history", &["run_id", "symbol"]),
+    // Migration v3; optional in the source (a pre-v3 backup has no such table).
+    ("score_shadow", &["run_id", "ticker", "config_id"]),
 ];
 
 /// Columns introduced by migrations after v1, as (version, table, column). An older
@@ -1381,6 +1498,12 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
         }
         let mut sqls = Vec::new();
         for (t, key) in MERGE_TABLES {
+            if t == "score_shadow" && !has_table(&c, "src", t) {
+                if src_v >= 3 {
+                    return Err(format!("backup is schema v{src_v} but has no {t}"));
+                }
+                continue;
+            }
             let cols = merge_columns(&columns(&c, "main", t)?, &columns(&c, "src", t)?, t, src_v)?;
             let list = cols.join(", ");
             let sel = cols
@@ -1412,13 +1535,17 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
     store.export_to(&pre)?;
     rotate_pre_backups(backup_dir)?;
     let c = store.conn.lock().map_err(|_| "lock")?;
-    let merged = (|| -> Result<(usize, usize), String> {
+    let merged = (|| -> Result<(usize, usize, usize), String> {
         c.execute_batch("BEGIN EXCLUSIVE").map_err(err)?;
-        let res = (|| -> rusqlite::Result<(usize, usize)> {
+        let res = (|| -> rusqlite::Result<(usize, usize, usize)> {
             let runs = c.execute(&plan[0], [])?;
             let rows = c.execute(&plan[1], [])?;
+            let shadow = match plan.get(2) {
+                Some(q) => c.execute(q, [])?,
+                None => 0,
+            };
             c.execute_batch("COMMIT")?;
-            Ok((runs, rows))
+            Ok((runs, rows, shadow))
         })();
         res.map_err(|e| {
             let _ = c.execute_batch("ROLLBACK");
@@ -1426,13 +1553,14 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
         })
     })();
     let _ = c.execute("DETACH DATABASE src", []);
-    let (runs_added, rows_added) = merged?;
+    let (runs_added, rows_added, shadow_added) = merged?;
     c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .map_err(err)?;
     Ok(RestoreReport {
         pre_restore_backup: Some(pre),
         runs_added,
         rows_added,
+        shadow_added,
         backup_runs: rep.score_runs,
         backup_rows: rep.score_history,
     })
@@ -1590,6 +1718,7 @@ mod tests {
             regime: None,
             trust_signal: None,
             projection_gap: None,
+            shadow: None,
         }
     }
 
@@ -1663,12 +1792,17 @@ mod tests {
             "score_runs ADD COLUMN note TEXT;".into(),
         ]
         .join(" ");
-        let extra: &[(i64, &str)] = &[MIGRATIONS[0], MIGRATIONS[1], (3, add_col.as_str())];
+        let extra: &[(i64, &str)] = &[
+            MIGRATIONS[0],
+            MIGRATIONS[1],
+            MIGRATIONS[2],
+            (4, add_col.as_str()),
+        ];
         drop(s);
         let s = ScoreHistoryStore::open_with(&p, Some(&bdir), extra).unwrap();
         let bk2 = s.migration_backup.clone().unwrap();
         assert_eq!(verify_file(&bk2, true).unwrap().score_runs, 1);
-        assert_eq!(s.schema_version().unwrap(), 3);
+        assert_eq!(s.schema_version().unwrap(), 4);
         assert_eq!(s.counts().unwrap(), (1, 1));
         let c = Connection::open(&p).unwrap();
         let uv: i64 = c
@@ -1778,8 +1912,16 @@ mod tests {
     fn delete_update_replace_and_upsert_abort() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
         assert!(s.missing_triggers.is_empty());
-        s.record_run(&meta(1), &[row("ADSK", "Act", 30, 60, 0, 30)])
-            .unwrap();
+        let mut r = row("ADSK", "Act", 30, 60, 0, 30);
+        r.shadow = Some(crate::opportunity_v31::shadow_grid(
+            Some("Act"),
+            30,
+            Some(0),
+            Some(0.0),
+            false,
+        ));
+        s.record_run(&meta(1), &[r]).unwrap();
+        assert_eq!(s.shadow_count().unwrap(), 6);
         let c = s.conn.lock().unwrap();
         for t in HISTORY_TABLES {
             let del = format!("{} FROM {t}", "DELETE");
@@ -1989,6 +2131,47 @@ mod tests {
     }
 
     #[test]
+    fn busy_during_probe_with_empty_score_shadow_is_inconclusive_not_failed() {
+        // score_shadow empty => the probe must insert a score_shadow sentinel; a BUSY there
+        // (or anywhere in the probe) is inconclusive (Err), never a reported failure.
+        let dir = tmpdir("busy-shadow");
+        let p = dir.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        s.record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(s.shadow_count().unwrap(), 0);
+        drop(s);
+        let holder = Connection::open(&p).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let c = Connection::open(&p).unwrap();
+        c.busy_timeout(Duration::from_millis(50)).unwrap();
+        // Own transaction: BUSY at BEGIN IMMEDIATE.
+        assert!(trigger_behaviour_failures(&c).is_err());
+        // Caller's (deferred, read) transaction: BUSY inside the probes/sentinels.
+        c.execute_batch("BEGIN").unwrap();
+        let _: i64 = c
+            .query_row("SELECT count(*) FROM score_shadow", [], |r| r.get(0))
+            .unwrap();
+        let r = trigger_behaviour_failures(&c);
+        assert!(r.is_err(), "busy must be inconclusive, got {r:?}");
+        c.execute_batch("ROLLBACK").unwrap();
+        // Store-level: deferred, then passes once the writer is gone; sentinel rolled back.
+        let st = run_selfcheck(&c, trigger_behaviour_failures, 2, Duration::from_millis(20));
+        assert!(matches!(st, SelfCheck::Pending(_)), "{st:?}");
+        holder.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            run_selfcheck(&c, trigger_behaviour_failures, 2, Duration::from_millis(20)),
+            SelfCheck::Passed
+        );
+        assert_eq!(
+            table_count(&c, "score_shadow"),
+            0,
+            "sentinel never persists"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn write_while_still_locked_is_refused_and_writes_nothing() {
         let dir = tmpdir("busy2");
         let p = dir.join("history.sqlite");
@@ -2056,7 +2239,12 @@ mod tests {
             params![version],
         )
         .unwrap();
-        for t in ["score_runs", "score_history"] {
+        let tables: &[&str] = if version >= 3 {
+            &["score_runs", "score_history", "score_shadow"]
+        } else {
+            &["score_runs", "score_history"]
+        };
+        for &t in tables {
             let mut cols: Vec<(String, String)> = columns(&lc, "main", t)
                 .unwrap()
                 .into_iter()
@@ -2164,6 +2352,17 @@ mod tests {
             [],
         )
         .unwrap();
+        if version >= 3 && has("score_shadow", "s_adj") {
+            // Reversed column order too: restored by name.
+            b.execute(
+                "INSERT INTO score_shadow (shadow_decision, s_adj, warmup, m, lambda_m, lambda_t, \
+                 bound, config_id, rule_version, ticker, run_id) VALUES \
+                 ('Watch', 12.5, 0, -1.0, 0.3, 1.5, 0.02, 'b0200_lm030', 'V3.1-shadow', 'ADSK', \
+                 'sp500-7-v3')",
+                [],
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -2180,6 +2379,7 @@ mod tests {
                 (r.runs_added, r.rows_added, r.backup_runs, r.backup_rows),
                 (1, 1, 1, 1)
             );
+            assert_eq!(r.shadow_added, usize::from(v >= 3));
             let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
             let h = s.history("ADSK", None, 10, None, None).unwrap();
             assert_eq!(
@@ -2551,7 +2751,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             names,
-            ["score_history", "score_history_migrations", "score_runs"]
+            [
+                "score_history",
+                "score_history_migrations",
+                "score_runs",
+                "score_shadow"
+            ]
         );
         drop(b);
         drop(pl);
@@ -2976,5 +3181,206 @@ mod tests {
         assert!(validate_symbol("A B").is_err());
         assert!(validate_symbol("A';--").is_err());
         assert!(validate_symbol(&"A".repeat(17)).is_err());
+    }
+    #[test]
+    fn shadow_rows_written_with_the_run_and_append_only() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let mut a = row("ADSK", "Act", 36, 60, -20, 30);
+        a.shadow = Some(crate::opportunity_v31::shadow_grid(
+            Some("Act"),
+            36,
+            Some(-20),
+            Some(-0.0307),
+            false,
+        ));
+        let w = row("ZZZ", "Watch", 20, 60, 0, 30); // no grid: no shadow rows
+        s.record_run(&meta(1), &[a.clone(), w]).unwrap();
+        assert_eq!(
+            (s.counts().unwrap(), s.shadow_count().unwrap()),
+            ((1, 2), 6)
+        );
+        // Duplicate run id: no-op for official and shadow rows alike.
+        s.record_run(&meta(1), &[a]).unwrap();
+        assert_eq!(s.shadow_count().unwrap(), 6);
+        let c = s.conn.lock().unwrap();
+        let ids: Vec<String> = c
+            .prepare("SELECT config_id FROM score_shadow ORDER BY config_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let want: Vec<String> = crate::opportunity_v31::V31_SHADOW_CONFIGS
+            .iter()
+            .map(|c| c.id.to_string())
+            .collect();
+        assert_eq!(ids, want);
+        // Provenance per row: rule version, parameters and warm-up flag.
+        let prov: Vec<(String, f64, f64, f64, i64)> = c
+            .prepare(
+                "SELECT rule_version, bound, lambda_t, lambda_m, warmup FROM score_shadow \
+                 ORDER BY config_id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for (p, c) in prov.iter().zip(crate::opportunity_v31::V31_SHADOW_CONFIGS) {
+            assert_eq!(p, &("V3.1-shadow".to_string(), c.bound, 1.5, c.lambda_m, 0));
+        }
+    }
+
+    #[test]
+    fn v2_db_from_67_is_backed_up_then_migrates_to_v3_with_shadow() {
+        let dir = tmpdir("shadow-mig");
+        let (p, bdir) = (dir.join("history.sqlite"), dir.join("bk"));
+        let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..2]).unwrap();
+        assert_eq!(s.schema_version().unwrap(), 2);
+        // #67's binary only required its own 9 triggers; model that writer.
+        s.missing_triggers
+            .retain(|t| !t.starts_with("score_shadow"));
+        assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        // Its behaviour probe only covered its own 3 tables (no score_shadow at v2).
+        *s.selfcheck.lock().unwrap() = SelfCheck::Passed;
+        s.record_run(&meta(100), &[row("ADSK", "Act", 40, 60, 10, 30)])
+            .unwrap();
+        drop(s);
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let bk = s.migration_backup.clone().expect("backup before v2 -> v3");
+        let rep = verify_file(&bk, false).unwrap();
+        assert_eq!(
+            (rep.score_runs, rep.score_history, rep.score_shadow),
+            (1, 1, -1)
+        );
+        assert_eq!(s.schema_version().unwrap(), 3);
+        assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        assert_eq!(
+            (s.counts().unwrap(), s.shadow_count().unwrap()),
+            ((1, 1), 0)
+        );
+        let mut r = row("ADSK", "Act", 36, 60, -20, 30);
+        r.shadow = Some(crate::opportunity_v31::shadow_grid(
+            Some("Act"),
+            36,
+            Some(-20),
+            Some(-0.03),
+            false,
+        ));
+        s.record_run(&meta(200), &[r]).unwrap();
+        assert_eq!(s.shadow_count().unwrap(), 6);
+        let r2 = s.export_to(&dir.join("after.sqlite.gz")).unwrap();
+        assert_eq!(r2.score_shadow, 6);
+        drop(s);
+        // Restore into a fresh dir merges the shadow rows once (missing rows only).
+        let d2 = tmpdir("shadow-restore");
+        let rr = restore(&dir.join("after.sqlite.gz"), &d2, &d2.join("bk")).unwrap();
+        assert_eq!(rr.shadow_added, 6);
+        let rr = restore(&dir.join("after.sqlite.gz"), &d2, &d2.join("bk")).unwrap();
+        assert_eq!(rr.shadow_added, 0, "second restore adds nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    #[test]
+    fn v3_backup_without_score_shadow_or_hist_source_is_refused() {
+        let root = tmpdir("noshadow");
+        let bdir = root.join("bk");
+        // v3 backup whose score_shadow table was dropped: refused, nothing written.
+        let f = root.join("v3-noshadow.sqlite");
+        custom_backup(&f, 3, |_, _| {});
+        Connection::open(&f)
+            .unwrap()
+            .execute_batch(&format!("{} TABLE score_shadow;", "DROP"))
+            .unwrap();
+        let data = root.join("d1");
+        let e = restore(&f, &data, &bdir).unwrap_err();
+        assert!(e.contains("has no score_shadow"), "{e}");
+        let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+        assert_eq!(
+            (s.counts().unwrap(), s.shadow_count().unwrap()),
+            ((0, 0), 0)
+        );
+        drop(s);
+        // v3 backup lacking the hist_source column: strict by-name check refuses.
+        let f = root.join("v3-nohs.sqlite");
+        custom_backup(&f, 3, |t, c| {
+            if t == "score_shadow" {
+                c.retain(|(n, _)| n != "hist_source")
+            }
+        });
+        let data = root.join("d2");
+        let e = restore(&f, &data, &bdir).unwrap_err();
+        assert!(e.contains("missing column 'hist_source'"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hist_source_is_recorded_per_shadow_row() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let mut a = row("RAW", "Act", 36, 60, -20, 30);
+        let mut g =
+            crate::opportunity_v31::shadow_grid(Some("Act"), 36, Some(-20), Some(-0.03), false);
+        g.iter_mut()
+            .for_each(|v| v.hist_source = Some("raw".into()));
+        a.shadow = Some(g);
+        let mut b = row("RND", "Act", 36, 60, -20, 30);
+        let mut g =
+            crate::opportunity_v31::shadow_grid(Some("Act"), 36, Some(-20), Some(-0.03), false);
+        g.iter_mut()
+            .for_each(|v| v.hist_source = Some("rounded".into()));
+        b.shadow = Some(g);
+        s.record_run(&meta(1), &[a, b]).unwrap();
+        let c = s.conn.lock().unwrap();
+        let n: Vec<(String, String, i64)> = c
+            .prepare(
+                "SELECT ticker, hist_source, count(*) FROM score_shadow GROUP BY 1, 2 ORDER BY 1",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            n,
+            vec![
+                ("RAW".into(), "raw".into(), 6),
+                ("RND".into(), "rounded".into(), 6)
+            ]
+        );
+    }
+
+    #[test]
+    fn fresh_db_is_v3_with_all_triggers() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        assert_eq!(s.schema_version().unwrap(), 3);
+        assert_eq!(REQUIRED_TRIGGERS.len(), 12);
+        assert!(s.missing_triggers.is_empty());
+        let c = s.conn.lock().unwrap();
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'score_shadow_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        // Behavioural self-check covers score_shadow (empty table gets a sentinel).
+        assert!(trigger_behaviour_failures(&c).unwrap().is_empty());
+        assert_eq!(table_count(&c, "score_shadow"), 0, "sentinel rolled back");
+        // A same-name no-op trigger is caught by the SQL comparison.
+        c.execute_batch(&format!(
+            "{} TRIGGER score_shadow_no_update; CREATE TRIGGER score_shadow_no_update \
+             BEFORE UPDATE ON score_shadow BEGIN SELECT 1; END;",
+            "DROP"
+        ))
+        .unwrap();
+        assert_eq!(missing_triggers(&c), vec!["score_shadow_no_update"]);
+        assert!(trigger_behaviour_failures(&c)
+            .unwrap()
+            .iter()
+            .any(|f| f == "score_shadow: update"));
     }
 }

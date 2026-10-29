@@ -47,3 +47,26 @@ Source: `vantage-headless serve` → `GET /history?symbol=TICKER[&days=N][&chang
 - History is **append-only and kept forever**: no retention, pruning or TTL. Rows are never overwritten
   (restore only adds missing runs/rows).
 - Additive fields may appear; clients must ignore unknown keys. Breaking changes → `score-history-v2`.
+
+## Storage: `score_shadow` (schema v3, V3.1 shadow mode)
+
+Not exposed by `/history`. Additive, append-only (DELETE/UPDATE abort triggers plus a BEFORE INSERT
+no-overwrite trigger; plain INSERT; PK `run_id, ticker, config_id`), written in the same
+transaction as the official `score_runs`/`score_history` rows.
+
+| column | type | notes |
+|---|---|---|
+| run_id | TEXT NOT NULL | → score_runs.run_id |
+| ticker | TEXT NOT NULL | = score_history.symbol |
+| rule_version | TEXT NOT NULL | `V3.1-shadow` |
+| config_id | TEXT NOT NULL | e.g. `b0200_lm030` (see docs/architecture/decision-rule-v3-1.md) |
+| bound | REAL NOT NULL | |
+| lambda_t | REAL NOT NULL | |
+| lambda_m | REAL NOT NULL | |
+| m | REAL | null when the histogram (raw, else rounded cents)/close is missing or during warm-up |
+| warmup | INTEGER NOT NULL | 1 when the Year series has < 35 weekly bars (m null, no penalty) |
+| s_adj | REAL NOT NULL | |
+| shadow_decision | TEXT | Act/Watch/Avoid; only ever differs from the official decision as Act → Watch |
+| hist_source | TEXT | histogram used for m: `raw` (unrounded `histogram_raw_cents`) or `rounded` (fallback `histogram_cents` when no raw value, e.g. older snapshots); NULL when m is null (warm-up / no data) |
+
+PRIMARY KEY (run_id, ticker, config_id). Read with `vantage-headless history-shadow-report`.

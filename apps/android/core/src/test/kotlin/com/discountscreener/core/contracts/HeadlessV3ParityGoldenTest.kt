@@ -183,7 +183,14 @@ class HeadlessV3ParityGoldenTest {
             candidateRows = rows.map { r ->
                 CandidateRow(r.symbol, r.marketPriceCents, r.intrinsicValueCents, r.gapBps, r.upsideBps, true, r.confidence, r.companyName)
             },
-            opportunityDecisionFactsBySymbol = rows.associate { it.symbol to ProjectedOpportunityDecisionFacts(it.compositeScore) },
+            opportunityDecisionFactsBySymbol = rows.associate {
+                it.symbol to ProjectedOpportunityDecisionFacts(
+                    it.compositeScore,
+                    it.technicalScore,
+                    com.discountscreener.core.engine.V31ActAdjustment.histogramRatio(charts[it.symbol]?.get(ChartRange.Year)),
+                    com.discountscreener.core.engine.V31ActAdjustment.isWarmup(charts[it.symbol]?.get(ChartRange.Year)),
+                )
+            },
             chartSummariesBySymbol = charts,
             dcfBySymbol = dcf,
             symbolStateBySymbol = details.keys.associateWith { s ->

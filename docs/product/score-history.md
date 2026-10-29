@@ -1,7 +1,8 @@
 # Score history (headless)
 
 Where: inside the app database, `<data-dir>/history.sqlite` (the same file the desktop app uses), in the
-additive tables `score_runs` and `score_history` (plus the `score_history_migrations` log).
+additive tables `score_runs` and `score_history` (plus the `score_history_migrations` log), and from
+migration v3 the V3.1 shadow table `score_shadow` (see `shared/contracts/score-history-v1.md`).
 Headless default data-dir: `$XDG_STATE_HOME/vantage-headless` (or `~/.local/state/vantage-headless`);
 production on the box: `/workspace/vh-data/history.sqlite`.
 
@@ -21,15 +22,15 @@ production on the box: `/workspace/vh-data/history.sqlite`.
   `apps/windows/src-tauri/src/score_history.rs`.
 
 ## Protections
-- **Append-only, kept forever.** No retention/pruning/TTL code. On `score_runs`, `score_history` and
-  `score_history_migrations`: `BEFORE DELETE` / `BEFORE UPDATE` triggers `RAISE(ABORT)`, and (migration v2)
+- **Append-only, kept forever.** No retention/pruning/TTL code. On `score_runs`, `score_history`,
+  `score_history_migrations` and (migration v3) `score_shadow`: `BEFORE DELETE` / `BEFORE UPDATE` triggers `RAISE(ABORT)`, and (migration v2)
   `BEFORE INSERT` triggers abort when the key already exists, so `INSERT OR REPLACE`, `REPLACE INTO` and UPSERT
   (`ON CONFLICT … DO UPDATE`) cannot overwrite a row. Writes are plain `INSERT`; a repeated run id is detected
   first and reported as a no-op (`Duplicate`).
-- **Startup check:** after migrating, the store verifies that all 9 triggers (`REQUIRED_TRIGGERS`) exist in
+- **Startup check:** after migrating, the store verifies that all 12 triggers (9 from #67 plus 3 on `score_shadow`) (`REQUIRED_TRIGGERS`) exist in
   `sqlite_master` **and** that each one's normalized SQL equals the migration DDL (a same-name no-op trigger is
   caught). It then probes behaviour: inside a `SAVEPOINT` (a sentinel row is inserted if a table is empty) it tries
-  DELETE, UPDATE and a duplicate INSERT on each table, each in its own nested savepoint, expects the append-only
+  DELETE, UPDATE and a duplicate INSERT on each table (including `score_shadow`), each in its own nested savepoint, expects the append-only
   `ABORT`, and always `ROLLBACK TO` + `RELEASE` — the probe never changes data. Any failure refuses every write
   (reads still work) and the error names the trigger(s). The probe runs inside `BEGIN IMMEDIATE`; if another
   writer holds the DB (SQLITE_BUSY/LOCKED) the result is *inconclusive*, not a failure: it retries with backoff,
@@ -48,8 +49,8 @@ production on the box: `/workspace/vh-data/history.sqlite`.
 - **Migrations are additive only**; each migration and its log row run in one `BEGIN IMMEDIATE`. Before any
   pending migration the whole file is copied (`VACUUM INTO`, gzip, `integrity_check`) to the backup dir as
   `history.pre-score-history-v{from}-to-v{to}-{UTC}.sqlite.gz`.
-- **Daily backups** (score tables only): once per UTC day `serve` exports `score_runs`, `score_history` and
-  `score_history_migrations` — nothing else from the app DB — into a fresh SQLite file, gzips it to
+- **Daily backups** (score tables only): once per UTC day `serve` exports `score_runs`, `score_history`,
+  `score_shadow` and `score_history_migrations` — nothing else from the app DB — into a fresh SQLite file, gzips it to
   `score-history-YYYY-MM-DD.sqlite.gz` and verifies it (`integrity_check`; row counts ≥ the live counts taken
   just before). A failing file is renamed `*.failed`. Rotation keeps the newest 7 daily files, the newest file of each
   of the last 12 months and the newest file of **every year, forever**, and only ever removes files named exactly
@@ -111,3 +112,14 @@ The store path is configuration, not a code default.
 - `vantage-headless serve --no-feed` — offline: no quote feed, Year-chart or regime workers; serves the persisted
   snapshot and history.
 - `GET /history?symbol=…` percent-decodes strictly on bytes; malformed escapes or non-UTF-8 → `400`.
+
+## V3.1 shadow (`score_shadow`, migration v3)
+- Migration v3 adds `score_shadow` (one row per run × ticker × shadow config) with the same protections as the
+  other score tables: plain `INSERT`, `BEFORE INSERT` no-overwrite, `BEFORE DELETE`/`UPDATE` abort, part of the
+  12-trigger startup check, the CI guard and the gz backups (verified row count ≥ live). A v2 file (#67) is
+  backed up (`history.pre-score-history-v2-to-v3-…`) before migrating.
+- `history-restore` merges `score_shadow` by column name with the same strict checks (unknown/missing column or
+  type mismatch refuses), inserting only missing `(run_id, ticker, config_id)` keys; a pre-v3 backup without the
+  table is accepted, a v3 backup without it is refused.
+- `vantage-headless history-shadow-report --data-dir DIR [--profile P] [--min-n N] [--json]`: demoted vs kept
+  forward returns at 5/20/60 recorded trading days.

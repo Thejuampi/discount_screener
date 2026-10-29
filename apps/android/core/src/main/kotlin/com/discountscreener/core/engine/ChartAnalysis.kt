@@ -104,6 +104,7 @@ object ChartAnalysis {
             adx = directional?.adx,
             plusDi = directional?.plusDi,
             minusDi = directional?.minusDi,
+            histogramRawCents = macd.histogram.lastOrNull(),
         )
     }
 

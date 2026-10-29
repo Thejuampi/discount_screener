@@ -270,7 +270,14 @@ fun rankProjectWrite(s: State, outDir: File) {
         watchlistSymbols = emptySet(),
         detailsBySymbol = details,
         candidateRows = candidates,
-        opportunityDecisionFactsBySymbol = rows.associate { it.symbol to ProjectedOpportunityDecisionFacts(it.compositeScore) },
+        opportunityDecisionFactsBySymbol = rows.associate {
+            it.symbol to ProjectedOpportunityDecisionFacts(
+                it.compositeScore,
+                it.technicalScore,
+                V31ActAdjustment.histogramRatio(s.summaries[it.symbol]?.get(ChartRange.Year)),
+                V31ActAdjustment.isWarmup(s.summaries[it.symbol]?.get(ChartRange.Year)),
+            )
+        },
         chartCandles = detailSymbols.mapNotNull { sym -> s.candles[sym]?.let { SymbolRangeKey(sym, ChartRange.Year) to it } }.toMap(),
         chartSummariesBySymbol = s.summaries.mapValues { it.value.toMap() },
         dcfBySymbol = s.dcf.toMap(),
@@ -297,9 +304,29 @@ fun rankProjectWrite(s: State, outDir: File) {
                 put("trustSignal", p.trustSignal?.kind?.name)
                 put("decision", p.decision?.name)
                 put("judgmentPrimaryCents", p.valuationJudgment?.primaryCents)
+                // V3.1 SHADOW (not official output); diff_headless compares it separately.
+                p.shadow?.let { grid ->
+                    put("shadow", buildJsonArray {
+                        grid.forEach { g ->
+                            add(buildJsonObject {
+                                put("ruleVersion", g.ruleVersion); put("configId", g.configId); put("bound", g.bound); put("lambdaT", g.lambdaT); put("lambdaM", g.lambdaM)
+                                put("m", g.m); put("warmup", g.warmup); put("sAdj", g.sAdj); put("shadowDecision", g.shadowDecision?.name)
+                            })
+                        }
+                    })
+                }
             })
         }
     }
+    // Runtime V3.1 shadow constants (what the Kotlin code actually uses); diff_headless compares
+    // them with the headless runtime values, so mutating any Kotlin default fails parity.
+    File(outDir, "v31_constants.json").writeText(Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), buildJsonObject {
+        put("ruleVersion", V31ActAdjustment.SHADOW_RULE_VERSION); put("lambdaT", V31ActAdjustment.LAMBDA_T)
+        put("actThreshold", V31ActAdjustment.ACT_THRESHOLD); put("minWeeklyBars", V31ActAdjustment.MIN_WEEKLY_BARS)
+        put("configs", buildJsonArray {
+            V31ActAdjustment.SHADOW_CONFIGS.forEach { c -> add(buildJsonObject { put("id", c.id); put("bound", c.bound); put("lambdaM", c.lambdaM) }) }
+        })
+    }))
     File(outDir, "opps.json").writeText(Json { prettyPrint = true }.encodeToString(JsonArray.serializer(), opps))
     val counts = projected.opportunityRows.groupingBy { it.decision?.toString() ?: "null" }.eachCount()
     log("opps=${projected.opportunityRows.size} decisions=$counts")
