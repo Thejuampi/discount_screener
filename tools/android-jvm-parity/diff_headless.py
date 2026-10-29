@@ -75,7 +75,7 @@ def v31_constants():
             bad.append(n)
     kc = [(i, float(b), float(l)) for i, b, l in re.findall(r'ShadowConfig\("(\w+)", ([\d.]+), ([\d.]+)\)', kt)]
     rc = [(i, float(b), float(l)) for i, b, l in
-          re.findall(r'ShadowConfig \{ id: "(\w+)", bound: ([\d.]+), lambda_m: ([\d.]+) \}', rs)]
+          re.findall(r'ShadowConfig\s*\{\s*id:\s*"(\w+)",\s*bound:\s*([\d.]+),\s*lambda_m:\s*([\d.]+),?\s*\}', rs)]
     ok = kc == rc and len(kc) == 6
     print(f"  SHADOW_CONFIGS: android={kc}\n                  headless={rc}" + ("" if ok else "  MISMATCH"))
     if not ok:
