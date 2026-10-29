@@ -33,7 +33,7 @@ production on the box: `/workspace/vh-data/history.sqlite`.
   `ABORT`, and always `ROLLBACK TO` + `RELEASE` — the probe never changes data. Any failure refuses every write
   (reads still work) and the error names the trigger(s). The probe runs inside `BEGIN IMMEDIATE`; if another
   writer holds the DB (SQLITE_BUSY/LOCKED) the result is *inconclusive*, not a failure: it retries with backoff,
-  logs a loud warning and is re-run before the next write (that write waits up to the 10 s busy timeout), so a
+  logs a loud warning and is re-run before the next write (one attempt, total budget 10 s; if still locked that write is refused and nothing is written, and the next write tries again), so a
   busy DB at open never disables history for the session. Future migrations must not edit the text of existing
   triggers (the SQL comparison would flag them); a changed trigger needs a new name.
 - **The triggers are the real defence.** The CI text guard below is best-effort only (a source scan can be

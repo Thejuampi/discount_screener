@@ -517,7 +517,9 @@ fn run_selfcheck(c: &Connection, probe: Probe, attempts: u32, per_try: Duration)
             Ok(bad) => out = Some(SelfCheck::Failed(bad)),
             Err(e) => {
                 last = e;
-                std::thread::sleep(Duration::from_millis(100 << i.min(6)));
+                if i + 1 < attempts {
+                    std::thread::sleep(Duration::from_millis(100 << i.min(6)));
+                }
                 continue;
             }
         }
@@ -526,8 +528,10 @@ fn run_selfcheck(c: &Connection, probe: Probe, attempts: u32, per_try: Duration)
     let _ = c.busy_timeout(BUSY_TIMEOUT);
     out.unwrap_or_else(|| {
         eprintln!(
-            "WARNING score history: append-only self-check INCONCLUSIVE ({last}): another writer \
-             holds the DB; it will be re-run before the next write"
+            "WARNING score history: append-only trigger self-check INCONCLUSIVE — the database \
+             is locked by another writer ({last}). History is NOT disabled: the check will run \
+             again before the next history write, and that write is refused (not lost) if the \
+             lock is still held. If this repeats, find the process holding the DB open for writing."
         );
         SelfCheck::Pending(last)
     })
@@ -688,6 +692,8 @@ pub struct ScoreHistoryStore {
     /// Behavioural self-check state (Pending is re-run before the next write).
     selfcheck: Mutex<SelfCheck>,
     probe: Probe,
+    /// Total busy budget for the deferred self-check at write time.
+    write_busy: Duration,
 }
 
 impl ScoreHistoryStore {
@@ -763,6 +769,7 @@ impl ScoreHistoryStore {
             missing_triggers,
             selfcheck: Mutex::new(selfcheck),
             probe,
+            write_busy: BUSY_TIMEOUT,
         })
     }
 
@@ -787,9 +794,10 @@ impl ScoreHistoryStore {
         }
         let mut st = self.selfcheck.lock().map_err(|_| "lock")?;
         if let SelfCheck::Pending(_) = *st {
-            // Deferred: re-run now, waiting the full busy timeout (this is a write anyway).
+            // Deferred: re-run now, ONE attempt with a total budget of `write_busy` (10 s),
+            // since the conn mutex is held (HTTP reads wait too).
             let c = self.conn.lock().map_err(|_| "lock")?;
-            *st = run_selfcheck(&c, self.probe, 2, BUSY_TIMEOUT);
+            *st = run_selfcheck(&c, self.probe, 1, self.write_busy);
         }
         match &*st {
             SelfCheck::Passed => Ok(()),
@@ -1977,6 +1985,61 @@ mod tests {
         let r = restore(&f, &data2, &bk).unwrap();
         h.join().unwrap();
         assert_eq!((r.runs_added, r.rows_added), (1, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_while_still_locked_is_refused_and_writes_nothing() {
+        let dir = tmpdir("busy2");
+        let p = dir.join("history.sqlite");
+        drop(ScoreHistoryStore::open(&p, None).unwrap());
+        let holder = Connection::open(&p).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut s = ScoreHistoryStore::open(&p, None).unwrap();
+        s.write_busy = Duration::from_millis(300);
+        assert!(matches!(s.selfcheck(), SelfCheck::Pending(_)));
+        let t0 = std::time::Instant::now();
+        let e = s
+            .record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap_err();
+        assert!(
+            e.contains("database busy") && e.contains("self-check deferred"),
+            "{e}"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(3),
+            "single attempt within budget"
+        );
+        assert!(matches!(s.selfcheck(), SelfCheck::Pending(_)));
+        holder.execute_batch("COMMIT").unwrap();
+        assert_eq!(s.counts().unwrap(), (0, 0), "nothing written while locked");
+        s.record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(s.counts().unwrap(), (1, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_busy_partway_is_inconclusive_not_passed() {
+        let dir = tmpdir("busy3");
+        let p = dir.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        s.record_run(&meta(1), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        drop(s);
+        // Caller already inside a deferred read txn, so the probe's first write op is
+        // where BUSY appears (after SAVEPOINT and the sentinel reads succeeded).
+        let c = Connection::open(&p).unwrap();
+        c.busy_timeout(Duration::from_millis(100)).unwrap();
+        c.execute_batch("BEGIN").unwrap();
+        assert_eq!(table_count(&c, "score_runs"), 1);
+        let holder = Connection::open(&p).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let r = trigger_behaviour_failures(&c);
+        assert!(r.is_err(), "BUSY must be inconclusive, got {r:?}");
+        c.execute_batch("ROLLBACK").unwrap();
+        holder.execute_batch("COMMIT").unwrap();
+        assert_eq!(table_count(&c, "score_runs"), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
