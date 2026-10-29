@@ -982,6 +982,9 @@ pub struct EngineConfig {
     /// Load only Android's profile universe (sp500 = 501 equities) instead of
     /// the desktop composition (+ ETFs + crypto). Headless default: true.
     pub android_universe: bool,
+    /// Minimum seconds between score-history runs once the initial pass is done
+    /// (`0` disables score history).
+    pub history_interval_secs: i64,
 }
 
 #[derive(Serialize)]
@@ -1003,7 +1006,15 @@ pub struct HeadlessEngine {
     cfg: EngineConfig,
     persisted: Mutex<Option<Arc<OpportunitySnapshot>>>,
     year: Arc<Mutex<std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>>>,
+    history: Option<crate::score_history::ScoreHistoryStore>,
+    /// When the current generation's initial pass was first seen complete.
+    pass_seen: Mutex<Option<(u64, i64)>>,
 }
+
+/// Year charts must cover this share of the universe before a run is recorded,
+/// or [`HISTORY_YEAR_WAIT_SECS`] must have passed since the initial pass finished.
+pub const HISTORY_YEAR_COVERAGE: f64 = 0.95;
+pub const HISTORY_YEAR_WAIT_SECS: i64 = 20 * 60;
 
 /// Canonical profile id (`S&P500`, `sp500`, … → one key) so an alias does not
 /// discard a persisted snapshot.
@@ -1073,11 +1084,20 @@ impl HeadlessEngine {
         if cfg.market_context {
             crate::regime::spawn_regime_worker(&state);
         }
+        let history = if cfg.history_interval_secs > 0 {
+            Some(crate::score_history::ScoreHistoryStore::open(
+                &cfg.data_dir.join("history.sqlite"),
+            )?)
+        } else {
+            None
+        };
         Ok(Arc::new(Self {
             state,
             cfg,
             persisted: Mutex::new(persisted),
             year,
+            history,
+            pass_seen: Mutex::new(None),
         }))
     }
 
@@ -1150,6 +1170,89 @@ impl HeadlessEngine {
         })
     }
 
+    /// Records one score-history run when a finished feed pass is due; returns rows written.
+    ///
+    /// Due = the current generation's initial pass has completed, Year charts cover
+    /// [`HISTORY_YEAR_COVERAGE`] of the universe (or [`HISTORY_YEAR_WAIT_SECS`] passed),
+    /// the ranking is live, and the last run for this profile is older than
+    /// `history_interval_secs` (or predates this pass). Retention runs after each write.
+    pub fn record_history_if_due(&self, now: i64) -> Result<Option<usize>, String> {
+        let Some(store) = &self.history else {
+            return Ok(None);
+        };
+        let gen = self
+            .state
+            .initial_pass_completed_generation
+            .load(Ordering::SeqCst);
+        if gen == u64::MAX {
+            return Ok(None);
+        }
+        let seen_at = {
+            let mut p = self.pass_seen.lock().unwrap();
+            match *p {
+                Some((g, at)) if g == gen => at,
+                _ => {
+                    *p = Some((gen, now));
+                    now
+                }
+            }
+        };
+        let universe = android_universe(&self.profile()).unwrap_or_default();
+        let year_loaded = self.year.lock().unwrap().len();
+        let charts_ready = universe.is_empty()
+            || year_loaded as f64 >= universe.len() as f64 * HISTORY_YEAR_COVERAGE;
+        if !charts_ready && now - seen_at < HISTORY_YEAR_WAIT_SECS {
+            return Ok(None);
+        }
+        let profile = canonical_profile(&self.profile());
+        if let Some(last) = store.last_run_at(&profile, "v3")? {
+            if last >= seen_at && now - last < self.cfg.history_interval_secs {
+                return Ok(None);
+            }
+        }
+        let (rows, source) = self.android_ranking();
+        if source != "live" || rows.is_empty() {
+            return Ok(None);
+        }
+        let ranked = android_to_ranked(&rows);
+        let snap = self.capture();
+        let have: std::collections::HashSet<&str> =
+            snap.rows.iter().map(|r| r.row.symbol.as_str()).collect();
+        let incomplete: Vec<String> = universe
+            .iter()
+            .filter(|s| !have.contains(s.as_str()))
+            .cloned()
+            .collect();
+        let meta = crate::score_history::RunMeta {
+            captured_at: now,
+            profile,
+            model: "v3".into(),
+            semantics: "android".into(),
+            market_context: self.cfg.market_context,
+            binary_version: env!("CARGO_PKG_VERSION").to_string(),
+            symbols_total: universe.len(),
+            incomplete_symbols: incomplete,
+        };
+        let n = store.record_run(&meta, &ranked)?;
+        store.apply_retention(now)?;
+        Ok(Some(n))
+    }
+
+    /// `GET /history` body: oldest-first points, plus the decision flips when asked.
+    pub fn history_json(
+        &self,
+        symbol: &str,
+        days: Option<i64>,
+        changes: bool,
+        now: i64,
+    ) -> Result<serde_json::Value, String> {
+        let store = self
+            .history
+            .as_ref()
+            .ok_or("score history disabled (--history-interval 0)")?;
+        history_json(store, symbol, days, changes, now)
+    }
+
     pub fn status(&self) -> EngineStatus {
         let fs = self.state.feed_status.lock().unwrap().clone();
         let (snap, source) = self.current_snapshot();
@@ -1166,6 +1269,27 @@ impl HeadlessEngine {
             snapshot_captured_at_epoch: Some(snap.captured_at_epoch),
         }
     }
+}
+
+/// Shared by the daemon route and tests: history for `symbol` as JSON.
+pub fn history_json(
+    store: &crate::score_history::ScoreHistoryStore,
+    symbol: &str,
+    days: Option<i64>,
+    changes: bool,
+    now: i64,
+) -> Result<serde_json::Value, String> {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    if symbol.is_empty() || symbol.len() > 16 {
+        return Err("history needs symbol=TICKER".into());
+    }
+    let points = store.history(&symbol, days, now, Some("v3"), None)?;
+    let mut v = serde_json::json!({ "symbol": symbol, "days": days, "points": points });
+    if changes {
+        v["changes"] =
+            serde_json::to_value(crate::score_history::decision_changes(&points)).unwrap();
+    }
+    Ok(v)
 }
 
 #[derive(Serialize, Deserialize)]

@@ -77,7 +77,7 @@ fn parse_opts(args: &[String]) -> Opts {
 }
 
 fn usage() -> &'static str {
-    "usage: vantage-headless <serve|rank|status|parity|persist|rank-snapshot> [options]\n\
+    "usage: vantage-headless <serve|rank|status|parity|persist|rank-snapshot|history> [options]\n\
      common: --addr HOST:PORT   (default 127.0.0.1:7979)\n\
      serve:  --profile sp500|dow|merval|... --semantics android|tauri (feed universe; default android)\n\
      \x20       --data-dir DIR [--market-context] [--allow-remote]\n\
@@ -85,7 +85,9 @@ fn usage() -> &'static str {
      rank:   --model v3|v2|short --semantics android|tauri (default android) --top N [--json]\n\
      \x20       android = Long V3 as the Android app ranks it (qualified rows, Act/Watch/Avoid)\n\
      parity: --model v3|v2|short   (desktop command path vs headless, same instant)\n\
-     rank-snapshot FILE --model .. --top N [--json]   (offline replay)"
+     rank-snapshot FILE --model .. --top N [--json]   (offline replay)\n\
+history TICKER [--days N] [--changes] [--json]   (score history, GET /history)\n\
+serve:  --history-interval-hours H (default 6; 0 disables score history)"
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
@@ -154,6 +156,29 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("{}", http_req(&addr, method, &path)?);
             Ok(())
         }
+        "history" => {
+            let sym = o
+                .positional
+                .get(1)
+                .ok_or("history needs TICKER (vantage-headless history ADSK)")?;
+            let mut path = format!("/history?symbol={}", sym.to_ascii_uppercase());
+            if let Some(d) = o.flags.get("days") {
+                path.push_str(&format!("&days={d}"));
+            }
+            let changes = o.flags.contains_key("changes");
+            if changes {
+                path.push_str("&changes=1");
+            }
+            let body = http_req(&addr, "GET", &path)?;
+            if json {
+                println!("{body}");
+            } else {
+                let v: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|e| e.to_string())?;
+                print!("{}", render_history(&v, changes));
+            }
+            Ok(())
+        }
         "rank-snapshot" => {
             let file = o.positional.get(1).ok_or("rank-snapshot needs FILE")?;
             let snap = OpportunitySnapshot::load(&PathBuf::from(file))?;
@@ -179,6 +204,59 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         other => Err(format!("unknown command '{other}'\n{}", usage())),
     }
+}
+
+fn render_history(v: &serde_json::Value, changes: bool) -> String {
+    let sym = v["symbol"].as_str().unwrap_or("?");
+    let n = |x: &serde_json::Value| {
+        x.as_i64()
+            .map(|n| format!("{n:+}"))
+            .unwrap_or_else(|| "—".into())
+    };
+    let mut out = String::new();
+    if changes {
+        let list = v["changes"].as_array().cloned().unwrap_or_default();
+        out.push_str(&format!("{sym} · decision changes: {}\n", list.len()));
+        for c in &list {
+            out.push_str(&format!(
+                "{} → {}  {} → {}  composite {}  F {}  T {}  Fc {}\n",
+                c["from_date"].as_str().unwrap_or(""),
+                c["to_date"].as_str().unwrap_or(""),
+                c["from"].as_str().unwrap_or(""),
+                c["to"].as_str().unwrap_or(""),
+                n(&c["composite_delta"]),
+                n(&c["fundamentals_delta"]),
+                n(&c["technical_delta"]),
+                n(&c["forecast_delta"]),
+            ));
+        }
+        return out;
+    }
+    let pts = v["points"].as_array().cloned().unwrap_or_default();
+    out.push_str(&format!("{sym} · runs: {}\n", pts.len()));
+    out.push_str("date (UTC)        profile  rules decision  comp     F     T    Fc  conf         price   target\n");
+    for p in &pts {
+        let cents = |x: &serde_json::Value| {
+            x.as_i64()
+                .map(|c| format!("{:.2}", c as f64 / 100.0))
+                .unwrap_or_else(|| "—".into())
+        };
+        out.push_str(&format!(
+            "{:<17} {:<8} {:<5} {:<8} {:>5} {:>5} {:>5} {:>5}  {:<11} {:>7} {:>8}\n",
+            p["date"].as_str().unwrap_or(""),
+            p["profile"].as_str().unwrap_or(""),
+            p["rule_version"].as_str().unwrap_or(""),
+            p["decision"].as_str().unwrap_or(""),
+            n(&p["composite"]),
+            n(&p["fundamentals"]),
+            n(&p["technical"]),
+            n(&p["forecast"]),
+            p["confidence"].as_str().unwrap_or("—"),
+            cents(&p["price_cents"]),
+            cents(&p["target_cents"]),
+        ));
+    }
+    out
 }
 
 fn signed(v: Option<i32>) -> String {
@@ -292,6 +370,14 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
         .unwrap_or_else(default_data_dir);
     let market_context = o.flags.contains_key("market-context");
     let allow_remote = o.flags.contains_key("allow-remote");
+    let history_hours: i64 = match o.flags.get("history-interval-hours") {
+        Some(h) => h
+            .parse()
+            .ok()
+            .filter(|n| *n >= 0)
+            .ok_or_else(|| format!("bad --history-interval-hours {h}"))?,
+        None => 6,
+    };
     check_bind_addr(addr, allow_remote)?;
     // Feed universe: android (default) loads exactly Android's profile list;
     // tauri loads the desktop composition (+ ETFs + crypto).
@@ -307,6 +393,7 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
         market_context,
         fetch_year_charts: android_feed,
         android_universe: android_feed,
+        history_interval_secs: history_hours * 3600,
     })?;
     let listener = TcpListener::bind(addr).map_err(|e| format!("bind {addr}: {e}"))?;
     eprintln!(
@@ -322,6 +409,11 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
             std::thread::sleep(Duration::from_secs(60));
             if let Err(e) = engine.persist() {
                 eprintln!("persist: {e}");
+            }
+            match engine.record_history_if_due(now_epoch()) {
+                Ok(Some(n)) => eprintln!("score history: recorded run ({n} rows)"),
+                Ok(None) => {}
+                Err(e) => eprintln!("score history: {e}"),
             }
         });
     }
@@ -480,6 +572,11 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         .filter_map(|kv| kv.split_once('='))
         .collect();
     let expected = if path == "/persist" { "POST" } else { "GET" };
+    if path == "/history" && method == "GET" {
+        return to_http(history_endpoint(&q, |sym, days, changes| {
+            engine.history_json(sym, days, changes, now_epoch())
+        }));
+    }
     if method != expected {
         return (
             "405 Method Not Allowed",
@@ -526,11 +623,44 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         }
         _ => Err(format!("not found: {path}")),
     })();
+    to_http(result)
+}
+
+fn to_http(result: Result<serde_json::Value, String>) -> (&'static str, String) {
     match result {
         Ok(v) => ("200 OK", serde_json::to_string(&v).unwrap()),
         Err(e) if e.starts_with("not found") => ("404 Not Found", e),
         Err(e) => ("400 Bad Request", e),
     }
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// `GET /history?symbol=ADSK[&days=N][&changes=1]`.
+fn history_endpoint(
+    q: &HashMap<&str, &str>,
+    query: impl FnOnce(&str, Option<i64>, bool) -> Result<serde_json::Value, String>,
+) -> Result<serde_json::Value, String> {
+    let symbol = q
+        .get("symbol")
+        .copied()
+        .ok_or("history needs symbol=TICKER")?;
+    let days = match q.get("days") {
+        Some(d) => Some(
+            d.parse::<i64>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| format!("bad days '{d}' (expected a positive integer)"))?,
+        ),
+        None => None,
+    };
+    let changes = matches!(q.get("changes").copied(), Some("1" | "true"));
+    query(symbol, days, changes)
 }
 
 #[cfg(test)]
@@ -576,6 +706,83 @@ mod tests {
         assert!(start.elapsed() < READ_TIMEOUT + Duration::from_secs(2));
         drop(s);
         t.join().unwrap();
+    }
+
+    #[test]
+    fn history_endpoint_serves_points_and_changes() {
+        use discount_screener_windows_lib::headless::history_json;
+        use discount_screener_windows_lib::score_history::{RunMeta, ScoreHistoryStore};
+        let store = ScoreHistoryStore::open_in_memory().unwrap();
+        let mk = |d: &str, c: i32| RankedRow {
+            rank: 1,
+            symbol: "ADSK".into(),
+            company: None,
+            sector: None,
+            composite_score: c,
+            setup_score: c,
+            setup_label: d.into(),
+            decision: d.into(),
+            confidence: Some("high".into()),
+            price: 250.0,
+            target: Some(320.0),
+            gap_pct: None,
+            upside_pct: Some(28.0),
+            fundamentals: Some(60),
+            technical: Some(c - 20),
+            forecast: Some(30),
+            regime: None,
+            trust_signal: None,
+            projection_gap: None,
+        };
+        for (at, d, c) in [
+            (1_000, "Act", 41),
+            (2_000, "Watch", 27),
+            (3_000, "Avoid", -4),
+        ] {
+            let meta = RunMeta {
+                captured_at: at,
+                profile: "sp500".into(),
+                model: "v3".into(),
+                semantics: "android".into(),
+                market_context: false,
+                binary_version: "t".into(),
+                symbols_total: 1,
+                incomplete_symbols: vec![],
+            };
+            store.record_run(&meta, &[mk(d, c)]).unwrap();
+        }
+        let q: HashMap<&str, &str> = [("symbol", "adsk"), ("changes", "1")].into_iter().collect();
+        let (status, body) = to_http(history_endpoint(&q, |s, d, c| {
+            history_json(&store, s, d, c, 4_000)
+        }));
+        assert_eq!(status, "200 OK");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["symbol"], "ADSK");
+        assert_eq!(v["points"].as_array().unwrap().len(), 3);
+        assert_eq!(v["changes"].as_array().unwrap().len(), 2);
+        assert_eq!(v["changes"][1]["to"], "Avoid");
+        let text = render_history(&v, true);
+        assert!(text.contains("Watch → Avoid"), "{text}");
+        assert!(render_history(&v, false).contains("Act"));
+
+        let q: HashMap<&str, &str> = [("symbol", "ADSK"), ("days", "0")].into_iter().collect();
+        assert_eq!(
+            to_http(history_endpoint(&q, |_, _, _| unreachable!())).0,
+            "400 Bad Request"
+        );
+        let q: HashMap<&str, &str> = HashMap::new();
+        assert_eq!(
+            to_http(history_endpoint(&q, |_, _, _| unreachable!())).0,
+            "400 Bad Request"
+        );
+        let q: HashMap<&str, &str> = [("symbol", "ADSK")].into_iter().collect();
+        let (_, body) = to_http(history_endpoint(&q, |s, d, c| {
+            history_json(&store, s, d, c, 4_000)
+        }));
+        assert!(serde_json::from_str::<serde_json::Value>(&body)
+            .unwrap()
+            .get("changes")
+            .is_none());
     }
 
     #[test]
