@@ -92,7 +92,7 @@ fn parse_opts(args: &[String]) -> Opts {
 }
 
 fn usage() -> &'static str {
-    "usage: vantage-headless <serve|rank|status|parity|persist|rank-snapshot|history> [options]\n\
+    "usage: vantage-headless <serve|detail|rank|status|parity|persist|rank-snapshot|history> [options]\n\
      common: --addr HOST:PORT   (default 127.0.0.1:7979)\n\
      serve:  --profile sp500|dow|merval|... --semantics android|tauri (feed universe; default android)\n\
      \x20       --data-dir DIR [--market-context] [--allow-remote]\n\
@@ -137,6 +137,15 @@ fn run(args: Vec<String>) -> Result<(), String> {
         .unwrap_or_else(|| "android".into());
     match cmd {
         "serve" => serve(&o, &addr),
+        "detail" => {
+            let symbol = validate_symbol(o.positional.get(1).ok_or("detail needs SYMBOL")?)?;
+            let body = http_req(&addr, "GET", &format!("/detail?symbol={symbol}"))?;
+            if json { println!("{body}"); } else {
+                let value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+                print!("{}", render_consensus(&value));
+            }
+            Ok(())
+        }
         "rank" => {
             parse_model(&model)?;
             Semantics::parse(&semantics)?;
@@ -885,6 +894,7 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
     }
     let result: Result<serde_json::Value, String> = (|| match path {
         "/status" => Ok(serde_json::to_value(engine.status()).unwrap()),
+        "/detail" => engine.detail(q.get("symbol").copied().ok_or("detail needs symbol")?),
         "/persist" => Ok(serde_json::json!({ "persisted_rows": engine.persist()? })),
         "/ranking" => {
             let model = parse_model(q.get("model").copied().unwrap_or("v3"))?;
@@ -1198,5 +1208,68 @@ mod tests {
             .skip(1)
             .collect();
         assert_eq!(pos[0], pos[1], "{t}");
+    }
+}
+
+fn render_consensus(value: &serde_json::Value) -> String {
+    let symbol = value["symbol"].as_str().unwrap_or("?");
+    let money = |n: i64| format!("{}.{:02}", n / 100, n % 100);
+    let mut text = match value["analyst_target_mean_cents"]
+        .as_i64()
+        .filter(|n| *n > 0)
+    {
+        Some(target) => format!(
+            "{symbol} · analyst consensus {} provider units",
+            money(target)
+        ),
+        None => format!("{symbol} · analyst consensus unavailable"),
+    };
+    if let Some(count) = value["analyst_opinion_count"].as_u64().filter(|n| *n > 0) {
+        text.push_str(&format!(" ({count} analysts)"));
+    }
+    if let Some(rec) = value["recommendation_mean_hundredths"]
+        .as_i64()
+        .filter(|n| (100..=500).contains(n))
+    {
+        text.push_str(&format!(
+            "; recommendation {}/5 (1=strong buy, 5=strong sell)",
+            money(rec)
+        ));
+    }
+    text.push_str(".\nCoverage count may use recommendation tally; target and recommendation samples can differ.\n");
+    let receipt = value["received_at_epoch"]
+        .as_i64()
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| "unknown".into());
+    text.push_str(&format!("Source: Yahoo quote summary; receipt {receipt}. Market timestamp and currency are unavailable.\n"));
+    text.push_str(
+        "Analyst consensus is separate from model valuation. No model value is selected here.\n",
+    );
+    text
+}
+#[cfg(test)]
+mod consensus_renderer_tests {
+    #[test]
+    fn consensus_has_distinct_units_and_recommendation_scale() {
+        let v = serde_json::json!({"symbol":"ADSK","analyst_target_mean_cents":30754,"analyst_opinion_count":34,"recommendation_mean_hundredths":156,"received_at_epoch":123});
+        let text = super::render_consensus(&v);
+        assert!(
+            text.contains("analyst consensus 307.54 provider units (34 analysts)"),
+            "{text}"
+        );
+        assert!(text.contains("1.56/5"), "{text}");
+        assert!(text.contains("receipt"), "{text}");
+        assert!(!text.contains("USD"));
+    }
+    #[test]
+    fn missing_target_and_invalid_recommendation_remain_unavailable() {
+        for rec in [0, 99, 501] {
+            let text = super::render_consensus(
+                &serde_json::json!({"symbol":"ADSK","recommendation_mean_hundredths":rec}),
+            );
+            assert!(text.contains("consensus unavailable"), "{text}");
+            assert!(!text.contains("/5"), "{text}");
+        }
     }
 }

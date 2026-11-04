@@ -123,3 +123,21 @@ cargo test --lib
 cargo test --lib dcf_model::
 cargo test --lib valuation_baseline::
 ```
+
+## Headless analyst consensus
+
+Use `vantage-headless detail ADSK --json` against a running server. Omit `--json` for a short report.
+The response contains the provider's mean analyst target and recommendation. It does not select or calculate a model value.
+Target and recommendation coverage can differ. The existing parser can use recommendation counts when target coverage is absent.
+
+Requests share a 90-second cache and the provider cooldown. The cache holds at most 128 symbols and one active request.
+Failures use the same cache limit. A generation change discards old results. `--no-feed` disables this endpoint's network access.
+This request does not change ranking, expand the feed universe, or load charts.
+It does not populate technical or V3 ranking inputs.
+
+Prices and targets use provider units multiplied by 100, without currency conversion.
+The response records receipt time. It does not claim a market timestamp, verified currency, or current market freshness.
+
+HTTP clients validate certificates against standard web roots and operating-system trust roots.
+This supports managed proxy certificates without disabling TLS validation.
+On Linux, native root discovery supports an administrator-provided `SSL_CERT_FILE` bundle.

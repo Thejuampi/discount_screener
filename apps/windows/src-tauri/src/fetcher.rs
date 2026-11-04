@@ -293,6 +293,24 @@ impl YahooClient {
     /// 1) quoteSummary JSON (primary)
     /// 2) optional HTML (off by default)
     /// 3) lightweight chart meta probe for missing price/name
+    /// Analyst detail uses the existing quote-summary parser, with no HTML or chart fallback.
+    pub(crate) fn fetch_analyst_consensus(&self, symbol: &str) -> io::Result<FetchResult> {
+        if self.is_rate_limited() {
+            return Err(io::Error::other("quote_provider_cooldown"));
+        }
+        let display = symbol.trim().to_uppercase();
+        let request_symbol = yahoo_request_symbol(&display);
+        let root = self.fetch_quote_summary_json(&request_symbol)?;
+        if !analyst_response_identity_matches(
+            &request_symbol,
+            root.pointer("/quoteSummary/result/0/price/symbol")
+                .and_then(serde_json::Value::as_str),
+        ) {
+            return Err(io::Error::other("quote_symbol_identity_unverified"));
+        }
+        Ok(parse_quote_summary(&root, &display))
+    }
+
     pub fn fetch_symbol(&self, symbol: &str) -> io::Result<FetchResult> {
         let display = symbol.trim().to_uppercase();
         let request_symbol = yahoo_request_symbol(&display);
@@ -1476,5 +1494,28 @@ mod universe_contract_tests {
             .unwrap()
             .to_string();
         assert!(is_crypto(&format!("BTC{suffix}")));
+    }
+}
+
+fn analyst_response_identity_matches(expected: &str, observed: Option<&str>) -> bool {
+    observed.is_some_and(|symbol| !symbol.is_empty() && symbol.eq_ignore_ascii_case(expected))
+}
+#[cfg(test)]
+mod analyst_identity_tests {
+    use super::*;
+    #[test]
+    fn matches_requested_provider_symbol_and_alias() {
+        for (requested, observed) in [("ADSK", "ADSK"), ("BRK.B", "BRK-B")] {
+            assert!(analyst_response_identity_matches(
+                &yahoo_request_symbol(requested),
+                Some(observed)
+            ));
+        }
+    }
+    #[test]
+    fn rejects_missing_and_mismatched_symbols() {
+        for observed in [None, Some(""), Some("MSFT")] {
+            assert!(!analyst_response_identity_matches("ADSK", observed));
+        }
     }
 }

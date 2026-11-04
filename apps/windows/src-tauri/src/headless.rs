@@ -15,6 +15,9 @@
 //! The frozen scoring input is persisted as a JSON snapshot so the daemon
 //! restarts warm and rankings can be replayed offline (`rank-snapshot`).
 
+#[path = "headless_consensus.rs"]
+mod consensus;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -1044,6 +1047,7 @@ pub enum HistoryWrite {
 }
 
 pub struct HeadlessEngine {
+    consensus: consensus::ConsensusCache,
     pub state: AppState,
     cfg: EngineConfig,
     persisted: Mutex<Option<Arc<OpportunitySnapshot>>>,
@@ -1134,6 +1138,7 @@ impl HeadlessEngine {
             None
         };
         Ok(Arc::new(Self {
+            consensus: consensus::ConsensusCache::default(),
             state,
             cfg,
             persisted: Mutex::new(persisted),
@@ -1141,6 +1146,47 @@ impl HeadlessEngine {
             history,
             pass_seen: Mutex::new(None),
         }))
+    }
+
+    /// Read analyst consensus without selecting a model or changing the feed universe.
+    pub fn detail(&self, symbol: &str) -> Result<serde_json::Value, String> {
+        let symbol = crate::score_history::validate_symbol(symbol)?;
+        let generation = self.state.feed_generation.load(Ordering::SeqCst);
+        let result = self.consensus.read(
+            &symbol,
+            generation,
+            !self.cfg.no_feed,
+            std::time::Instant::now(),
+            || {
+                let client = self
+                    .state
+                    .valuation_yahoo
+                    .as_ref()
+                    .ok_or("quote_client_unavailable")?;
+                if client.is_rate_limited() {
+                    return Err("quote_provider_cooldown".into());
+                }
+                // Never return transport URLs: Yahoo URLs may contain authentication query values.
+                let fetched = client.fetch_analyst_consensus(&symbol).map_err(|_| {
+                    if client.is_rate_limited() {
+                        "quote_provider_cooldown"
+                    } else {
+                        "quote_provider_transport_failed"
+                    }
+                })?;
+                if fetched.symbol != symbol {
+                    return Err("quote_symbol_mismatch".into());
+                }
+                Ok(consensus::observation(
+                    fetched,
+                    chrono::Utc::now().timestamp(),
+                ))
+            },
+        );
+        if self.state.feed_generation.load(Ordering::SeqCst) != generation {
+            return Err("quote_generation_changed".into());
+        }
+        result
     }
 
     pub fn profile(&self) -> String {
