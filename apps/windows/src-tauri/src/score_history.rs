@@ -765,6 +765,9 @@ fn inputs_blob_path(backup_dir: &Path, hash: &str) -> Result<PathBuf, String> {
 }
 
 fn fsync_dir(dir: &Path) -> Result<(), String> {
+    // Durability seam: open the directory fd and fsync it after rename so the
+    // directory entry for the new blob is on stable storage (temp→fsync→rename→fsync-dir).
+    // Tests can skip asserting fsync by exercising the write/rename path only.
     let f = std::fs::File::open(dir).map_err(|e| format!("open dir {}: {e}", dir.display()))?;
     f.sync_all()
         .map_err(|e| format!("fsync dir {}: {e}", dir.display()))
@@ -802,6 +805,85 @@ fn blob_file_matches(path: &Path, expected: &[u8]) -> bool {
     }
 }
 
+/// `inputs/<sha>` must be a regular file. Directories/symlinks are moved aside to
+/// `*.bad` (never deleted) so a durable rewrite can replace them; returns Err if
+/// the entry cannot be quarantined.
+fn ensure_regular_input_blob_path(path: &Path) -> Result<(), String> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("stat {}: {e}", path.display())),
+    };
+    if meta.file_type().is_file() {
+        // symlink_metadata: is_file() is false for symlinks even when the target is a file.
+        return Ok(());
+    }
+    // Symlink or directory (or other): quarantine, never delete.
+    let base = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("blob");
+    let bad = path.with_file_name(format!("{base}.bad"));
+    let bad = if bad.exists() {
+        path.with_file_name(format!("{base}.bad.{}", std::process::id()))
+    } else {
+        bad
+    };
+    std::fs::rename(path, &bad).map_err(|e| {
+        format!(
+            "blob {}: not a regular file ({}); quarantine to {}: {e}",
+            path.display(),
+            if meta.file_type().is_symlink() {
+                "symlink"
+            } else if meta.is_dir() {
+                "directory"
+            } else {
+                "special"
+            },
+            bad.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Remove stale `.{sha}.{pid}.tmp` left by crashed writers. Only that exact
+/// pattern inside `inputs/`, and only when older than `max_age`.
+fn cleanup_stale_input_tmps(inputs_dir: &Path, max_age: std::time::Duration) -> usize {
+    let Ok(rd) = std::fs::read_dir(inputs_dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut n = 0;
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(s) = name.to_str() else { continue };
+        // Pattern: .<64 hex>.<pid>.tmp
+        if !(s.starts_with('.') && s.ends_with(".tmp")) {
+            continue;
+        }
+        let body = &s[1..s.len() - 4]; // strip leading '.' and trailing '.tmp'
+        let Some((hash, pid)) = body.rsplit_once('.') else {
+            continue;
+        };
+        if hash.len() != 64 || !hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            continue;
+        }
+        if !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(meta) = ent.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        let Ok(age) = now.duration_since(modified) else { continue };
+        if age < max_age {
+            continue;
+        }
+        if std::fs::remove_file(ent.path()).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Content-addressed input blob write. If `inputs/<sha>` already exists and matches,
 /// leaves it alone. If it exists but is corrupt (wrong length/bytes), rewrites it
 /// atomically with the correct payload — never deletes a good blob.
@@ -811,7 +893,10 @@ fn write_input_blob(backup_dir: &Path, hash: &str, bytes: &[u8]) -> Result<bool,
     let dir = inputs_blob_dir(backup_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     fsync_dir(&dir).ok(); // best-effort after mkdir
+    // Opportunistic cleanup of crashed-writer temps (15 minutes).
+    let _ = cleanup_stale_input_tmps(&dir, std::time::Duration::from_secs(15 * 60));
     let path = inputs_blob_path(backup_dir, hash)?;
+    ensure_regular_input_blob_path(&path)?;
     if path.exists() {
         if blob_file_matches(&path, bytes) {
             return Ok(false);
@@ -855,6 +940,27 @@ fn resolve_input_bytes(
                 continue;
             }
         };
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_file() => {}
+            Ok(meta) => {
+                last = format!(
+                    "{}: not a regular file ({})",
+                    path.display(),
+                    if meta.file_type().is_symlink() {
+                        "symlink"
+                    } else if meta.is_dir() {
+                        "directory"
+                    } else {
+                        "special"
+                    }
+                );
+                continue;
+            }
+            Err(e) => {
+                last = format!("{}: {e}", path.display());
+                continue;
+            }
+        }
         match std::fs::read(&path) {
             Ok(b) => return Ok(b),
             Err(e) => last = format!("{}: {e}", path.display()),
@@ -4182,6 +4288,85 @@ mod tests {
         let _ = std::fs::create_dir_all(&inputs);
         assert!(write_input_blob(&dir, "../../secret", b"x").is_err());
         assert!(std::fs::read_dir(&inputs).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn input_hash_rejects_length_case_and_non_hex() {
+        // V2/V3/V4: length, uppercase, non-hex, empty, slash-in-64.
+        let hex64 = "a".repeat(64);
+        assert!(validate_input_hash(&hex64).is_ok());
+        assert!(validate_input_hash(&"a".repeat(63)).unwrap_err().contains("64 lowercase hex"));
+        assert!(validate_input_hash(&"a".repeat(65)).unwrap_err().contains("64 lowercase hex"));
+        assert!(validate_input_hash("").unwrap_err().contains("64 lowercase hex"));
+        let mut upper = hex64.clone();
+        upper.replace_range(0..1, "A");
+        assert!(validate_input_hash(&upper).unwrap_err().contains("64 lowercase hex"));
+        let mut gee = hex64.clone();
+        gee.replace_range(10..11, "g");
+        assert!(validate_input_hash(&gee).unwrap_err().contains("64 lowercase hex"));
+        let mut slash = hex64.clone();
+        slash.replace_range(5..6, "/");
+        assert!(validate_input_hash(&slash).unwrap_err().contains("64 lowercase hex"));
+        assert!(inputs_blob_path(Path::new("/tmp"), &slash).is_err());
+    }
+
+    #[test]
+    fn write_input_blob_quarantines_symlink_and_directory() {
+        let dir = tmpdir("blob-special");
+        let inputs = dir.join("inputs");
+        std::fs::create_dir_all(&inputs).unwrap();
+        let hash = "b".repeat(64);
+        let path = inputs.join(&hash);
+        // Directory occupying the blob name.
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_input_blob(&dir, &hash, b"payload-dir").unwrap());
+        assert!(path.is_file(), "rewrote as regular file");
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload-dir");
+        let bad = inputs.join(format!("{hash}.bad"));
+        assert!(bad.exists() && bad.is_dir(), "directory quarantined to .bad");
+
+        // Symlink occupying the blob name.
+        let hash2 = "c".repeat(64);
+        let path2 = inputs.join(&hash2);
+        let target = inputs.join("elsewhere");
+        std::fs::write(&target, b"nope").unwrap();
+        std::os::unix::fs::symlink(&target, &path2).unwrap();
+        assert!(write_input_blob(&dir, &hash2, b"payload-link").unwrap());
+        assert!(path2.is_file());
+        assert_eq!(std::fs::read(&path2).unwrap(), b"payload-link");
+        let bad2 = inputs.join(format!("{hash2}.bad"));
+        assert!(bad2.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // resolve_input_bytes refuses a symlink left in place.
+        let hash3 = "d".repeat(64);
+        let path3 = inputs.join(&hash3);
+        std::os::unix::fs::symlink(&target, &path3).unwrap();
+        let err = resolve_input_bytes(&[dir.clone()], &hash3, Vec::new()).unwrap_err();
+        assert!(
+            err.contains("not a regular file") || err.contains("symlink"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_stale_input_tmps_only_exact_pattern() {
+        let dir = tmpdir("blob-tmps");
+        let inputs = dir.join("inputs");
+        std::fs::create_dir_all(&inputs).unwrap();
+        let hash = "e".repeat(64);
+        let stale = inputs.join(format!(".{hash}.12345.tmp"));
+        std::fs::write(&stale, b"x").unwrap();
+        // Keep a good blob and a non-matching tmp.
+        std::fs::write(inputs.join(&hash), b"good").unwrap();
+        std::fs::write(inputs.join(".notahash.1.tmp"), b"y").unwrap();
+        // max_age=0 treats every matching tmp as stale (no filetime dependency).
+        let n = cleanup_stale_input_tmps(&inputs, std::time::Duration::from_secs(0));
+        assert!(n >= 1, "stale tmp removed");
+        assert!(!stale.exists());
+        assert!(inputs.join(&hash).exists());
+        assert!(inputs.join(".notahash.1.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
