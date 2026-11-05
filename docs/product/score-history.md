@@ -205,6 +205,13 @@ to live: small-table `.sqlite.gz` ≈ **0.09×** live DB; the shared `inputs/` s
 | r2k year 1 (~2.2 GB live, worst) | ~2.2 GB | ≈ **~0.9 GB** (0.09× + 0.32×) growing with rotation heads |
 | r2k year 5 (~11 GB live, worst) | ~11 GB | rotation of small-table gzips + shared inputs ≈ **~25 GB**; up to **~55 GB** worst case with the ~30 pre-* / manual slot copies of small tables |
 
+**How r2k reaches ~25 GB:** plan `backup_dir ≈ N × 0.09× + 0.32×` of the live DB size, where
+`N` is the number of retained small-table `.sqlite.gz` heads (7 daily + 12 monthly + yearlies
+≈ ~20–30) each ≈ **0.09×** live, and the shared append-only `inputs/` store ≈ **0.32×** live
+(content-addressed; grows with unique payloads, not with every gzip). For r2k year-5 live
+~11 GB: `~25 × 0.09× × 11 GB + 0.32× × 11 GB ≈ 25 GB` (order-of-magnitude; exact N and
+churn move the number).
+
 Plan disk for `backup_dir` separately from the live data-dir; rotation never deletes a
 kept gzip or an `inputs/` blob.
 

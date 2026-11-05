@@ -1196,26 +1196,71 @@ fn publish_year_summary(
     rank_input_generation.fetch_add(1, Ordering::Relaxed);
 }
 
+/// One year-chart pass over `symbols` using `fetch`. Returns how many summaries
+/// were published (each bumps `rank_input_generation`).
+fn year_worker_pass<F>(
+    symbols: &[String],
+    year: &Mutex<std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>>,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
+    mut fetch: F,
+) -> usize
+where
+    F: FnMut(&str) -> Option<Vec<crate::engine::HistoricalCandle>>,
+{
+    let mut published = 0usize;
+    for sym in symbols {
+        if let Some(c) = fetch(sym) {
+            if !c.is_empty() {
+                let sum = crate::android_chart::build_summary(&c);
+                publish_year_summary(year, sym.clone(), sum, rank_input_generation);
+                published += 1;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+    published
+}
+
 fn spawn_year_worker(
     symbols: Vec<String>,
     year: Arc<Mutex<std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>>>,
     rank_input_generation: Arc<std::sync::atomic::AtomicU64>,
 ) {
-    std::thread::spawn(move || loop {
-        if let Ok(client) = crate::fetcher::YahooClient::new() {
-            let _ = client.warm_session();
-            for sym in &symbols {
-                if let Ok(c) = client.fetch_candles(sym, "1y", "1wk") {
-                    if !c.is_empty() {
-                        let sum = crate::android_chart::build_summary(&c);
-                        publish_year_summary(&year, sym.clone(), sum, &rank_input_generation);
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(120));
-            }
+    // Keep Yahoo client across the symbol loop (same as pre-refactor).
+    let mut client = None::<crate::fetcher::YahooClient>;
+    spawn_year_worker_with_fetch(symbols, year, rank_input_generation, None, move |sym| {
+        if client.is_none() {
+            let c = crate::fetcher::YahooClient::new().ok()?;
+            let _ = c.warm_session();
+            client = Some(c);
         }
-        std::thread::sleep(std::time::Duration::from_secs(1800));
+        client.as_ref()?.fetch_candles(sym, "1y", "1wk").ok()
     });
+}
+
+/// Testable year worker: optional `max_rounds` stops the loop (production passes
+/// `None` for the forever Yahoo loop).
+fn spawn_year_worker_with_fetch<F>(
+    symbols: Vec<String>,
+    year: Arc<Mutex<std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>>>,
+    rank_input_generation: Arc<std::sync::atomic::AtomicU64>,
+    max_rounds: Option<u32>,
+    mut fetch: F,
+) -> std::thread::JoinHandle<()>
+where
+    F: FnMut(&str) -> Option<Vec<crate::engine::HistoricalCandle>> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut rounds = 0u32;
+        loop {
+            let _ = year_worker_pass(&symbols, &year, &rank_input_generation, &mut fetch);
+            rounds += 1;
+            if max_rounds.is_some_and(|m| rounds >= m) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1800));
+        }
+    })
 }
 
 impl HeadlessEngine {
@@ -3496,6 +3541,40 @@ mod full_universe_parity_tests {
         assert!(year.lock().unwrap().contains_key("X"));
         publish_year_summary(&year, "Y".into(), synthetic_year(2000, 1), &rank);
         assert_eq!(rank.load(Ordering::Relaxed), 2);
+    }
+
+    /// Y2: `spawn_year_worker` itself (via `spawn_year_worker_with_fetch`) bumps
+    /// rank_input when the mock fetcher returns candles.
+    #[test]
+    fn spawn_year_worker_bumps_rank_input_generation() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let year = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let rank = Arc::new(AtomicU64::new(0));
+        let candles: Vec<crate::engine::HistoricalCandle> = (0..40)
+            .map(|i| crate::engine::HistoricalCandle {
+                epoch_seconds: 1_700_000_000 + i * 86_400,
+                open_cents: 10_000,
+                high_cents: 11_000,
+                low_cents: 9_500,
+                close_cents: 10_500,
+                volume: 1_000,
+            })
+            .collect();
+        let handle = spawn_year_worker_with_fetch(
+            vec!["AAA".into()],
+            Arc::clone(&year),
+            Arc::clone(&rank),
+            Some(1),
+            move |_| Some(candles.clone()),
+        );
+        handle.join().expect("year worker");
+        assert!(
+            rank.load(Ordering::Relaxed) >= 1,
+            "spawn_year_worker must bump rank_input via publish_year_summary"
+        );
+        assert!(year.lock().unwrap().contains_key("AAA"));
     }
 
     /// Deterministic synthetic Year-chart summary around `price` (cents).
