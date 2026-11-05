@@ -1019,11 +1019,13 @@ pub fn evaluate_android_v3(
                 (status, reason, Some(a), c)
             }
             Err(p) => {
+                SCORE_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let msg = p
                     .downcast_ref::<&str>()
                     .map(|s| s.to_string())
                     .or_else(|| p.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "panic".into());
+                eprintln!("score history: scoring {sym} panicked: {msg}");
                 ("failed", format!("score_error:{msg}"), None, 0)
             }
         };
@@ -1113,6 +1115,8 @@ pub struct EngineStatus {
     pub ranked_rows: usize,
     /// Rows in the snapshot the ranking was computed from (loaded symbols).
     pub snapshot_rows: usize,
+    /// Symbols whose scoring panicked since start (recorded as failed `score_error`).
+    pub score_panics: u64,
     pub source: &'static str,
     pub snapshot_captured_at_epoch: Option<i64>,
 }
@@ -1355,6 +1359,8 @@ impl HeadlessEngine {
         symbol: Option<&str>,
         run: Option<&str>,
         profile: Option<&str>,
+        since: Option<i64>,
+        limit: Option<usize>,
     ) -> Result<serde_json::Value, String> {
         let store = self
             .history
@@ -1363,7 +1369,7 @@ impl HeadlessEngine {
         let profile = profile
             .map(canonical_profile)
             .unwrap_or_else(|| canonical_profile(&self.profile()));
-        history_all_json(store, symbol, run, &profile)
+        history_all_json(store, symbol, run, &profile, since, limit)
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -1379,6 +1385,7 @@ impl HeadlessEngine {
             last_error: fs.last_error,
             ranked_rows: rank_android_v3(&snap, android_universe(&snap.profile).as_deref()).len(),
             snapshot_rows: snap.len(),
+            score_panics: SCORE_PANICS.load(Ordering::Relaxed),
             source,
             snapshot_captured_at_epoch: Some(snap.captured_at_epoch),
         }
@@ -1496,6 +1503,9 @@ pub fn run_evaluation(
         },
     ))
 }
+
+/// Scoring panics caught by `evaluate_android_v3` since start (logged; in `/status`).
+pub static SCORE_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Why an evaluation's diagnostic T is NULL (`None` when it was computed).
 fn technical_reason(snap: &OpportunitySnapshot, e: &Evaluation) -> Option<String> {
@@ -1668,6 +1678,10 @@ pub fn history_json(
     Ok(v)
 }
 
+/// Default / maximum number of evaluations returned by `/history?all=1&symbol=`.
+pub const HISTORY_ALL_DEFAULT_LIMIT: usize = 500;
+pub const HISTORY_ALL_MAX_LIMIT: usize = 10_000;
+
 /// `/history?all=1`: every universe symbol's evaluation for one run (latest of the
 /// profile when `run` is `None`), with the run stats; or, with `symbol`, that symbol's
 /// evaluations (ok / excluded / failed) across runs.
@@ -1676,12 +1690,19 @@ pub fn history_all_json(
     symbol: Option<&str>,
     run: Option<&str>,
     profile: &str,
+    since: Option<i64>,
+    limit: Option<usize>,
 ) -> Result<serde_json::Value, String> {
     if let Some(sym) = symbol {
         let sym = crate::score_history::validate_symbol(sym)?;
-        let ev = store.symbol_evaluations(&sym, profile, HISTORY_MODEL)?;
+        let limit = limit.unwrap_or(HISTORY_ALL_DEFAULT_LIMIT);
+        if limit == 0 || limit > HISTORY_ALL_MAX_LIMIT {
+            return Err(format!("limit must be 1..={HISTORY_ALL_MAX_LIMIT}"));
+        }
+        let ev = store.symbol_evaluations(&sym, profile, HISTORY_MODEL, since, limit)?;
         return Ok(serde_json::json!({
-            "symbol": sym, "profile": profile, "model": HISTORY_MODEL, "evaluations": ev
+            "symbol": sym, "profile": profile, "model": HISTORY_MODEL,
+            "since": since, "limit": limit, "evaluations": ev
         }));
     }
     let run_id = match run {
@@ -2403,11 +2424,25 @@ mod history_tick_tests {
             serde_json::to_vec(&official).unwrap()
         );
         // /history?all=1 shape.
-        let v = history_all_json(&s, None, None, "sp500").unwrap();
+        let v = history_all_json(&s, None, None, "sp500", None, None).unwrap();
         assert_eq!(v["rows"], 100);
         assert_eq!(v["stats"]["universe_size"], 100);
-        let v = history_all_json(&s, Some("S99"), None, "sp500").unwrap();
+        let v = history_all_json(&s, Some("S99"), None, "sp500", None, None).unwrap();
         assert_eq!(v["evaluations"][0]["reason"], "not_loaded");
+        let v = history_all_json(&s, Some("S99"), None, "sp500", None, Some(1)).unwrap();
+        assert_eq!(v["evaluations"].as_array().unwrap().len(), 1);
+        let v = history_all_json(&s, Some("S99"), None, "sp500", Some(i64::MAX), None).unwrap();
+        assert!(v["evaluations"].as_array().unwrap().is_empty());
+        assert!(history_all_json(&s, Some("S99"), None, "sp500", None, Some(0)).is_err());
+        assert!(history_all_json(
+            &s,
+            Some("S99"),
+            None,
+            "sp500",
+            None,
+            Some(HISTORY_ALL_MAX_LIMIT + 1)
+        )
+        .is_err());
     }
 }
 

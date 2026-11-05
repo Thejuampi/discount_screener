@@ -274,6 +274,8 @@ CREATE TABLE IF NOT EXISTS score_evaluations (
     upside_bps      INTEGER,
     trust_signal    TEXT,
     inputs_hash     TEXT,
+    CHECK (status IN ('ok', 'excluded', 'failed')),
+    CHECK (decision IS NULL OR status = 'ok'),
     PRIMARY KEY (run_id, symbol)
 );
 CREATE INDEX IF NOT EXISTS score_evaluations_symbol_time ON score_evaluations(symbol, captured_at);
@@ -558,6 +560,44 @@ fn write_evaluation(
 
 /// Material-change signature of one evaluation: (status, reason class, decision).
 /// `gap_below_min:<bps>` counts as `gap_below_min`; scores, ranks and prices do not count.
+/// Evaluation columns read by [`eval_from_row`] (a macro so queries stay `concat!` literals).
+macro_rules! eval_cols {
+    () => {
+        "e.symbol, e.status, e.reason, e.rank, e.gate_gap_bps, e.composite, \
+    e.coverage, e.fundamentals, e.technical, e.forecast, e.decision, e.confidence, \
+    e.row_confidence, e.price_cents, e.intrinsic_cents, e.anchor_cents, e.anchor, e.gap_bps, \
+    e.upside_bps, e.trust_signal, e.inputs_hash, e.technical_reason"
+    };
+}
+
+fn eval_from_row(r: &rusqlite::Row) -> rusqlite::Result<EvalRecord> {
+    Ok(EvalRecord {
+        symbol: r.get(0)?,
+        status: r.get(1)?,
+        reason: r.get(2)?,
+        rank: r.get(3)?,
+        gate_gap_bps: r.get(4)?,
+        composite: r.get(5)?,
+        coverage: r.get(6)?,
+        fundamentals: r.get(7)?,
+        technical: r.get(8)?,
+        forecast: r.get(9)?,
+        decision: r.get(10)?,
+        confidence: r.get(11)?,
+        row_confidence: r.get(12)?,
+        price_cents: r.get(13)?,
+        intrinsic_cents: r.get(14)?,
+        anchor_cents: r.get(15)?,
+        anchor: r.get(16)?,
+        gap_bps: r.get(17)?,
+        upside_bps: r.get(18)?,
+        trust_signal: r.get(19)?,
+        input_idx: None,
+        inputs_hash: r.get(20)?,
+        technical_reason: r.get(21)?,
+    })
+}
+
 const INPUTS_MAX_GAP_SECS: i64 = 24 * 3600;
 
 fn material_key(status: &str, reason: &str, decision: Option<&str>) -> String {
@@ -664,6 +704,56 @@ const INPUT_ZSTD_LEVEL: i32 = 19;
 
 fn zstd_bytes(b: &[u8]) -> Result<Vec<u8>, String> {
     zstd::bulk::compress(b, INPUT_ZSTD_LEVEL).map_err(err)
+}
+
+/// Decodes a `score_inputs` blob and checks it against its sha256 and `raw_size`.
+fn check_blob(
+    hash: &str,
+    enc: Option<&str>,
+    size: Option<i64>,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let raw = match enc {
+        Some("zstd") => zstd::stream::decode_all(bytes.as_slice()).map_err(err)?,
+        Some("gzip") => gunzip_bytes(&bytes)?,
+        Some("raw") => bytes,
+        e => return Err(format!("blob {hash}: unknown encoding {e:?}")),
+    };
+    if sha256_hex(&raw) != hash {
+        return Err(format!("blob {hash}: content does not match its sha256"));
+    }
+    if Some(raw.len() as i64) != size {
+        return Err(format!("blob {hash}: raw_size {size:?} != {}", raw.len()));
+    }
+    Ok(raw)
+}
+
+/// Re-checks every `score_inputs` blob of an attached database before a restore merges it.
+fn verify_src_blobs(c: &Connection, schema: &str) -> Result<usize, String> {
+    let mut st = c
+        .prepare(
+            &[
+                "SELECT hash, encoding, raw_size, bytes FROM ",
+                schema,
+                ".score_inputs",
+            ]
+            .concat(),
+        )
+        .map_err(err)?;
+    let mut rows = st.query([]).map_err(err)?;
+    let mut n = 0;
+    while let Some(r) = rows.next().map_err(err)? {
+        let hash: String = r.get(0).map_err(err)?;
+        let bytes: Vec<u8> = r.get(3).map_err(err)?;
+        check_blob(
+            &hash,
+            r.get::<_, Option<String>>(1).map_err(err)?.as_deref(),
+            r.get(2).map_err(err)?,
+            bytes,
+        )?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 fn sha256_hex(b: &[u8]) -> String {
@@ -1547,93 +1637,90 @@ impl ScoreHistoryStore {
     pub fn evaluations(&self, run_id: &str) -> Result<Vec<EvalRecord>, String> {
         let c = self.conn.lock().map_err(|_| "lock")?;
         let mut st = c
-            .prepare(
-                "SELECT symbol, status, reason, rank, gate_gap_bps, composite, coverage, \
-                 fundamentals, technical, forecast, decision, confidence, row_confidence, \
-                 price_cents, intrinsic_cents, anchor_cents, anchor, gap_bps, upside_bps, \
-                 trust_signal, inputs_hash, technical_reason FROM score_evaluations \
-                 WHERE run_id = ?1 \
-                 ORDER BY rank IS NULL, rank, symbol",
-            )
+            .prepare(concat!(
+                "SELECT ",
+                eval_cols!(),
+                " FROM score_evaluations e WHERE e.run_id = ?1 \
+                 ORDER BY e.rank IS NULL, e.rank, e.symbol"
+            ))
             .map_err(err)?;
         let out = st
-            .query_map(params![run_id], |r| {
-                Ok(EvalRecord {
-                    symbol: r.get(0)?,
-                    status: r.get(1)?,
-                    reason: r.get(2)?,
-                    rank: r.get(3)?,
-                    gate_gap_bps: r.get(4)?,
-                    composite: r.get(5)?,
-                    coverage: r.get(6)?,
-                    fundamentals: r.get(7)?,
-                    technical: r.get(8)?,
-                    forecast: r.get(9)?,
-                    decision: r.get(10)?,
-                    confidence: r.get(11)?,
-                    row_confidence: r.get(12)?,
-                    price_cents: r.get(13)?,
-                    intrinsic_cents: r.get(14)?,
-                    anchor_cents: r.get(15)?,
-                    anchor: r.get(16)?,
-                    gap_bps: r.get(17)?,
-                    upside_bps: r.get(18)?,
-                    trust_signal: r.get(19)?,
-                    input_idx: None,
-                    inputs_hash: r.get(20)?,
-                    technical_reason: r.get(21)?,
-                })
-            })
+            .query_map(params![run_id], eval_from_row)
             .map_err(err)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(err)?;
         Ok(out)
     }
 
-    /// One symbol's evaluations across runs (oldest first), any status.
+    /// One symbol's evaluations across runs (oldest first), any status, from one indexed
+    /// join on (run_id, symbol). `since` (epoch secs, inclusive) filters; `limit` keeps the
+    /// most recent `limit` rows.
     pub fn symbol_evaluations(
         &self,
         symbol: &str,
         profile: &str,
         model: &str,
+        since: Option<i64>,
+        limit: usize,
     ) -> Result<Vec<serde_json::Value>, String> {
-        let runs: Vec<(String, i64)> = {
-            let c = self.conn.lock().map_err(|_| "lock")?;
-            let mut st = c
-                .prepare(
-                    "SELECT e.run_id, e.captured_at FROM score_evaluations e \
-                     JOIN score_runs r ON r.run_id = e.run_id \
-                     WHERE e.symbol = ?1 AND r.profile = ?2 AND r.model = ?3 \
-                     ORDER BY e.captured_at, e.run_id",
-                )
-                .map_err(err)?;
-            let v = st
-                .query_map(params![symbol, profile, model], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
-                .map_err(err)?
-                .collect::<Result<_, _>>()
-                .map_err(err)?;
-            v
-        };
-        let mut out = Vec::new();
-        for (run, at) in runs {
-            if let Some(e) = self
-                .evaluations(&run)?
-                .into_iter()
-                .find(|e| e.symbol == symbol)
-            {
-                let mut v = serde_json::to_value(&e).map_err(err)?;
-                v["run_id"] = run.into();
-                v["captured_at"] = at.into();
-                v["captured_at_utc"] = iso_utc(at).into();
-                out.push(v);
-            }
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let mut st = c
+            .prepare(concat!(
+                "SELECT * FROM (SELECT ",
+                eval_cols!(),
+                ", e.run_id, e.captured_at FROM score_evaluations e \
+                 JOIN score_runs r ON r.run_id = e.run_id \
+                 WHERE e.symbol = ?1 AND r.profile = ?2 AND r.model = ?3 AND e.captured_at >= ?4 \
+                 ORDER BY e.captured_at DESC, e.run_id DESC LIMIT ?5) \
+                 ORDER BY captured_at, run_id"
+            ))
+            .map_err(err)?;
+        let rows = st
+            .query_map(
+                params![
+                    symbol,
+                    profile,
+                    model,
+                    since.unwrap_or(i64::MIN),
+                    limit as i64
+                ],
+                |r| {
+                    Ok((
+                        eval_from_row(r)?,
+                        r.get::<_, String>(22)?,
+                        r.get::<_, i64>(23)?,
+                    ))
+                },
+            )
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (e, run, at) in rows {
+            let mut v = serde_json::to_value(&e).map_err(err)?;
+            v["run_id"] = run.into();
+            v["captured_at"] = at.into();
+            v["captured_at_utc"] = iso_utc(at).into();
+            out.push(v);
         }
         Ok(out)
     }
 
-    /// Latest run ids (newest first) for a profile+model.
+    /// Whether `run_id` is an evaluated run of this profile+model.
+    pub fn run_in_profile(&self, run_id: &str, profile: &str, model: &str) -> Result<bool, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        c.query_row(
+            "SELECT 1 FROM score_runs r JOIN score_run_stats s ON s.run_id = r.run_id \
+             WHERE r.run_id = ?1 AND r.profile = ?2 AND r.model = ?3",
+            params![run_id, profile, model],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|o| o.is_some())
+        .map_err(err)
+    }
+
+    /// The newest evaluated run id for a profile+model (`None` when there is none).
     pub fn latest_run_id(&self, profile: &str, model: &str) -> Result<Option<String>, String> {
         let c = self.conn.lock().map_err(|_| "lock")?;
         c.query_row(
@@ -1693,15 +1780,7 @@ impl ScoreHistoryStore {
                 return Err(format!("run {run_id}: input index gap at {i}"));
             }
             let bytes = bytes.ok_or_else(|| format!("run {run_id}: blob {hash} missing"))?;
-            let raw = match enc.as_deref() {
-                Some("zstd") => zstd::stream::decode_all(bytes.as_slice()).map_err(err)?,
-                Some("gzip") => gunzip_bytes(&bytes)?,
-                Some("raw") => bytes,
-                e => return Err(format!("blob {hash}: unknown encoding {e:?}")),
-            };
-            if sha256_hex(&raw) != hash || Some(raw.len() as i64) != size {
-                return Err(format!("blob {hash}: content does not match its hash"));
-            }
+            let raw = check_blob(&hash, enc.as_deref(), size, bytes)?;
             if i > 0 {
                 out.push(b',');
             }
@@ -2225,6 +2304,9 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
             return Err(format!(
                 "backup schema v{src_v} is newer than this binary's v{live_v}; upgrade first"
             ));
+        }
+        if has_table(&c, "src", "score_inputs") {
+            verify_src_blobs(&c, "src")?;
         }
         let mut sqls = Vec::new();
         for (t, key) in MERGE_TABLES {
@@ -3745,6 +3827,52 @@ mod tests {
         assert_eq!(restore(&bk, &data2, &bdir).unwrap().runs_added, 1);
         assert_eq!(restore(&bk, &data2, &bdir).unwrap().runs_added, 0);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_rechecks_blob_sha256_and_raw_size() {
+        let raw = b"{\"row\":1}".to_vec();
+        let h = sha256_hex(&raw);
+        let n = raw.len() as i64;
+        let z = zstd::bulk::compress(&raw, 3).unwrap();
+        assert_eq!(
+            check_blob(&h, Some("zstd"), Some(n), z.clone()).unwrap(),
+            raw
+        );
+        assert_eq!(
+            check_blob(&h, Some("raw"), Some(n), raw.clone()).unwrap(),
+            raw
+        );
+        let e = check_blob(&h, Some("zstd"), Some(n + 1), z.clone()).unwrap_err();
+        assert!(e.contains("raw_size"), "{e}");
+        let e = check_blob(&sha256_hex(b"x"), Some("zstd"), Some(n), z.clone()).unwrap_err();
+        assert!(e.contains("sha256"), "{e}");
+        assert!(check_blob(&h, Some("lz4"), Some(n), z.clone()).is_err());
+        // An attached backup with one corrupt blob is refused before anything merges.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute("ATTACH DATABASE ':memory:' AS src", []).unwrap();
+        let t = ["src", ".score_inputs"].concat();
+        c.execute_batch(
+            &[
+                "CREATE TABLE ",
+                &t,
+                " (hash TEXT, encoding TEXT, raw_size INTEGER, bytes BLOB)",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let ins = [
+            ["INS", "ERT INTO "].concat(),
+            t.clone(),
+            " VALUES (?1,?2,?3,?4)".into(),
+        ]
+        .concat();
+        c.execute(&ins, params![h, "zstd", n, z]).unwrap();
+        assert_eq!(verify_src_blobs(&c, "src").unwrap(), 1);
+        c.execute(&ins, params![h, "zstd", n + 5, z]).unwrap();
+        assert!(verify_src_blobs(&c, "src")
+            .unwrap_err()
+            .contains("raw_size"));
     }
 
     #[test]

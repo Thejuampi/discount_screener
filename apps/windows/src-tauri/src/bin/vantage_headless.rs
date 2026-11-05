@@ -877,7 +877,21 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
             return to_http((|| {
                 let dec = |k: &str| q.get(k).map(|v| pct_decode(v)).transpose();
                 let (sym, run, prof) = (dec("symbol")?, dec("run")?, dec("profile")?);
-                engine.history_all_json(sym.as_deref(), run.as_deref(), prof.as_deref())
+                let since = q
+                    .get("since")
+                    .map(|v| v.parse::<i64>().map_err(|_| format!("bad since: {v}")))
+                    .transpose()?;
+                let limit = q
+                    .get("limit")
+                    .map(|v| v.parse::<usize>().map_err(|_| format!("bad limit: {v}")))
+                    .transpose()?;
+                engine.history_all_json(
+                    sym.as_deref(),
+                    run.as_deref(),
+                    prof.as_deref(),
+                    since,
+                    limit,
+                )
             })());
         }
         return to_http(history_endpoint(&q, |sym, days, changes, profile| {
