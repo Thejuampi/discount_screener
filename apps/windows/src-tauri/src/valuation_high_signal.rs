@@ -561,7 +561,13 @@ fn recompute_cohort(
 }
 
 fn write_observation_audit(members: &[ForecastObservation], capture_id: &str) {
-    let path = observation_path();
+    // The checked-in fixture is only rewritten on explicit request; otherwise the audit
+    // goes to the temp dir so a test run never dirties the tree.
+    let path = if std::env::var_os("VH_UPDATE_OBSERVATION_FIXTURE").is_some() {
+        observation_path()
+    } else {
+        std::env::temp_dir().join("high_signal_screener_observation_latest.json")
+    };
     let body = serde_json::json!({
         "contract": "valuation-high-signal-screener-cohort-v1",
         "captureId": capture_id,
@@ -684,7 +690,8 @@ fn high_signal_contract_cohort_is_exactly_twenty_six_pinned_symbols() {
 /// defaults are not the goal state — live US 10Y + SEC drivers must earn solid
 /// quality; scale and Street band must hold without clamps.
 ///
-/// Writes `high_signal_screener_observation_*.json` as an audit pin after each run.
+/// Writes the observation audit to the temp dir after each run (to the checked-in
+/// fixture only with `VH_UPDATE_OBSERVATION_FIXTURE=1`).
 #[test]
 fn high_signal_screener_cohort_all_members_pass() {
     let contract = load_contract();
