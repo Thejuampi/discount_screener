@@ -162,8 +162,9 @@ first; one joined query). Duplicate snapshot symbols are ranked as on main; the 
 is the first evaluation, with the rank of its own row. Restore re-checks every
 `score_inputs` blob (sha256 and `raw_size`) before merging, and `RestoreReport` counts the
 rows added to every table.
-`/status.ranked_rows` is the real ranked count (cached per feed/pass generation, so V3 is not
-recomputed on every call and the snapshot is not re-serialized for the cache key);
+`/status.ranked_rows` is the real ranked count (cached per feed / pass /
+`rank_input_generation`, so V3 is not recomputed on every call and the snapshot is not
+re-serialized for the cache key; quote, Year-chart, and pass completion bumps all miss);
 `snapshot_rows` the loaded rows; `score_panics` the number of scoring panics caught since
 start (one per panicked evaluation, not unique symbols; each also logged).
 
@@ -181,21 +182,30 @@ price moves every run (non-material, so inputs are still stored about once a day
 Material-change days add one extra input set each. Nothing is ever pruned, so growth is
 linear.
 
-**Backup directory size (never-prune):** each daily / monthly / yearly gzip copy holds the
-**whole** score-history DB at that moment (evaluations + inputs + history), not a delta.
-With never-prune the live file grows without bound, so every retained copy does too. At the
-r2k high end (~2.2 GB of live DB after one year of daily input sets) the rotated set alone is
-already tens of GB:
+**Backup directory size (never-prune):** retention is unchanged (7 daily + 12 monthly +
+every yearly, plus newest-10 pre-migration / pre-restore / manual slots — never prune
+history tables or the blob store). Each rotated `.sqlite.gz` still holds the **small**
+score tables in full (runs, history, evaluations, run_inputs, stats, shadow).
+`score_inputs` payloads are **incremental**: content-addressed files under
+`backup_dir/inputs/<sha256>` (append-only shared store; empty `bytes` in the gzip).
+Legacy backups with inline `bytes` still restore. New blob files appear only for new
+hashes, so repeating the same input set across days does not duplicate payload bytes.
 
-| | live DB (approx) | backup dir (7 daily + 12 monthly + 1 yearly/year, each a full copy) |
+Uncompressed upper bounds (live DB, never-prune, worst-case daily input churn) are the
+table above (~0.6 GB sp500 / ~2.2 GB r2k year 1; ~11 GB r2k year 5). Gzip of the small
+tables is typically ~0.4× the uncompressed sqlite; the inputs store is already zstd inside
+each blob (~same as live). Rough backup-dir planning:
+
+| | live DB (approx) | backup dir (gzip small tables + shared `inputs/` store) |
 |---|---|---|
-| sp500 year 1 (~0.6 GB live, worst) | ~0.6 GB | ~7×0.6 + 12×~0.3 + 1×0.6 ≈ **~8 GB** |
-| r2k year 1 (~2.2 GB live, worst) | ~2.2 GB | ~7×2.2 + 12×~1.1 + 1×2.2 ≈ **~31 GB** |
-| r2k year 5 (~11 GB live, worst) | ~11 GB | mid-tens of GB of month/day heads + ~11 GB per yearly → **~80–120 GB** |
+| sp500 year 1 (~0.6 GB live, worst) | ~0.6 GB | small-table gzips ≪ 1 GB + **~0.6 GB** inputs store ≈ **~1–2 GB** |
+| r2k year 1 (~2.2 GB live, worst) | ~2.2 GB | small-table gzips a few GB + **~2.2 GB** inputs ≈ **~4–6 GB** |
+| r2k year 5 (~11 GB live, worst) | ~11 GB | small-table gzips + **~11 GB** inputs + ~30 pre-* slot copies of small tables → **~15–25 GB** (vs ~80–120 GB when every copy still embedded full inputs) |
 
-Pre-migration / pre-restore / manual slots (newest 10 of each) add up to another ~30 full
-copies at current size on top of that. Plan disk for the backup dir separately from the
-live data-dir; rotation never shrinks a kept copy.
+Pre-* / manual slots still keep ~30 extra copies of the **small** tables (not a second
+full inputs store). Plan disk for `backup_dir` separately from the live data-dir;
+rotation never deletes a kept gzip or an `inputs/` blob.
+
 ## Quote freshness (migration v5)
 
 This fixes the 11/04 wake race. The box was frozen from 10/29 ~21:10 EDT to 11/04 ~17:18 EST. About a minute after

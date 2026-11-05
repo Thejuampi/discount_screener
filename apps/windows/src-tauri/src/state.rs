@@ -130,6 +130,9 @@ pub struct AppState {
     /// Wall-clock epoch seconds when the current generation last finished a full quote
     /// pass (initial or periodic refresh). `0` = none yet.
     pub last_full_pass_at: Arc<std::sync::atomic::AtomicI64>,
+    /// Bumped on every ranking-affecting mutation (quote/fundamentals/year chart).
+    /// Combined with feed + pass generations for `/status` ranked_rows cache.
+    pub rank_input_generation: Arc<AtomicU64>,
     /// SEC ticker→CIK map (lazy; filled by EDGAR workers / demand valuation).
     pub edgar_cik_map: Arc<Mutex<Option<HashMap<String, u64>>>>,
     /// Symbols with an in-flight demand-driven valuation (avoid duplicate EDGAR hits).
@@ -217,6 +220,7 @@ impl AppState {
             feed_generation: Arc::new(AtomicU64::new(0)),
             initial_pass_completed_generation: Arc::new(AtomicU64::new(u64::MAX)),
             last_full_pass_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            rank_input_generation: Arc::new(AtomicU64::new(0)),
             edgar_cik_map: Arc::new(Mutex::new(None)),
             valuation_inflight: Arc::new(Mutex::new(HashSet::new())),
             valuation_yahoo,
@@ -225,6 +229,11 @@ impl AppState {
 
     pub fn feed_generation_arc(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.feed_generation)
+    }
+
+    pub fn bump_rank_inputs(&self) {
+        self.rank_input_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn is_profile_locked(&self) -> bool {

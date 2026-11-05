@@ -1953,6 +1953,7 @@ fn ingest_fetch_result(
     mut result: crate::fetcher::FetchResult,
     crypto: bool,
     etf: bool,
+    rank_input_generation: Option<&std::sync::atomic::AtomicU64>,
 ) -> RefreshOutcome {
     if let Some(snap) = result.snapshot.as_mut() {
         if snap.market_price_cents > 0 {
@@ -1977,6 +1978,9 @@ fn ingest_fetch_result(
         if let Some(fund) = result.fundamentals {
             screener.ingest_fundamentals(fund);
         }
+        if let Some(g) = rank_input_generation {
+            g.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     RefreshOutcome { visible, enriched }
@@ -1995,6 +1999,7 @@ pub fn refresh_symbol(symbol: String, state: State<AppState>) -> Result<String, 
         result,
         is_crypto(&symbol),
         is_etf(&symbol),
+        &state.rank_input_generation,
     )
     .ok_or_else(|| "profile changed during symbol refresh".to_string())?;
     Ok(symbol)
@@ -2396,6 +2401,7 @@ pub(crate) fn ensure_symbol_loaded_inner(
                 result,
                 is_crypto(&symbol),
                 is_etf(&symbol),
+                &state.rank_input_generation,
             )
             .ok_or_else(|| "profile changed during detail load".to_string())?;
         }
@@ -2417,6 +2423,7 @@ pub(crate) fn ensure_symbol_loaded_inner(
                 |s| {
                     s.ingest_chart_summary(symbol.clone(), summary);
                     s.ingest_daily_candles(symbol.clone(), candles);
+                    state.rank_input_generation.fetch_add(1, Ordering::Relaxed);
                 },
             ) {
                 return Err("profile changed during detail load".into());
@@ -3192,8 +3199,11 @@ mod feed_coordinator_tests {
             next_earnings_epoch: None,
             quote_fetched_at: None,
         });
+        let rank = AtomicU64::new(0);
         assert_eq!(
-            super::apply_refresh_quote_if_current(&active, 4, &screener, old_quote, false, false),
+            super::apply_refresh_quote_if_current(
+                &active, 4, &screener, old_quote, false, false, &rank,
+            ),
             None
         );
         let old_chart = vec![crate::engine::HistoricalCandle {
@@ -3212,6 +3222,7 @@ mod feed_coordinator_tests {
                 "OLD",
                 old_chart,
                 RefreshOutcome::default(),
+                &rank,
             ),
             None
         );
@@ -4145,6 +4156,7 @@ mod feed_coordinator_tests {
             },
             false,
             false,
+            None,
         );
 
         assert!(outcome.visible);
@@ -4219,6 +4231,7 @@ mod feed_coordinator_tests {
             },
             false,
             false,
+            None,
         );
 
         assert!(outcome.visible);
@@ -4249,10 +4262,11 @@ fn apply_refresh_quote_if_current(
     result: crate::fetcher::FetchResult,
     crypto: bool,
     etf: bool,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
 ) -> Option<RefreshOutcome> {
     let mut outcome = RefreshOutcome::default();
     mutate_current_enrichment_state(active_generation, generation, screener, |state| {
-        outcome = ingest_fetch_result(state, result, crypto, etf);
+        outcome = ingest_fetch_result(state, result, crypto, etf, Some(rank_input_generation));
     })
     .then_some(outcome)
 }
@@ -4264,6 +4278,7 @@ fn apply_refresh_chart_if_current(
     sym: &str,
     candles: Vec<HistoricalCandle>,
     mut outcome: RefreshOutcome,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
 ) -> Option<RefreshOutcome> {
     let summary = compute_chart_summary(&candles);
     let crypto = is_crypto(sym);
@@ -4330,6 +4345,9 @@ fn apply_refresh_chart_if_current(
             }
             outcome.visible = true;
         }
+        if outcome.visible {
+            rank_input_generation.fetch_add(1, Ordering::Relaxed);
+        }
     })
     .then_some(outcome)
 }
@@ -4343,6 +4361,7 @@ fn refresh_one_symbol(
     active_generation: &std::sync::atomic::AtomicU64,
     generation: u64,
     sym: &str,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
 ) -> Option<RefreshOutcome> {
     let crypto = is_crypto(sym);
     let etf = is_etf(sym);
@@ -4357,6 +4376,7 @@ fn refresh_one_symbol(
                 result,
                 crypto,
                 etf,
+                rank_input_generation,
             )?;
             if outcome.enriched {
                 if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
@@ -4401,6 +4421,7 @@ fn refresh_one_symbol(
             sym,
             candles,
             outcome,
+            rank_input_generation,
         )?;
     }
 
@@ -4430,6 +4451,7 @@ fn spawn_feed_workers(
 ) -> Result<(), String> {
     let total = symbols.len();
     let feed_gen = state.feed_generation_arc();
+    let rank_input_generation = Arc::clone(&state.rank_input_generation);
 
     // One shared client + session (Android: single YahooSession / OkHttp client).
     let shared_client = match YahooClient::new() {
@@ -4460,6 +4482,7 @@ fn spawn_feed_workers(
         let completed = Arc::clone(&completed);
         let enrichment_senders = Arc::clone(&enrichment_senders);
         let feed_gen = Arc::clone(&feed_gen);
+        let rank_input_generation = Arc::clone(&rank_input_generation);
         let initial_pass_completed_generation =
             Arc::clone(&state.initial_pass_completed_generation);
         let last_full_pass_at = Arc::clone(&state.last_full_pass_at);
@@ -4521,6 +4544,7 @@ fn spawn_feed_workers(
                         let completed = Arc::clone(&completed);
                         let enrichment_senders = Arc::clone(&enrichment_senders);
                         let feed_gen = Arc::clone(&feed_gen);
+                        let rank_input_generation = Arc::clone(&rank_input_generation);
 
                         handles.push(
                             thread::Builder::new()
@@ -4552,6 +4576,7 @@ fn spawn_feed_workers(
                                         &feed_gen,
                                         generation,
                                         sym,
+                                        &rank_input_generation,
                                     ) else {
                                         break;
                                     };
@@ -4640,6 +4665,7 @@ fn spawn_feed_workers(
                         let completed = Arc::clone(&completed);
                         let enrichment_senders = Arc::clone(&enrichment_senders);
                         let feed_gen = Arc::clone(&feed_gen);
+                        let rank_input_generation = Arc::clone(&rank_input_generation);
                         handles.push(
                             thread::Builder::new()
                                 .name(format!("refresh-loop-{w}"))
@@ -4659,6 +4685,7 @@ fn spawn_feed_workers(
                                         &feed_gen,
                                         generation,
                                         sym,
+                                        &rank_input_generation,
                                     ) else {
                                         break;
                                     };
