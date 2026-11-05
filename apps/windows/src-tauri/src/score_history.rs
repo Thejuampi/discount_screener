@@ -49,10 +49,12 @@ pub const SCHEMA_VERSION: i64 = QUOTE_FRESHNESS_MIGRATION;
 /// A row whose quote is older than this at record time is stored with `stale = 1`
 /// (kept, but excluded from valid history, decision changes and the shadow report).
 pub const DEFAULT_QUOTE_STALE_SECS: i64 = 1800;
-/// A run is deferred while more than this share of its rows is stale.
+/// A run is deferred while more than this share of its rows is stale (default of
+/// `--max-stale-share`; Director-approved design, 2026-11-04).
 pub const MAX_STALE_SHARE: f64 = 0.10;
 /// The recorder ticks every 60 s; a wall-clock gap longer than this between ticks means
 /// the process was suspended (or the clock jumped) and quotes must be refreshed first.
+/// Default of `--clock-jump-secs` (Director-approved design, 2026-11-04).
 pub const CLOCK_JUMP_SECS: i64 = 300;
 /// Tables exported to backups and merged on restore (indices 0..=2 are fixed).
 pub const HISTORY_TABLES: [&str; 9] = [
@@ -255,8 +257,9 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 /// - `run_annotations`: append-only notes on a run (e.g. "stale quotes after wake").
 const QUOTE_FRESHNESS_DDL: &str = "
 ALTER TABLE score_history ADD COLUMN quote_ts INTEGER;
-ALTER TABLE score_history ADD COLUMN quote_age_secs INTEGER;
-ALTER TABLE score_history ADD COLUMN stale INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE score_history ADD COLUMN quote_age_secs INTEGER
+    CHECK (quote_age_secs IS NULL OR quote_age_secs >= 0);
+ALTER TABLE score_history ADD COLUMN stale INTEGER NOT NULL DEFAULT 0 CHECK (stale IN (0, 1));
 CREATE TABLE IF NOT EXISTS run_annotations (
     run_id      TEXT NOT NULL,
     reason      TEXT NOT NULL,
@@ -284,7 +287,9 @@ pub struct RunAnnotation {
     pub created_at: i64,
 }
 
-/// Per-row quote freshness for one run: symbol -> wall-clock epoch of its last quote.
+/// Per-row quote freshness for one run: symbol -> wall-clock epoch at which OUR feed
+/// fetched its last quote (`quote_ts`). This is our fetch time, not the exchange's
+/// quote / trade timestamp.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QuoteFreshness {
     pub quote_ts: std::collections::HashMap<String, i64>,
@@ -292,14 +297,15 @@ pub struct QuoteFreshness {
 }
 
 impl QuoteFreshness {
-    /// `(quote_ts, age, stale)` for `symbol` at `at`; unknown quote time = not stale.
+    /// `(quote_ts, age, stale)` for `symbol` at `at`. Fails closed: an unknown quote
+    /// time is stale. Stale means `age > stale_after_secs` (age == threshold is fresh).
     pub fn of(&self, symbol: &str, at: i64) -> (Option<i64>, Option<i64>, bool) {
         match self.quote_ts.get(symbol) {
             Some(&ts) => {
                 let age = (at - ts).max(0);
                 (Some(ts), Some(age), age > self.stale_after_secs)
             }
-            None => (None, None, false),
+            None => (None, None, true),
         }
     }
 }
@@ -1781,6 +1787,27 @@ impl ScoreHistoryStore {
         .map_err(err)
     }
 
+    /// `(run_id, symbol)` of rows stored with `stale = 1`, filtered by run and/or symbol.
+    pub fn stale_pairs(
+        &self,
+        run_id: Option<&str>,
+        symbol: Option<&str>,
+    ) -> Result<std::collections::HashSet<(String, String)>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let mut st = c
+            .prepare(
+                "SELECT run_id, symbol FROM score_history WHERE stale = 1 \
+                 AND (?1 IS NULL OR run_id = ?1) AND (?2 IS NULL OR symbol = ?2)",
+            )
+            .map_err(err)?;
+        let out = st
+            .query_map(params![run_id, symbol], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        Ok(out)
+    }
+
     /// All evaluations of one run (rank order for `ok`, then symbol).
     pub fn evaluations(&self, run_id: &str) -> Result<Vec<EvalRecord>, String> {
         let c = self.conn.lock().map_err(|_| "lock")?;
@@ -2034,42 +2061,8 @@ impl ScoreHistoryStore {
         now: i64,
     ) -> Result<RunAnnotation, String> {
         self.check_writable()?;
-        let run_id = validate_run_id(run_id)?;
-        let reason = reason.trim();
-        if reason.is_empty() {
-            return Err("annotation reason is empty".into());
-        }
-        if reason.chars().count() > MAX_ANNOTATION_LEN {
-            return Err(format!(
-                "annotation reason longer than {MAX_ANNOTATION_LEN} chars"
-            ));
-        }
-        if reason.chars().any(|ch| ch.is_control()) {
-            return Err("annotation reason has control characters".into());
-        }
         let c = self.conn.lock().map_err(|_| "lock")?;
-        let exists = c
-            .query_row(
-                "SELECT 1 FROM score_runs WHERE run_id = ?1",
-                params![run_id],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(err)?
-            .is_some();
-        if !exists {
-            return Err(format!("not found: run {run_id}"));
-        }
-        c.execute(
-            "INSERT INTO run_annotations (run_id, reason, created_at) VALUES (?1,?2,?3)",
-            params![run_id, reason, now],
-        )
-        .map_err(err)?;
-        Ok(RunAnnotation {
-            run_id,
-            reason: reason.to_string(),
-            created_at: now,
-        })
+        annotate_conn(&c, run_id, reason, now)
     }
 
     /// Annotations of one run, oldest first.
@@ -2743,6 +2736,78 @@ pub fn history_due(i: &DueInputs) -> Due {
     Due::No("interval not elapsed")
 }
 
+/// Validated append-only INSERT of one run annotation (plain INSERT; triggers refuse
+/// any update / delete / overwrite).
+fn annotate_conn(
+    c: &Connection,
+    run_id: &str,
+    reason: &str,
+    now: i64,
+) -> Result<RunAnnotation, String> {
+    let run_id = validate_run_id(run_id)?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("annotation reason is empty".into());
+    }
+    if reason.chars().count() > MAX_ANNOTATION_LEN {
+        return Err(format!(
+            "annotation reason longer than {MAX_ANNOTATION_LEN} chars"
+        ));
+    }
+    if reason.chars().any(|ch| ch.is_control()) {
+        return Err("annotation reason has control characters".into());
+    }
+    let exists = c
+        .query_row(
+            "SELECT 1 FROM score_runs WHERE run_id = ?1",
+            params![run_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(err)?
+        .is_some();
+    if !exists {
+        return Err(format!("not found: run {run_id}"));
+    }
+    c.execute(
+        "INSERT INTO run_annotations (run_id, reason, created_at) VALUES (?1,?2,?3)",
+        params![run_id, reason, now],
+    )
+    .map_err(err)?;
+    Ok(RunAnnotation {
+        run_id,
+        reason: reason.to_string(),
+        created_at: now,
+    })
+}
+
+/// CLI-only annotation of an existing `history.sqlite` (works while `serve` runs:
+/// SQLite file locking + busy timeout; no migration, no create). Refuses a store that is
+/// not at the current schema or misses any append-only trigger.
+pub fn annotate_file(
+    path: &Path,
+    run_id: &str,
+    reason: &str,
+    now: i64,
+) -> Result<RunAnnotation, String> {
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    c.busy_timeout(BUSY_TIMEOUT).map_err(err)?;
+    let v = current_version(&c)?;
+    if v != SCHEMA_VERSION {
+        return Err(format!(
+            "history schema v{v}, need v{SCHEMA_VERSION} (start the new serve once to migrate)"
+        ));
+    }
+    let missing = missing_triggers(&c);
+    if !missing.is_empty() {
+        return Err(format!(
+            "refusing: missing append-only triggers {missing:?}"
+        ));
+    }
+    annotate_conn(&c, run_id, reason, now)
+}
+
 /// Quote-freshness inputs for one due run (wall-clock epochs).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreshInputs {
@@ -2756,6 +2821,8 @@ pub struct FreshInputs {
     /// When the recorder last detected a wall-clock gap (suspend / clock jump).
     pub jump_at: Option<i64>,
     pub stale_after: i64,
+    /// Max share of stale rows (`--max-stale-share`, default [`MAX_STALE_SHARE`]).
+    pub max_stale_share: f64,
 }
 
 /// Deferral reason when a due run must wait for fresher quotes, else `None`.
@@ -2764,54 +2831,86 @@ pub struct FreshInputs {
 /// detected; a full pass within `stale_after`; at most [`MAX_STALE_SHARE`] stale rows.
 pub fn freshness_gate(i: &FreshInputs) -> Option<&'static str> {
     if let Some(pass) = i.last_full_pass_at {
-        if let Some(j) = i.jump_at {
-            if pass <= j {
-                return Some("clock jump: waiting for a quote pass after wake");
-            }
+        // `jump_at` is cleared by [`TickClock::tick`] only once a NEW pass ended after it.
+        if i.jump_at.is_some() {
+            return Some("clock jump: waiting for a quote pass after wake");
         }
         if i.now - pass > i.stale_after {
             return Some("waiting for a fresh quote pass");
         }
     }
-    if i.rows > 0 && i.stale_rows as f64 > i.rows as f64 * MAX_STALE_SHARE {
+    if i.rows > 0 && i.stale_rows as f64 > i.rows as f64 * i.max_stale_share {
         return Some("too many stale quotes");
     }
     None
 }
 
-/// Wall-clock tick tracking for the recorder (detects suspend / clock jumps).
+/// Wall-clock tick tracking for the recorder (detects suspend / clock jumps) and the
+/// current deferral. IN-MEMORY ONLY: never persisted; a restart starts clean (a fresh
+/// process has no `last_full_pass_at` until its own feed completes a pass anyway).
 #[derive(Debug)]
 pub struct TickClock {
     pub stale_after: i64,
-    state: Mutex<(Option<i64>, Option<i64>)>,
+    /// Tick gap (either direction) treated as a suspend / clock jump.
+    pub jump_secs: i64,
+    pub max_stale_share: f64,
+    /// (last tick, pending jump = (detected at, last_full_pass_at when detected)).
+    state: Mutex<(Option<i64>, Option<(i64, Option<i64>)>)>,
+    /// Freshness deferral in progress: (since, latest reason).
+    deferred: Mutex<Option<(i64, &'static str)>>,
 }
 
 impl TickClock {
     pub fn new(stale_after: i64) -> Self {
+        Self::with_limits(stale_after, CLOCK_JUMP_SECS, MAX_STALE_SHARE)
+    }
+
+    pub fn with_limits(stale_after: i64, jump_secs: i64, max_stale_share: f64) -> Self {
         Self {
             stale_after,
+            jump_secs,
+            max_stale_share,
             state: Mutex::new((None, None)),
+            deferred: Mutex::new(None),
         }
     }
 
     /// Records a tick at `now` and returns the time of the pending clock jump, if any.
-    /// A gap longer than [`CLOCK_JUMP_SECS`] (either direction) since the previous tick
-    /// starts a jump; it clears once a full quote pass ended after it.
+    /// A gap longer than `jump_secs` in EITHER direction since the previous tick starts
+    /// a jump. It clears only when `last_full_pass_at` has CHANGED since the jump and
+    /// the new pass ended strictly after it (a pass stamped at the jump second, or an
+    /// older pass that looks "later" after a backward jump, does not count).
     pub fn tick(&self, now: i64, last_full_pass_at: Option<i64>) -> Option<i64> {
         let mut st = self.state.lock().unwrap();
         let (last, mut jump) = *st;
         if let Some(prev) = last {
-            if (now - prev).abs() > CLOCK_JUMP_SECS {
-                jump = Some(now);
+            if (now - prev).abs() > self.jump_secs {
+                jump = Some((now, last_full_pass_at));
             }
         }
-        if let (Some(j), Some(p)) = (jump, last_full_pass_at) {
-            if p > j {
+        if let (Some((j, at_jump)), Some(p)) = (jump, last_full_pass_at) {
+            if Some(p) != at_jump && p > j {
                 jump = None;
             }
         }
         *st = (Some(now), jump);
-        jump
+        jump.map(|(j, _)| j)
+    }
+
+    /// Notes a freshness deferral at `now` (keeps the first `since`).
+    pub fn note_deferred(&self, now: i64, why: &'static str) {
+        let mut d = self.deferred.lock().unwrap();
+        let since = d.map_or(now, |(s, _)| s);
+        *d = Some((since, why));
+    }
+
+    pub fn clear_deferred(&self) {
+        *self.deferred.lock().unwrap() = None;
+    }
+
+    /// `(deferred_since, reason)` while a due run is held back by the freshness gate.
+    pub fn deferred(&self) -> Option<(i64, &'static str)> {
+        *self.deferred.lock().unwrap()
     }
 }
 
@@ -5031,5 +5130,254 @@ mod tests {
         assert_eq!(s.stale_counts(&meta(100).run_id()).unwrap(), (1, 0));
         assert_eq!(s.history("ADSK", None, 200, None, None).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    fn fresh_of(ts: &[(&str, i64)]) -> QuoteFreshness {
+        QuoteFreshness {
+            quote_ts: ts.iter().map(|(s, t)| (s.to_string(), *t)).collect(),
+            stale_after_secs: DEFAULT_QUOTE_STALE_SECS,
+        }
+    }
+
+    #[test]
+    fn stale_boundary_1800_fresh_1801_stale_unknown_stale_per_row_age() {
+        let f = fresh_of(&[
+            ("A", 10_000 - 1800),
+            ("B", 10_000 - 1801),
+            ("C", 10_000 - 5),
+        ]);
+        assert_eq!(f.of("A", 10_000), (Some(8_200), Some(1800), false));
+        assert_eq!(f.of("B", 10_000), (Some(8_199), Some(1801), true));
+        assert_eq!(
+            f.of("C", 10_000),
+            (Some(9_995), Some(5), false),
+            "per-row age"
+        );
+        assert_eq!(f.of("ZZZ", 10_000), (None, None, true), "unknown = stale");
+        // A quote stamped after `at` has age 0 (never negative).
+        assert_eq!(f.of("C", 9_990), (Some(9_995), Some(0), false));
+    }
+
+    fn gate(
+        rows: usize,
+        stale_rows: usize,
+        pass: Option<i64>,
+        jump: Option<i64>,
+    ) -> Option<&'static str> {
+        freshness_gate(&FreshInputs {
+            now: 100_000,
+            rows,
+            stale_rows,
+            last_full_pass_at: pass,
+            jump_at: jump,
+            stale_after: 1800,
+            max_stale_share: MAX_STALE_SHARE,
+        })
+    }
+
+    #[test]
+    fn gate_boundaries_share_and_pass_age() {
+        assert_eq!(gate(20, 2, None, None), None, "2/20 = 10% is allowed");
+        assert_eq!(gate(20, 3, None, None), Some("too many stale quotes"));
+        assert_eq!(gate(0, 0, None, None), None);
+        assert_eq!(
+            gate(20, 0, Some(100_000 - 1800), None),
+            None,
+            "pass 1800 s ago ok"
+        );
+        assert_eq!(
+            gate(20, 0, Some(100_000 - 1801), None),
+            Some("waiting for a fresh quote pass")
+        );
+        assert_eq!(
+            gate(20, 0, Some(100_000), Some(99_000)),
+            Some("clock jump: waiting for a quote pass after wake")
+        );
+        // A custom share flag is honoured.
+        let mut i = FreshInputs {
+            now: 1,
+            rows: 20,
+            stale_rows: 5,
+            last_full_pass_at: None,
+            jump_at: None,
+            stale_after: 1800,
+            max_stale_share: 0.25,
+        };
+        assert_eq!(freshness_gate(&i), None);
+        i.stale_rows = 6;
+        assert!(freshness_gate(&i).is_some());
+    }
+
+    #[test]
+    fn tick_jump_boundary_300_vs_301_and_pass_must_end_after_it() {
+        let c = TickClock::new(1800);
+        assert_eq!(c.tick(1_000, Some(900)), None);
+        assert_eq!(c.tick(1_300, Some(900)), None, "300 s gap is not a jump");
+        assert_eq!(c.tick(1_601, Some(900)), Some(1_601), "301 s gap is a jump");
+        // A pass stamped exactly at the jump second does not clear it.
+        assert_eq!(c.tick(1_620, Some(1_601)), Some(1_601), "pass == jump");
+        assert_eq!(
+            c.tick(1_640, Some(1_602)),
+            None,
+            "pass after the jump clears"
+        );
+        assert_eq!(c.tick(1_700, Some(1_602)), None);
+    }
+
+    #[test]
+    fn backward_clock_jump_defers_until_a_new_pass() {
+        let c = TickClock::new(1800);
+        assert_eq!(c.tick(10_000, Some(9_990)), None);
+        // Clock stepped back 1 h: the last pass (9 990) now looks "in the future".
+        assert_eq!(c.tick(6_400, Some(9_990)), Some(6_400));
+        assert_eq!(
+            c.tick(6_460, Some(9_990)),
+            Some(6_400),
+            "old pass does not clear"
+        );
+        assert_eq!(
+            gate(20, 0, Some(9_990), c.tick(6_520, Some(9_990))),
+            Some("clock jump: waiting for a quote pass after wake")
+        );
+        assert_eq!(
+            c.tick(6_580, Some(6_570)),
+            None,
+            "a new pass after the jump clears"
+        );
+        // A backward gap of exactly 300 s is not a jump.
+        assert_eq!(c.tick(6_280, Some(6_570)), None);
+        assert_eq!(c.tick(5_979, Some(6_570)), Some(5_979));
+    }
+
+    #[test]
+    fn deferral_tracks_first_since_and_clears() {
+        let c = TickClock::new(1800);
+        assert_eq!(c.deferred(), None);
+        c.note_deferred(100, "clock jump: waiting for a quote pass after wake");
+        c.note_deferred(160, "too many stale quotes");
+        assert_eq!(c.deferred(), Some((100, "too many stale quotes")));
+        c.clear_deferred();
+        assert_eq!(c.deferred(), None);
+    }
+
+    #[test]
+    fn stored_quote_columns_age_not_null_and_checks_enforced() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = fresh_of(&[("ADSK", 1_000 - 1801), ("BK", 1_000 - 60)]);
+        s.record_run_quotes(
+            &meta(1_000),
+            &[
+                row("ADSK", "Act", 30, 60, 0, 30),
+                row("BK", "Watch", 20, 50, 0, 20),
+                row("CC", "Watch", 20, 50, 0, 20),
+            ],
+            None,
+            Some(&f),
+        )
+        .unwrap();
+        let c = s.conn.lock().unwrap();
+        let got: Vec<(String, Option<i64>, Option<i64>, i64)> = c
+            .prepare(
+                "SELECT symbol, quote_ts, quote_age_secs, stale FROM score_history ORDER BY symbol",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("ADSK".into(), Some(-801), Some(1801), 1),
+                ("BK".into(), Some(940), Some(60), 0),
+                ("CC".into(), None, None, 1),
+            ]
+        );
+        let t = HISTORY_TABLES[1];
+        let ins = |stale: i64, age: i64| {
+            c.execute(
+                &format!(
+                    "{} INTO {t} (run_id, symbol, captured_at, rank, decision, composite, \
+                     price_cents, quote_age_secs, stale) VALUES ('sp500-1000-v3', 'X{stale}{age}', 1000, 9, \
+                     'Act', 1, 1, ?1, ?2)",
+                    "INSERT"
+                ),
+                params![age, stale],
+            )
+        };
+        assert!(ins(2, 5).unwrap_err().to_string().contains("CHECK"));
+        assert!(ins(0, -1).unwrap_err().to_string().contains("CHECK"));
+        assert!(ins(1, 0).is_ok());
+    }
+
+    #[test]
+    fn v5_backup_round_trip_restores_annotations() {
+        let root = tmpdir("v5rt");
+        let bdir = root.join("bk");
+        let src = ScoreHistoryStore::open(&root.join("src.sqlite"), Some(&bdir)).unwrap();
+        let f = fresh_of(&[("ADSK", 5 - 3600)]);
+        src.record_run_quotes(
+            &meta(5),
+            &[row("ADSK", "Act", 30, 60, 0, 30)],
+            None,
+            Some(&f),
+        )
+        .unwrap();
+        let id = meta(5).run_id();
+        src.annotate_run(&id, "stale quotes after wake", 7).unwrap();
+        src.annotate_run(&id, "second", 8).unwrap();
+        let bk = root.join("v5.sqlite.gz");
+        src.export_to(&bk).unwrap();
+        let data = root.join("d");
+        let r = restore(&bk, &data, &bdir).unwrap();
+        assert_eq!((r.runs_added, r.rows_added, r.annotations_added), (1, 1, 2));
+        let r = restore(&bk, &data, &bdir).unwrap();
+        assert_eq!(r.annotations_added, 0, "idempotent");
+        let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+        assert_eq!(s.annotations(&id).unwrap(), src.annotations(&id).unwrap());
+        assert_eq!(
+            s.stale_counts(&id).unwrap(),
+            (1, 1),
+            "stale flag survives restore"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v4_backup_restores_with_zero_annotations() {
+        let root = tmpdir("v4rt");
+        let f = root.join("v4.sqlite");
+        custom_backup(&f, 4, |_, _| {});
+        let r = restore(&f, &root.join("d"), &root.join("bk")).unwrap();
+        assert_eq!((r.runs_added, r.rows_added, r.annotations_added), (1, 1, 0));
+        let s = ScoreHistoryStore::open(&root.join("d").join("history.sqlite"), None).unwrap();
+        assert_eq!(
+            s.stale_counts("sp500-7-v3").unwrap(),
+            (1, 0),
+            "pre-v5 rows not stale"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn annotate_file_is_the_cli_path_and_checks_schema() {
+        let root = tmpdir("annfile");
+        let p = root.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        s.record_run(&meta(100), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        // Works while another handle (the serve) holds the store open.
+        let a = annotate_file(&p, &meta(100).run_id(), "stale", 9).unwrap();
+        assert_eq!(s.annotations(&meta(100).run_id()).unwrap(), vec![a]);
+        assert!(annotate_file(&p, "sp500-1-v3", "x", 9)
+            .unwrap_err()
+            .contains("not found"));
+        assert!(annotate_file(&root.join("missing.sqlite"), "sp500-1-v3", "x", 9).is_err());
+        drop(s);
+        let old = root.join("v4.sqlite");
+        drop(ScoreHistoryStore::open_with(&old, None, &MIGRATIONS[..4]).unwrap());
+        assert!(annotate_file(&old, "sp500-1-v3", "x", 9)
+            .unwrap_err()
+            .contains("schema v4"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

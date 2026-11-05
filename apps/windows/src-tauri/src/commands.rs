@@ -636,6 +636,31 @@ pub(crate) mod opportunity_projection_tests {
     use crate::regime::MarketRegime;
     use std::sync::{mpsc, Arc, Mutex};
 
+    #[test]
+    fn history_tick_full_pass_needs_90pct_fresh_quotes() {
+        let mut st = ScreenerState::new();
+        let syms: Vec<String> = (0..10).map(|k| format!("S{k}")).collect();
+        for (k, sym) in syms.iter().enumerate() {
+            st.ingest_snapshot(MarketSnapshot {
+                symbol: sym.clone(),
+                company_name: None,
+                profitable: true,
+                market_price_cents: 100,
+                intrinsic_value_cents: 0,
+                previous_close_cents: 0,
+                next_earnings_epoch: None,
+                // S0..S8 quoted in this pass (>= 1000), S9 before it.
+                quote_fetched_at: Some(if k < 9 { 1_000 + k as i64 } else { 999 }),
+            });
+        }
+        assert!(super::full_pass_succeeded(&syms, &st, 1_000), "9/10 = 90%");
+        assert!(!super::full_pass_succeeded(&syms, &st, 1_001), "8/10 < 90%");
+        let mut more = syms.clone();
+        more.push("NEVER".into());
+        assert!(!super::full_pass_succeeded(&more, &st, 1_000), "9/11 < 90%");
+        assert!(super::full_pass_succeeded(&[], &st, 1_000));
+    }
+
     pub(crate) fn fixture_state() -> Arc<Mutex<ScreenerState>> {
         let mut state = ScreenerState::new();
         for (symbol, price, intrinsic, sector) in [
@@ -1883,13 +1908,42 @@ pub fn wall_epoch() -> i64 {
         .unwrap_or(0)
 }
 
-/// Stamps the wall-clock end of a full quote pass for the current generation.
+/// Share of a pass's symbols that must get a fresh quote for it to count as a full pass.
+pub const FULL_PASS_MIN_SUCCESS: f64 = 0.90;
+
+/// True when at least [`FULL_PASS_MIN_SUCCESS`] of `symbols` were quoted at or after
+/// `pass_start` (an empty universe is trivially full).
+pub fn full_pass_succeeded(
+    symbols: &[String],
+    screener: &crate::engine::ScreenerState,
+    pass_start: i64,
+) -> bool {
+    let ok = symbols
+        .iter()
+        .filter(|s| {
+            screener
+                .snapshots
+                .get(s.as_str())
+                .and_then(|x| x.quote_fetched_at)
+                .is_some_and(|t| t >= pass_start)
+        })
+        .count();
+    ok as f64 >= symbols.len() as f64 * FULL_PASS_MIN_SUCCESS
+}
+
+/// Stamps the wall-clock end of a full quote pass for the current generation, only
+/// when at least 90% of its fetches succeeded (fresh quote since `pass_start`).
 fn mark_full_pass_if_current(
     feed_gen: &std::sync::atomic::AtomicU64,
     generation: u64,
     last_full_pass_at: &std::sync::atomic::AtomicI64,
+    symbols: &[String],
+    screener: &std::sync::Mutex<crate::engine::ScreenerState>,
+    pass_start: i64,
 ) {
-    if generation_is_current(feed_gen, generation) {
+    if generation_is_current(feed_gen, generation)
+        && full_pass_succeeded(symbols, &screener.lock().unwrap(), pass_start)
+    {
         last_full_pass_at.store(wall_epoch(), Ordering::SeqCst);
     }
 }
@@ -4260,7 +4314,7 @@ fn apply_refresh_chart_if_current(
                 intrinsic_value_cents: 0,
                 previous_close_cents: 0,
                 next_earnings_epoch: None,
-                quote_fetched_at: None,
+                quote_fetched_at: (close > 0).then(wall_epoch),
             });
             let sector = if crypto {
                 Some("Cryptocurrency".to_string())
@@ -4421,6 +4475,7 @@ fn spawn_feed_workers(
                     symbols.len(),
                     feed_log.path().display()
                 ));
+                let initial_start = wall_epoch();
                 let mut pending: Vec<String> = symbols.iter().cloned().collect();
 
                 for round in 0..=MAX_RETRY_ROUNDS {
@@ -4558,13 +4613,21 @@ fn spawn_feed_workers(
                     &initial_pass_completed_generation,
                     generation,
                 );
-                mark_full_pass_if_current(&feed_gen, generation, &last_full_pass_at);
+                mark_full_pass_if_current(
+                    &feed_gen,
+                    generation,
+                    &last_full_pass_at,
+                    &symbols,
+                    &screener,
+                    initial_start,
+                );
 
                 loop {
                     thread::sleep(std::time::Duration::from_secs(FULL_REFRESH_INTERVAL_SECS));
                     if !generation_is_current(&feed_gen, generation) {
                         return;
                     }
+                    let pass_start = wall_epoch();
                     let cursor = Arc::new(AtomicUsize::new(0));
                     let mut handles = Vec::new();
                     for w in 0..REFRESH_CONCURRENCY {
@@ -4620,7 +4683,14 @@ fn spawn_feed_workers(
                     for h in handles {
                         let _ = h.join();
                     }
-                    mark_full_pass_if_current(&feed_gen, generation, &last_full_pass_at);
+                    mark_full_pass_if_current(
+                        &feed_gen,
+                        generation,
+                        &last_full_pass_at,
+                        &symbols,
+                        &screener,
+                        pass_start,
+                    );
                 }
             })
             .map_err(|e| {

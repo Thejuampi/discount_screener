@@ -7,7 +7,13 @@
   older than `--quote-stale-secs` (default 1800), or when > 10% of rows are stale; this also gates the 18 h close catch-up.
 - Additive `quote_ts`, `quote_age_secs`, `stale` columns; stale rows are stored but excluded from `/history`,
   decision changes and the shadow report. `/status` adds `oldest_quote_age_secs`, `stale_symbols`.
-- Append-only `run_annotations` + `history-annotate` CLI / `POST /history/annotate`.
+- A priced row with no quote time counts as stale (fails closed). A full pass needs fresh quotes for at least 90% of
+  the universe.
+- Flags: `--clock-jump-secs` (300), `--max-stale-share` (0.10), `--defer-warn-hours` (6). `/status` adds
+  `deferred_since_epoch` and `deferred_reason`.
+- `/history?all=1` returns a boolean `stale` flag on every evaluation.
+- Append-only `run_annotations`, written only by the `history-annotate` CLI (no daemon write route).
+- `POST /persist` refuses requests with an `Origin` header and requires `X-Vantage-Cli: 1`.
 
 ### V3.1 decision rule — SHADOW MODE (Android core + headless)
 

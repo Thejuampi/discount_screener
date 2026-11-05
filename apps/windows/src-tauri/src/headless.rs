@@ -1102,6 +1102,10 @@ pub struct EngineConfig {
     pub no_feed: bool,
     /// A stored row whose quote is older than this is marked stale (default 1800 s).
     pub quote_stale_secs: i64,
+    /// Tick gap treated as a suspend / clock jump (default 300 s).
+    pub clock_jump_secs: i64,
+    /// Max stale-row share before a run is deferred (default 0.10).
+    pub max_stale_share: f64,
 }
 
 #[derive(Serialize)]
@@ -1128,6 +1132,9 @@ pub struct EngineStatus {
     pub stale_symbols: Vec<String>,
     /// End of the last full quote pass (wall-clock epoch), `None` before the first.
     pub last_full_pass_at_epoch: Option<i64>,
+    /// Set while a due history run is deferred by the quote-freshness gate.
+    pub deferred_since_epoch: Option<i64>,
+    pub deferred_reason: Option<&'static str>,
 }
 
 /// Model id stored in `score_runs.model` by the headless writer.
@@ -1241,7 +1248,11 @@ impl HeadlessEngine {
         } else {
             None
         };
-        let clock = crate::score_history::TickClock::new(cfg.quote_stale_secs);
+        let clock = crate::score_history::TickClock::with_limits(
+            cfg.quote_stale_secs,
+            cfg.clock_jump_secs,
+            cfg.max_stale_share,
+        );
         Ok(Arc::new(Self {
             state,
             cfg,
@@ -1339,6 +1350,11 @@ impl HeadlessEngine {
             self.cfg.market_context,
             now,
         )
+    }
+
+    /// `(since, reason)` while a due history run is deferred by the freshness gate.
+    pub fn history_deferred(&self) -> Option<(i64, &'static str)> {
+        self.clock.deferred()
     }
 
     /// Appends an operator annotation to a stored run (append-only).
@@ -1477,6 +1493,8 @@ impl HeadlessEngine {
             oldest_quote_age_secs: quote.0,
             stale_symbols: quote.1,
             last_full_pass_at_epoch: self.last_full_pass(),
+            deferred_since_epoch: self.clock.deferred().map(|d| d.0),
+            deferred_reason: self.clock.deferred().map(|d| d.1),
         }
     }
 }
@@ -1515,7 +1533,9 @@ pub fn quote_age_summary(
         if r.row.market_price_cents <= 0 {
             continue;
         }
+        // Fails closed: a priced row without a quote time counts as stale.
         let Some(ts) = times.get(&r.row.symbol) else {
+            stale.push(r.row.symbol.clone());
             continue;
         };
         let age = (now - ts).max(0);
@@ -1812,9 +1832,12 @@ pub fn record_history_tick_fresh(
         last_full_pass_at,
         jump_at,
         stale_after: clock.stale_after,
+        max_stale_share: clock.max_stale_share,
     }) {
+        clock.note_deferred(now, why);
         return Ok(HistoryWrite::Skipped(why));
     }
+    clock.clear_deferred();
     let have: std::collections::HashSet<&str> =
         snap.rows.iter().map(|r| r.row.symbol.as_str()).collect();
     let incomplete: Vec<String> = universe
@@ -1890,7 +1913,13 @@ pub fn history_all_json(
         if limit == 0 || limit > HISTORY_ALL_MAX_LIMIT {
             return Err(format!("limit must be 1..={HISTORY_ALL_MAX_LIMIT}"));
         }
-        let ev = store.symbol_evaluations(&sym, profile, HISTORY_MODEL, since, limit)?;
+        let mut ev = store.symbol_evaluations(&sym, profile, HISTORY_MODEL, since, limit)?;
+        // `stale`: the stored row's quote was over the threshold (excluded from /history).
+        let stale = store.stale_pairs(None, Some(&sym))?;
+        for v in &mut ev {
+            let run = v["run_id"].as_str().unwrap_or("").to_string();
+            v["stale"] = stale.contains(&(run, sym.clone())).into();
+        }
         return Ok(serde_json::json!({
             "symbol": sym, "profile": profile, "model": HISTORY_MODEL,
             "since": since, "limit": limit, "evaluations": ev
@@ -1913,7 +1942,17 @@ pub fn history_all_json(
     let stats = store
         .run_stats(&run_id)?
         .ok_or_else(|| format!("run {run_id} has no evaluations"))?;
-    let evals = store.evaluations(&run_id)?;
+    let stale = store.stale_pairs(Some(&run_id), None)?;
+    let evals: Vec<serde_json::Value> = store
+        .evaluations(&run_id)?
+        .into_iter()
+        .map(|e| {
+            let key = (run_id.clone(), e.symbol.clone());
+            let mut v = serde_json::to_value(e).unwrap();
+            v["stale"] = stale.contains(&key).into();
+            v
+        })
+        .collect();
     Ok(serde_json::json!({
         "run_id": run_id, "profile": profile, "model": HISTORY_MODEL,
         "stats": stats, "rows": evals.len(), "evaluations": evals
@@ -2574,6 +2613,11 @@ mod history_tick_tests {
             ftick(&f, &s, &seen, &clock, wake),
             HistoryWrite::Skipped("clock jump: waiting for a quote pass after wake")
         );
+        assert_eq!(
+            clock.deferred(),
+            Some((wake, "clock jump: waiting for a quote pass after wake")),
+            "/status deferred_since + deferred_reason"
+        );
         // Still before a post-wake pass: keeps waiting (close catch-up included).
         assert_eq!(
             ftick(&f, &s, &seen, &clock, wake + 60),
@@ -2593,10 +2637,49 @@ mod history_tick_tests {
             matches!(w, HistoryWrite::Recorded { trigger: "close", rows, .. } if rows == n),
             "{w:?}"
         );
+        assert_eq!(clock.deferred(), None, "cleared once recorded");
         assert_eq!(
             s.stale_counts(&format!("sp500-{t}-v3")).unwrap(),
             (n as i64, 0)
         );
+    }
+
+    #[test]
+    fn status_quote_ages_boundary_and_unknown_is_stale() {
+        let mut f = live_fake();
+        f.snap = wide_snap();
+        let syms = priced(&f);
+        assert!(syms.len() >= 3);
+        let now = 50_000;
+        let mut t: std::collections::HashMap<String, i64> = f
+            .snap
+            .rows
+            .iter()
+            .map(|r| (r.row.symbol.clone(), now - 5))
+            .collect();
+        t.insert(syms[0].clone(), now - 1800);
+        t.insert(syms[1].clone(), now - 1801);
+        t.remove(&syms[2]); // no quote time
+        let (oldest, stale) = quote_age_summary(&f.snap, &t, now, 1800);
+        assert_eq!(oldest, Some(1801));
+        let mut want = vec![syms[1].clone(), syms[2].clone()];
+        want.sort();
+        assert_eq!(stale, want);
+    }
+
+    #[test]
+    fn unknown_quote_time_fails_closed_and_defers() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let f = live_fake();
+        f.pass.set(Some(NOW - 10));
+        *f.quotes.borrow_mut() = Some(Default::default());
+        assert_eq!(
+            ftick(&f, &s, &seen, &clock, NOW),
+            HistoryWrite::Skipped("too many stale quotes")
+        );
+        assert_eq!(s.run_count().unwrap(), 0);
     }
 
     #[test]
@@ -2682,6 +2765,30 @@ mod history_tick_tests {
         assert_eq!(pts(&syms[1]), vec![NOW, t]);
         let j = history_json(&s, &syms[0], None, true, t, "sp500").unwrap();
         assert_eq!(j["changes"].as_array().unwrap().len(), 0);
+        // /history?all=1 carries the per-evaluation stale flag (run and symbol forms).
+        let run = format!("sp500-{t}-v3");
+        let v = history_all_json(&s, None, Some(&run), "sp500", None, None).unwrap();
+        let flag = |sym: &str| {
+            v["evaluations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["symbol"] == sym)
+                .unwrap()["stale"]
+                .clone()
+        };
+        assert_eq!(
+            (flag(&syms[0]), flag(&syms[1])),
+            (true.into(), false.into())
+        );
+        let v = history_all_json(&s, Some(&syms[0]), None, "sp500", None, None).unwrap();
+        let flags: Vec<_> = v["evaluations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["stale"].as_bool().unwrap())
+            .collect();
+        assert_eq!(flags, [false, true]);
     }
 
     const NOW: i64 = 1_793_538_000; // Sun 2026-11-01 13:00 UTC: no close slot nearby
