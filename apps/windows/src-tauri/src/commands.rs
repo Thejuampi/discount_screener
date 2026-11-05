@@ -2005,6 +2005,18 @@ pub fn full_pass_succeeded(
     ok as f64 >= symbols.len() as f64 * FULL_PASS_MIN_SUCCESS
 }
 
+/// Quote time for a chart-close ingest: prefer the last candle's market time
+/// (Yahoo daily bar / `regularMarketTime` equivalent) so an old close does not
+/// look like a fresh fetch toward the 90% full-pass rule. Falls back to wall
+/// clock only when no candle time is available. In memory only (`#[serde(skip)]`).
+fn chart_quote_ts(candles: &[crate::engine::HistoricalCandle]) -> i64 {
+    candles
+        .last()
+        .map(|c| c.epoch_seconds)
+        .filter(|&t| t > 0)
+        .unwrap_or_else(wall_epoch)
+}
+
 /// Stamps the wall-clock end of a full quote pass for the current generation, only
 /// when at least 90% of its fetches succeeded (fresh quote since `pass_start`).
 fn mark_full_pass_if_current(
@@ -2960,6 +2972,9 @@ fn mutate_current_enrichment_state(
     mutate(&mut state);
     // Central bump: every ranking-affecting screener mutation (quote, chart, DCF,
     // closed-world clear, …) invalidates `/status` ranked_rows via this helper.
+    // Early returns inside `mutate` (e.g. chart with no summary / zero close) still
+    // bump once: the helper ran and may have written chart summary / candles.
+    // Callers that must not bump on a no-op should gate before calling.
     rank_input_generation.fetch_add(1, Ordering::Relaxed);
     true
 }
@@ -3437,38 +3452,38 @@ mod feed_coordinator_tests {
         assert!(last.load(Ordering::SeqCst) > 42, "9/10 marks the pass");
     }
 
+    fn candles_at(last_ts: i64) -> Vec<crate::engine::HistoricalCandle> {
+        use crate::engine::HistoricalCandle;
+        (0..3)
+            .map(|d| HistoricalCandle {
+                epoch_seconds: last_ts - (2 - d) * 86_400,
+                open_cents: 100,
+                high_cents: 110,
+                low_cents: 90,
+                close_cents: 105,
+                volume: 1,
+            })
+            .collect()
+    }
+
     #[test]
     fn chart_and_fetch_ingest_stamp_quote_fetched_at() {
-        use crate::engine::HistoricalCandle;
         use std::sync::atomic::AtomicU64;
         use std::sync::Mutex;
+        let last = 1_700_000_000i64;
         let before = super::wall_epoch();
-        let candles = || {
-            (0..3)
-                .map(|d| HistoricalCandle {
-                    epoch_seconds: 1_700_000_000 + d * 86_400,
-                    open_cents: 100,
-                    high_cents: 110,
-                    low_cents: 90,
-                    close_cents: 105,
-                    volume: 1,
-                })
-                .collect::<Vec<_>>()
-        };
         let active = AtomicU64::new(1);
         let rig = AtomicU64::new(0);
         let screener = Mutex::new(ScreenerState::new());
-        // Unknown symbol: chart close creates the snapshot.
         super::apply_refresh_chart_if_current(
             &active,
             1,
             &screener,
             "NEWC",
-            candles(),
+            candles_at(last),
             Default::default(),
             &rig,
         );
-        // Known symbol with no price: chart close fills the price.
         screener
             .lock()
             .unwrap()
@@ -3478,11 +3493,10 @@ mod feed_coordinator_tests {
             1,
             &screener,
             "OLDC",
-            candles(),
+            candles_at(last),
             Default::default(),
             &rig,
         );
-        // Quote fetch.
         let r = FetchResult {
             symbol: "FQ".into(),
             snapshot: Some(snap("FQ", 500, None)),
@@ -3491,14 +3505,103 @@ mod feed_coordinator_tests {
         };
         super::apply_refresh_quote_if_current(&active, 1, &screener, r, false, false, &rig);
         let st = screener.lock().unwrap();
-        for s in ["NEWC", "OLDC", "FQ"] {
-            let x = st.snapshots.get(s).unwrap_or_else(|| panic!("{s} missing"));
-            assert!(x.market_price_cents > 0, "{s} priced");
-            assert!(
-                x.quote_fetched_at.is_some_and(|t| t >= before),
-                "{s} quote_fetched_at stamped"
-            );
+        assert_eq!(
+            st.snapshots["NEWC"].quote_fetched_at,
+            Some(last),
+            "new uses last candle"
+        );
+        assert_eq!(
+            st.snapshots["OLDC"].quote_fetched_at,
+            Some(last),
+            "fill uses last candle"
+        );
+        assert!(
+            st.snapshots["FQ"]
+                .quote_fetched_at
+                .is_some_and(|t| t >= before),
+            "fetch still stamps wall"
+        );
+    }
+
+    #[test]
+    fn chart_close_uses_candle_time_not_wall_for_full_pass() {
+        use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+        use std::sync::Mutex;
+        // 8 symbols already fresh; S8/S9 still need a quote. An old chart close on S9
+        // must not push the pass to 90%; a wall-clock fallback on S9 must.
+        let pass_start = 1_000_000_000i64;
+        let old_close = pass_start - 86_400;
+        let syms: Vec<String> = (0..10).map(|k| format!("S{k}")).collect();
+        let screener = Mutex::new(ScreenerState::new());
+        for s in &syms[..8] {
+            screener
+                .lock()
+                .unwrap()
+                .ingest_snapshot(snap(s, 100, Some(pass_start + 10)));
         }
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S8", 100, Some(pass_start - 10)));
+        // S9 has no price yet; chart close at yesterday must NOT count as a fresh fetch.
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S9", 0, None));
+        let active = AtomicU64::new(1);
+        let rig = AtomicU64::new(0);
+        super::apply_refresh_chart_if_current(
+            &active,
+            1,
+            &screener,
+            "S9",
+            candles_at(old_close),
+            Default::default(),
+            &rig,
+        );
+        assert_eq!(
+            screener.lock().unwrap().snapshots["S9"].quote_fetched_at,
+            Some(old_close)
+        );
+        let last = AtomicI64::new(0);
+        let gen = AtomicU64::new(1);
+        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, pass_start);
+        assert_eq!(
+            last.load(Ordering::SeqCst),
+            0,
+            "old chart close is not a fresh fetch"
+        );
+        // Zero candle times fall back to wall and DO count.
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S9", 0, None));
+        let zero = candles_at(0)
+            .into_iter()
+            .map(|mut c| {
+                c.epoch_seconds = 0;
+                c
+            })
+            .collect::<Vec<_>>();
+        let before = super::wall_epoch();
+        super::apply_refresh_chart_if_current(
+            &active,
+            1,
+            &screener,
+            "S9",
+            zero,
+            Default::default(),
+            &rig,
+        );
+        let ts = screener.lock().unwrap().snapshots["S9"]
+            .quote_fetched_at
+            .unwrap();
+        assert!(ts >= before, "missing market time falls back to wall");
+        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, pass_start);
+        assert!(
+            last.load(Ordering::SeqCst) > 0,
+            "wall fallback counts toward 90%"
+        );
     }
 
     #[test]
@@ -4650,6 +4753,7 @@ fn apply_refresh_chart_if_current(
         |state| {
             let Some(summary) = summary else { return };
             let close = summary.latest_close_cents;
+            let quote_ts = chart_quote_ts(&candles);
             let already = state.snapshots.contains_key(sym);
             state.ingest_chart_summary(sym.to_string(), summary);
             state.ingest_daily_candles(sym.to_string(), candles);
@@ -4679,7 +4783,7 @@ fn apply_refresh_chart_if_current(
                             .map(|x| x.previous_close_cents)
                             .unwrap_or(0),
                         next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
-                        quote_fetched_at: Some(wall_epoch()),
+                        quote_fetched_at: Some(quote_ts),
                     });
                 }
                 outcome.visible = true;
@@ -4693,7 +4797,7 @@ fn apply_refresh_chart_if_current(
                     intrinsic_value_cents: 0,
                     previous_close_cents: 0,
                     next_earnings_epoch: None,
-                    quote_fetched_at: (close > 0).then(wall_epoch),
+                    quote_fetched_at: (close > 0).then_some(quote_ts),
                 });
                 let sector = if crypto {
                     Some("Cryptocurrency".to_string())

@@ -395,11 +395,51 @@ mod tests {
     #[test]
     fn stale_rows_are_excluded_from_the_report() {
         let (dir, p) = build("stale", Some(3));
-        let r = shadow_report(&p, None, &[5, 20], 2).unwrap();
+        // Horizon 1: with day 3 excluded, d2 exits at d4 (DEM 96/98), not the stale
+        // d3 price (97). Removing `h.stale = 0` from the price-map query would make
+        // d2→d3 and change this mean.
+        let r = shadow_report(&p, None, &[1, 5, 20], 2).unwrap();
         let c = &r.configs[0];
         assert_eq!(
             (c.act_entries, c.demoted_entries, c.kept_entries),
             (12, 6, 6)
+        );
+        let h1 = &c.horizons[0];
+        assert_eq!(h1.demoted.n, 5);
+        assert_eq!(h1.kept.n, 5);
+        let dem = [
+            99.0 / 100.0 - 1.0, // d0→d1
+            98.0 / 99.0 - 1.0,  // d1→d2
+            96.0 / 98.0 - 1.0,  // d2→d4 (skips stale d3)
+            95.0 / 96.0 - 1.0,  // d4→d5
+            94.0 / 95.0 - 1.0,  // d5→d6
+        ];
+        let keep = [
+            101.0 / 100.0 - 1.0,
+            102.0 / 101.0 - 1.0,
+            104.0 / 102.0 - 1.0, // d2→d4
+            105.0 / 104.0 - 1.0,
+            106.0 / 105.0 - 1.0,
+        ];
+        let mean = |xs: &[f64]| 100.0 * xs.iter().sum::<f64>() / xs.len() as f64;
+        assert!(
+            (h1.demoted.mean_pct.unwrap() - mean(&dem)).abs() < 1e-9,
+            "stale day must not be an exit price: got {} want {}",
+            h1.demoted.mean_pct.unwrap(),
+            mean(&dem)
+        );
+        assert!((h1.kept.mean_pct.unwrap() - mean(&keep)).abs() < 1e-9);
+        // Mutant that drops `h.stale = 0` from prices only would use d2→d3 and drift.
+        let poisoned_dem = mean(&[
+            99.0 / 100.0 - 1.0,
+            98.0 / 99.0 - 1.0,
+            97.0 / 98.0 - 1.0,
+            95.0 / 96.0 - 1.0,
+            94.0 / 95.0 - 1.0,
+        ]);
+        assert!(
+            (h1.demoted.mean_pct.unwrap() - poisoned_dem).abs() > 1e-6,
+            "sanity: stale-included mean must differ"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
