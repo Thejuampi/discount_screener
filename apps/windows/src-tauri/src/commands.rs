@@ -651,6 +651,7 @@ pub(crate) mod opportunity_projection_tests {
                 intrinsic_value_cents: intrinsic,
                 previous_close_cents: price - 100,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             });
             state.ingest_signal(ExternalValuationSignal {
                 symbol: symbol.into(),
@@ -822,6 +823,7 @@ pub(crate) mod opportunity_projection_tests {
                 intrinsic_value_cents: 30_000,
                 previous_close_cents: 24_000,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             });
         }
 
@@ -1832,6 +1834,7 @@ fn apply_universe_profile_serial_with(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         + 1;
     reset_initial_pass_completion(&state.initial_pass_completed_generation);
+    state.last_full_pass_at.store(0, Ordering::SeqCst);
 
     {
         let mut screener = state.screener.lock().unwrap();
@@ -1872,12 +1875,36 @@ fn apply_universe_profile_serial_with(
     spawn_feed_workers(state, symbols, generation)
 }
 
+/// Wall-clock epoch seconds (quote freshness is wall-clock so it survives suspend).
+pub fn wall_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Stamps the wall-clock end of a full quote pass for the current generation.
+fn mark_full_pass_if_current(
+    feed_gen: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    last_full_pass_at: &std::sync::atomic::AtomicI64,
+) {
+    if generation_is_current(feed_gen, generation) {
+        last_full_pass_at.store(wall_epoch(), Ordering::SeqCst);
+    }
+}
+
 fn ingest_fetch_result(
     screener: &mut crate::engine::ScreenerState,
-    result: crate::fetcher::FetchResult,
+    mut result: crate::fetcher::FetchResult,
     crypto: bool,
     etf: bool,
 ) -> RefreshOutcome {
+    if let Some(snap) = result.snapshot.as_mut() {
+        if snap.market_price_cents > 0 {
+            snap.quote_fetched_at = Some(wall_epoch());
+        }
+    }
     let visible = is_list_ready(&result, crypto, etf);
     let enriched = is_enrichment_complete(&result, crypto, etf);
     let has_fundamentals = result.fundamentals.is_some();
@@ -3095,6 +3122,7 @@ mod feed_coordinator_tests {
                 intrinsic_value_cents: 0,
                 previous_close_cents: 0,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             }),
             signal: None,
             fundamentals: None,
@@ -3108,6 +3136,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         assert_eq!(
             super::apply_refresh_quote_if_current(&active, 4, &screener, old_quote, false, false),
@@ -3251,6 +3280,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let old_key = super::financial_dcf_input_key(&fund, Some(15_000));
         let old_revision = super::dcf_revision_key(&state, "NEW");
@@ -3512,6 +3542,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let screener = Arc::new(Mutex::new(state));
         let cik_cache = Arc::new(Mutex::new(None));
@@ -3563,6 +3594,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         assert!(super::demand_inputs_are_current(
             &state,
@@ -4014,6 +4046,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 24_000,
             previous_close_cents: 19_500,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         state.clear_universe();
         assert!(state.snapshots.is_empty());
@@ -4031,6 +4064,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 24_000,
             previous_close_cents: 19_500,
             next_earnings_epoch: Some(1_800_000_000),
+            quote_fetched_at: None,
         });
         state.ingest_fundamentals(FundamentalSnapshot {
             symbol: "AAPL".into(),
@@ -4050,6 +4084,7 @@ mod feed_coordinator_tests {
                     intrinsic_value_cents: 0,
                     previous_close_cents: 0,
                     next_earnings_epoch: None,
+                    quote_fetched_at: None,
                 }),
                 signal: None,
                 fundamentals: None,
@@ -4087,6 +4122,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         assert!(needs_enrichment_retry(outcome, &state, "SPARSE"));
     }
@@ -4102,6 +4138,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 24_000,
             previous_close_cents: 19_500,
             next_earnings_epoch: Some(1_800_000_000),
+            quote_fetched_at: None,
         });
         state.ingest_fundamentals(FundamentalSnapshot {
             symbol: "AAPL".into(),
@@ -4121,6 +4158,7 @@ mod feed_coordinator_tests {
                     intrinsic_value_cents: 0,
                     previous_close_cents: 0,
                     next_earnings_epoch: None,
+                    quote_fetched_at: None,
                 }),
                 signal: None,
                 fundamentals: None,
@@ -4208,6 +4246,7 @@ fn apply_refresh_chart_if_current(
                         .map(|x| x.previous_close_cents)
                         .unwrap_or(0),
                     next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
+                    quote_fetched_at: Some(wall_epoch()),
                 });
             }
             outcome.visible = true;
@@ -4221,6 +4260,7 @@ fn apply_refresh_chart_if_current(
                 intrinsic_value_cents: 0,
                 previous_close_cents: 0,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             });
             let sector = if crypto {
                 Some("Cryptocurrency".to_string())
@@ -4368,6 +4408,7 @@ fn spawn_feed_workers(
         let feed_gen = Arc::clone(&feed_gen);
         let initial_pass_completed_generation =
             Arc::clone(&state.initial_pass_completed_generation);
+        let last_full_pass_at = Arc::clone(&state.last_full_pass_at);
 
         thread::Builder::new()
             .name("feed-refresh".into())
@@ -4517,6 +4558,7 @@ fn spawn_feed_workers(
                     &initial_pass_completed_generation,
                     generation,
                 );
+                mark_full_pass_if_current(&feed_gen, generation, &last_full_pass_at);
 
                 loop {
                     thread::sleep(std::time::Duration::from_secs(FULL_REFRESH_INTERVAL_SECS));
@@ -4578,6 +4620,7 @@ fn spawn_feed_workers(
                     for h in handles {
                         let _ = h.join();
                     }
+                    mark_full_pass_if_current(&feed_gen, generation, &last_full_pass_at);
                 }
             })
             .map_err(|e| {

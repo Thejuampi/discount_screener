@@ -290,6 +290,7 @@ pub fn parse_quote_summary(root: &Value, display_symbol: &str) -> FetchResult {
         intrinsic_value_cents: target_mean_cents.unwrap_or(0),
         previous_close_cents,
         next_earnings_epoch,
+        quote_fetched_at: None,
     });
 
     let trend = recommendation_trend
@@ -458,6 +459,7 @@ pub fn with_price_fallback(
         intrinsic_value_cents: 0,
         previous_close_cents: 0,
         next_earnings_epoch: None,
+        quote_fetched_at: None,
     });
     result
 }

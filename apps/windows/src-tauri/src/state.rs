@@ -127,6 +127,9 @@ pub struct AppState {
     /// Generation whose one-shot initial retry pass reached a terminal state.
     /// `u64::MAX` means no current generation has completed yet.
     pub initial_pass_completed_generation: Arc<AtomicU64>,
+    /// Wall-clock epoch seconds when the current generation last finished a full quote
+    /// pass (initial or periodic refresh). `0` = none yet.
+    pub last_full_pass_at: Arc<std::sync::atomic::AtomicI64>,
     /// SEC ticker→CIK map (lazy; filled by EDGAR workers / demand valuation).
     pub edgar_cik_map: Arc<Mutex<Option<HashMap<String, u64>>>>,
     /// Symbols with an in-flight demand-driven valuation (avoid duplicate EDGAR hits).
@@ -213,6 +216,7 @@ impl AppState {
             profile_locked: AtomicBool::new(locked),
             feed_generation: Arc::new(AtomicU64::new(0)),
             initial_pass_completed_generation: Arc::new(AtomicU64::new(u64::MAX)),
+            last_full_pass_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             edgar_cik_map: Arc::new(Mutex::new(None)),
             valuation_inflight: Arc::new(Mutex::new(HashSet::new())),
             valuation_yahoo,

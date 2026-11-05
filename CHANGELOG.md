@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Score history quote-freshness gate (migration v5)
+- Runs are deferred after a suspend / clock jump until a full quote pass completes after it, when the last pass is
+  older than `--quote-stale-secs` (default 1800), or when > 10% of rows are stale; this also gates the 18 h close catch-up.
+- Additive `quote_ts`, `quote_age_secs`, `stale` columns; stale rows are stored but excluded from `/history`,
+  decision changes and the shadow report. `/status` adds `oldest_quote_age_secs`, `stale_symbols`.
+- Append-only `run_annotations` + `history-annotate` CLI / `POST /history/annotate`.
+
 ### V3.1 decision rule — SHADOW MODE (Android core + headless)
 
 - Official Act/Watch/Avoid, ranking and `rule_version` stay **V3** (byte-identical to main, shadow fields excluded).

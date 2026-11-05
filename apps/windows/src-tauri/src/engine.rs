@@ -89,6 +89,10 @@ pub struct MarketSnapshot {
     /// Next scheduled earnings date (unix epoch). None if unknown / not applicable.
     #[serde(default)]
     pub next_earnings_epoch: Option<i64>,
+    /// Wall-clock epoch seconds when the feed last fetched a price for this symbol.
+    /// In memory only (never serialized), so snapshot bytes and stored inputs are unchanged.
+    #[serde(skip)]
+    pub quote_fetched_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2098,7 +2102,13 @@ impl ScreenerState {
         };
     }
 
-    pub fn ingest_snapshot(&mut self, snap: MarketSnapshot) {
+    pub fn ingest_snapshot(&mut self, mut snap: MarketSnapshot) {
+        if snap.quote_fetched_at.is_none() {
+            snap.quote_fetched_at = self
+                .snapshots
+                .get(&snap.symbol)
+                .and_then(|s| s.quote_fetched_at);
+        }
         let was_qualified = self.snapshots.get(&snap.symbol).map(|s| {
             let g = gap_bps(s.market_price_cents, s.intrinsic_value_cents);
             qualification(s.profitable, g, self.min_gap_bps) == QualificationStatus::Qualified
@@ -2896,6 +2906,7 @@ mod valuation_routing_tests {
             intrinsic_value_cents: 30_000,
             previous_close_cents: 19_900,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let fcff = current_operating_fcff(1_000);
         let market = crate::dcf_model::MarketParams::default_usd();
@@ -2949,6 +2960,7 @@ mod valuation_routing_tests {
             intrinsic_value_cents: 30_000,
             previous_close_cents: 19_900,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let fcff = current_operating_fcff(25_000);
         let market = crate::dcf_model::MarketParams::default_usd();
@@ -2986,6 +2998,7 @@ mod valuation_routing_tests {
             intrinsic_value_cents: 30_000,
             previous_close_cents: 19_900,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let market = crate::dcf_model::MarketParams::default_usd();
         let envelope = route_runtime_valuation(RuntimeValuationInput {
@@ -3160,6 +3173,7 @@ mod valuation_routing_tests {
             intrinsic_value_cents: 30_000,
             previous_close_cents: 19_900,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let market = crate::dcf_model::MarketParams::default_usd();
         let selected = route_runtime_valuation(RuntimeValuationInput {
@@ -3213,6 +3227,7 @@ mod valuation_routing_tests {
             intrinsic_value_cents: 11_061,
             previous_close_cents: 10_000,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         // Plant the bad $875 FCFF cache first.
         state.dcf_values.insert("ACGL".into(), 87_503);
@@ -3353,6 +3368,7 @@ mod progressive_merge_tests {
             intrinsic_value_cents: 24_000,
             previous_close_cents: 19_500,
             next_earnings_epoch: Some(1_800_000_000),
+            quote_fetched_at: None,
         });
 
         state.ingest_partial_snapshot(MarketSnapshot {
@@ -3363,6 +3379,7 @@ mod progressive_merge_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
 
         let merged = state.snapshots.get("AAPL").unwrap();

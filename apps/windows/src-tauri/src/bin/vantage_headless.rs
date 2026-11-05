@@ -106,10 +106,12 @@ history TICKER [--days N] [--changes] [--profile P] [--tz IANA] [--json]\n\
      history-record-snapshot --data-dir DIR [--history-backup-dir B]   (offline: record the persisted snapshot)\n\
      history-backup --data-dir DIR [--history-backup-dir B] [--verify]   (verified backup now; --verify checks all)\n\
      history-restore FILE --data-dir DIR [--history-backup-dir B]   (append-only merge; refused while serve runs)\n\
+     history-annotate RUN_ID --reason TEXT [--data-dir DIR]   (append-only run note; via serve, or offline)\n\
      history-shadow-report --data-dir DIR [--profile P] [--min-n N] [--json]   (V3.1 shadow: demoted vs kept, 5/20/60d)\n\
 serve:  --history-interval-hours H (default 6; 0 disables score history)\n\
      \x20       --history-backup-dir B (default $VANTAGE_HISTORY_BACKUP_DIR, else $XDG_DATA_HOME/vantage/backups\n\
-     \x20       or ~/.local/share/vantage/backups) --no-feed (offline)"
+     \x20       or ~/.local/share/vantage/backups) --no-feed (offline)\n\
+     \x20       --quote-stale-secs S (default 1800: older quotes are stored stale=1; >10% stale defers a run)"
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
@@ -324,6 +326,31 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 v.score_history,
                 v.score_shadow
             );
+            Ok(())
+        }
+        "history-annotate" => {
+            let run = o
+                .positional
+                .get(1)
+                .ok_or("history-annotate needs RUN_ID --reason TEXT")?;
+            let reason = o
+                .flags
+                .get("reason")
+                .ok_or("history-annotate needs --reason TEXT")?;
+            if o.flags.contains_key("data-dir") {
+                // Offline: refused while a serve holds the data-dir (use the HTTP form then).
+                let data_dir = data_dir_flag(&o)?;
+                let _lock = lock_data_dir(&data_dir)?;
+                let store = ScoreHistoryStore::open(
+                    &data_dir.join("history.sqlite"),
+                    Some(&backup_dir_flag(&o)),
+                )?;
+                let a = store.annotate_run(run, reason, now_epoch())?;
+                println!("{}", serde_json::to_string(&a).unwrap());
+            } else {
+                let path = format!("/history/annotate?run={}&reason={}", pct(run), pct(reason));
+                println!("{}", http_req(&addr, "POST", &path)?);
+            }
             Ok(())
         }
         "history-shadow-report" => {
@@ -654,6 +681,14 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
             .ok_or_else(|| format!("bad --history-interval-hours {h}"))?,
         None => 6,
     };
+    let quote_stale_secs: i64 = match o.flags.get("quote-stale-secs") {
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("bad --quote-stale-secs {v}"))?,
+        None => discount_screener_windows_lib::score_history::DEFAULT_QUOTE_STALE_SECS,
+    };
     check_bind_addr(addr, allow_remote)?;
     // Held for the life of the process: a second serve or a restore on this data-dir refuses.
     let _lock = discount_screener_windows_lib::score_history::lock_data_dir(&data_dir)?;
@@ -674,6 +709,7 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
         history_interval_secs: history_hours * 3600,
         history_backup_dir: (history_hours > 0).then(|| backup_dir_flag(o)),
         no_feed: o.flags.contains_key("no-feed"),
+        quote_stale_secs,
     })?;
     if o.flags.contains_key("no-feed") {
         eprintln!("vantage-headless: --no-feed (offline: no quote feed, Year charts or regime)");
@@ -688,6 +724,7 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
     );
     {
         let engine = Arc::clone(&engine);
+        let mut last_skip: &'static str = "";
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(60));
             if let Err(e) = engine.persist() {
@@ -705,7 +742,14 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
                 Ok(HistoryWrite::Duplicate(id)) => {
                     eprintln!("score history: run {id} already stored (no-op)")
                 }
-                Ok(HistoryWrite::Skipped(_)) => {}
+                Ok(HistoryWrite::Skipped(why)) => {
+                    // Quote-freshness deferrals are logged once per change.
+                    let fresh_gate = why.contains("quote") || why.starts_with("clock jump");
+                    if fresh_gate && why != last_skip {
+                        eprintln!("score history: deferred ({why})");
+                    }
+                    last_skip = why;
+                }
                 Err(e) => eprintln!("score history: {e}"),
             }
             match engine.backup_history_if_due(now_epoch()) {
@@ -875,7 +919,11 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         .split('&')
         .filter_map(|kv| kv.split_once('='))
         .collect();
-    let expected = if path == "/persist" { "POST" } else { "GET" };
+    let expected = if path == "/persist" || path == "/history/annotate" {
+        "POST"
+    } else {
+        "GET"
+    };
     if path == "/history" && method == "GET" {
         if matches!(q.get("all").copied(), Some("1" | "true")) {
             return to_http((|| {
@@ -945,6 +993,16 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         "/parity" => {
             let model = parse_model(q.get("model").copied().unwrap_or("v3"))?;
             Ok(serde_json::to_value(engine.parity(model)?).unwrap())
+        }
+        // `POST /history/annotate?run=ID&reason=TEXT` (append-only note on a stored run).
+        "/history/annotate" => {
+            let run = pct_decode(q.get("run").ok_or("annotate needs run=")?)?;
+            let reason = pct_decode(q.get("reason").ok_or("annotate needs reason=")?)?;
+            Ok(serde_json::to_value(engine.annotate_run(&run, &reason, now_epoch())?).unwrap())
+        }
+        "/history/annotations" => {
+            let run = pct_decode(q.get("run").ok_or("annotations needs run=")?)?;
+            Ok(serde_json::json!({ "run_id": run, "annotations": engine.annotations(&run)? }))
         }
         _ => Err(format!("not found: {path}")),
     })();

@@ -41,10 +41,21 @@ pub const SCORE_RULE_VERSION: &str = "V3";
 /// Migration that adds the full-universe evaluation tables. THE single number to bump
 /// if another migration lands on main first (v3 is #68's score_shadow).
 pub const EVALUATIONS_MIGRATION: i64 = 4;
+/// Migration that adds per-row quote freshness (`quote_ts`, `quote_age_secs`, `stale`)
+/// and the append-only `run_annotations` table.
+pub const QUOTE_FRESHNESS_MIGRATION: i64 = 5;
 /// Highest score-history migration this binary knows.
-pub const SCHEMA_VERSION: i64 = EVALUATIONS_MIGRATION;
+pub const SCHEMA_VERSION: i64 = QUOTE_FRESHNESS_MIGRATION;
+/// A row whose quote is older than this at record time is stored with `stale = 1`
+/// (kept, but excluded from valid history, decision changes and the shadow report).
+pub const DEFAULT_QUOTE_STALE_SECS: i64 = 1800;
+/// A run is deferred while more than this share of its rows is stale.
+pub const MAX_STALE_SHARE: f64 = 0.10;
+/// The recorder ticks every 60 s; a wall-clock gap longer than this between ticks means
+/// the process was suspended (or the clock jumped) and quotes must be refreshed first.
+pub const CLOCK_JUMP_SECS: i64 = 300;
 /// Tables exported to backups and merged on restore (indices 0..=2 are fixed).
-pub const HISTORY_TABLES: [&str; 8] = [
+pub const HISTORY_TABLES: [&str; 9] = [
     "score_runs",
     "score_history",
     "score_history_migrations",
@@ -53,9 +64,10 @@ pub const HISTORY_TABLES: [&str; 8] = [
     "score_run_inputs",
     "score_evaluations",
     "score_run_stats",
+    "run_annotations",
 ];
 /// Tables the source guard protects (includes the planned shadow table).
-pub const GUARDED_TABLES: [&str; 8] = [
+pub const GUARDED_TABLES: [&str; 9] = [
     "score_runs",
     "score_history",
     "score_history_migrations",
@@ -64,9 +76,10 @@ pub const GUARDED_TABLES: [&str; 8] = [
     "score_evaluations",
     "score_run_stats",
     "score_shadow",
+    "run_annotations",
 ];
 /// Triggers that must exist before the store writes.
-pub const REQUIRED_TRIGGERS: [&str; 24] = [
+pub const REQUIRED_TRIGGERS: [&str; 27] = [
     "score_inputs_no_delete",
     "score_inputs_no_update",
     "score_inputs_no_overwrite",
@@ -91,6 +104,9 @@ pub const REQUIRED_TRIGGERS: [&str; 24] = [
     "score_shadow_no_delete",
     "score_shadow_no_update",
     "score_shadow_no_overwrite",
+    "run_annotations_no_delete",
+    "run_annotations_no_update",
+    "run_annotations_no_overwrite",
 ];
 
 /// Backups go to `--history-backup-dir`, else this env var, else
@@ -227,7 +243,66 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 ",
     ),
     (EVALUATIONS_MIGRATION, EVALUATIONS_DDL),
+    (QUOTE_FRESHNESS_MIGRATION, QUOTE_FRESHNESS_DDL),
 ];
+
+/// Quote freshness per stored row plus operator annotations (additive only).
+/// - `score_history.quote_ts`: wall-clock epoch of the row's last quote fetch (NULL = unknown,
+///   e.g. rows recorded before v5 or offline snapshot seeding).
+/// - `score_history.quote_age_secs`: `captured_at - quote_ts` at record time.
+/// - `score_history.stale`: 1 when the age exceeded the threshold; such rows are stored but
+///   excluded from valid history, decision changes and the shadow report.
+/// - `run_annotations`: append-only notes on a run (e.g. "stale quotes after wake").
+const QUOTE_FRESHNESS_DDL: &str = "
+ALTER TABLE score_history ADD COLUMN quote_ts INTEGER;
+ALTER TABLE score_history ADD COLUMN quote_age_secs INTEGER;
+ALTER TABLE score_history ADD COLUMN stale INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS run_annotations (
+    run_id      TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (run_id, created_at, reason)
+);
+CREATE TRIGGER IF NOT EXISTS run_annotations_no_delete BEFORE DELETE ON run_annotations
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_annotations_no_update BEFORE UPDATE ON run_annotations
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_annotations_no_overwrite BEFORE INSERT ON run_annotations
+WHEN EXISTS (SELECT 1 FROM run_annotations WHERE run_id = NEW.run_id
+             AND created_at = NEW.created_at AND reason = NEW.reason)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+";
+
+/// Max length of a run annotation reason.
+pub const MAX_ANNOTATION_LEN: usize = 500;
+
+/// One operator note on a run (`run_annotations`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RunAnnotation {
+    pub run_id: String,
+    pub reason: String,
+    pub created_at: i64,
+}
+
+/// Per-row quote freshness for one run: symbol -> wall-clock epoch of its last quote.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuoteFreshness {
+    pub quote_ts: std::collections::HashMap<String, i64>,
+    pub stale_after_secs: i64,
+}
+
+impl QuoteFreshness {
+    /// `(quote_ts, age, stale)` for `symbol` at `at`; unknown quote time = not stale.
+    pub fn of(&self, symbol: &str, at: i64) -> (Option<i64>, Option<i64>, bool) {
+        match self.quote_ts.get(symbol) {
+            Some(&ts) => {
+                let age = (at - ts).max(0);
+                (Some(ts), Some(age), age > self.stale_after_secs)
+            }
+            None => (None, None, false),
+        }
+    }
+}
 
 /// Full-universe evaluations (see `docs/product/score-history.md`).
 /// - `score_inputs`: content-addressed raw snapshot rows (sha256 of the exact serde
@@ -826,6 +901,9 @@ pub struct HistoryPoint {
     pub price_cents: i64,
     pub target_cents: Option<i64>,
     pub upside_bps: Option<i64>,
+    /// Operator notes on this point's run (`run_annotations`); omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<String>,
 }
 
 /// A decision flip (same profile, model and rule_version) and what moved.
@@ -874,6 +952,8 @@ pub struct RestoreReport {
     pub run_inputs_added: usize,
     pub evaluations_added: usize,
     pub run_stats_added: usize,
+    /// `run_annotations` rows added (0 when the backup predates v5).
+    pub annotations_added: usize,
     /// Row counts found in the (verified) backup.
     pub backup_runs: i64,
     pub backup_rows: i64,
@@ -1122,6 +1202,13 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Result<Vec<String>, String>
                 )
                 .map(|_| ())
             }
+            "run_annotations" => c
+                .execute(
+                    "INSERT INTO run_annotations (run_id, reason, created_at) \
+                     VALUES ('__selfcheck__', 'selfcheck', 0)",
+                    [],
+                )
+                .map(|_| ()),
             _ => c
                 .execute(
                     "INSERT INTO score_history_migrations (version, applied_at) VALUES (-1, 0)",
@@ -1517,6 +1604,19 @@ impl ScoreHistoryStore {
         rows: &[RankedRow],
         eval: Option<&RunEvaluation>,
     ) -> Result<RecordOutcome, String> {
+        self.record_run_quotes(meta, rows, eval, None)
+    }
+
+    /// [`Self::record_run_full`] plus per-row quote freshness: each row stores its
+    /// `quote_ts` and `quote_age_secs`, and `stale = 1` when the age exceeds
+    /// `fresh.stale_after_secs` (the row is kept, never rewritten).
+    pub fn record_run_quotes(
+        &self,
+        meta: &RunMeta,
+        rows: &[RankedRow],
+        eval: Option<&RunEvaluation>,
+        fresh: Option<&QuoteFreshness>,
+    ) -> Result<RecordOutcome, String> {
         self.check_writable()?;
         let run_id = meta.run_id();
         let (good, bad): (Vec<&RankedRow>, Vec<&RankedRow>) = rows
@@ -1559,17 +1659,24 @@ impl ScoreHistoryStore {
         )
         .map_err(err)?;
         {
+            // Quote columns only when freshness is given, so the pre-v5 statement (and an
+            // older writer's schema) is untouched; the v5 columns then default to NULL / 0.
             let mut st = tx
-                .prepare(
+                .prepare(if fresh.is_some() {
+                    "INSERT INTO score_history (run_id, symbol, captured_at, rank, decision, \
+                     composite, fundamentals, technical, forecast, regime, confidence, trust_signal, \
+                     price_cents, target_cents, upside_bps, inputs_json, quote_ts, quote_age_secs, \
+                     stale) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,NULL,?16,?17,?18)"
+                } else {
                     "INSERT INTO score_history (run_id, symbol, captured_at, rank, decision, \
                      composite, fundamentals, technical, forecast, regime, confidence, trust_signal, \
                      price_cents, target_cents, upside_bps, inputs_json) \
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,NULL)",
-                )
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,NULL)"
+                })
                 .map_err(err)?;
             let fin = |x: Option<f64>| x.filter(|v| v.is_finite());
             for r in &good {
-                st.execute(params![
+                let base = params![
                     run_id,
                     r.symbol,
                     meta.captured_at,
@@ -1585,8 +1692,18 @@ impl ScoreHistoryStore {
                     (r.price * 100.0).round() as i64,
                     fin(r.target).map(|t| (t * 100.0).round() as i64),
                     fin(r.upside_pct).map(|u| (u * 100.0).round() as i64),
-                ])
-                .map_err(|e| format!("insert {}: {e}", r.symbol))?;
+                ];
+                let res = match fresh {
+                    Some(f) => {
+                        let (qts, qage, stale) = f.of(&r.symbol, meta.captured_at);
+                        let stale = stale as i64;
+                        let mut all: Vec<&dyn rusqlite::ToSql> = base.to_vec();
+                        all.extend([&qts as &dyn rusqlite::ToSql, &qage, &stale]);
+                        st.execute(all.as_slice())
+                    }
+                    None => st.execute(base),
+                };
+                res.map_err(|e| format!("insert {}: {e}", r.symbol))?;
             }
         }
         if good
@@ -1836,7 +1953,7 @@ impl ScoreHistoryStore {
                  h.confidence, h.trust_signal, h.price_cents, h.target_cents, h.upside_bps, \
                  r.rule_version, r.trigger \
                  FROM score_history h JOIN score_runs r ON r.run_id = h.run_id \
-                 WHERE h.symbol = ?1 AND h.captured_at >= ?2 \
+                 WHERE h.symbol = ?1 AND h.captured_at >= ?2 AND h.stale = 0 \
                    AND (?3 IS NULL OR r.model = ?3) AND (?4 IS NULL OR r.profile = ?4) \
                  ORDER BY h.captured_at ASC, h.run_id ASC",
             )
@@ -1868,11 +1985,28 @@ impl ScoreHistoryStore {
                         rule_version: r.get(17)?,
                         trigger: r.get(18)?,
                         rule_change: false,
+                        annotations: Vec::new(),
                     })
                 },
             )
             .map_err(err)?;
         let mut pts = rows.collect::<Result<Vec<_>, _>>().map_err(err)?;
+        drop(st);
+        {
+            let mut ann = c
+                .prepare(
+                    "SELECT reason FROM run_annotations WHERE run_id = ?1 \
+                     ORDER BY created_at ASC, reason ASC",
+                )
+                .map_err(err)?;
+            for p in &mut pts {
+                p.annotations = ann
+                    .query_map(params![p.run_id], |r| r.get(0))
+                    .map_err(err)?
+                    .collect::<Result<Vec<String>, _>>()
+                    .map_err(err)?;
+            }
+        }
         let mut last: std::collections::HashMap<(String, String), String> = Default::default();
         for p in &mut pts {
             let key = (p.profile.clone(), p.model.clone());
@@ -1882,6 +2016,87 @@ impl ScoreHistoryStore {
             last.insert(key, p.rule_version.clone());
         }
         Ok(pts)
+    }
+
+    /// Appends one annotation to an existing run (plain INSERT; the table is
+    /// append-only, so an annotation can never be edited or removed).
+    pub fn annotate_run(
+        &self,
+        run_id: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<RunAnnotation, String> {
+        self.check_writable()?;
+        let run_id = validate_run_id(run_id)?;
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err("annotation reason is empty".into());
+        }
+        if reason.chars().count() > MAX_ANNOTATION_LEN {
+            return Err(format!(
+                "annotation reason longer than {MAX_ANNOTATION_LEN} chars"
+            ));
+        }
+        if reason.chars().any(|ch| ch.is_control()) {
+            return Err("annotation reason has control characters".into());
+        }
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let exists = c
+            .query_row(
+                "SELECT 1 FROM score_runs WHERE run_id = ?1",
+                params![run_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(err)?
+            .is_some();
+        if !exists {
+            return Err(format!("not found: run {run_id}"));
+        }
+        c.execute(
+            "INSERT INTO run_annotations (run_id, reason, created_at) VALUES (?1,?2,?3)",
+            params![run_id, reason, now],
+        )
+        .map_err(err)?;
+        Ok(RunAnnotation {
+            run_id,
+            reason: reason.to_string(),
+            created_at: now,
+        })
+    }
+
+    /// Annotations of one run, oldest first.
+    pub fn annotations(&self, run_id: &str) -> Result<Vec<RunAnnotation>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let mut st = c
+            .prepare(
+                "SELECT run_id, reason, created_at FROM run_annotations WHERE run_id = ?1 \
+                 ORDER BY created_at ASC, reason ASC",
+            )
+            .map_err(err)?;
+        let out = st
+            .query_map(params![run_id], |r| {
+                Ok(RunAnnotation {
+                    run_id: r.get(0)?,
+                    reason: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
+            })
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err);
+        out
+    }
+
+    /// `(stored, stale)` row counts of one run.
+    pub fn stale_counts(&self, run_id: &str) -> Result<(i64, i64), String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        c.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(stale), 0) FROM score_history WHERE run_id = ?1",
+            params![run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(err)
     }
 
     pub fn counts(&self) -> Result<(i64, i64), String> {
@@ -2208,7 +2423,7 @@ fn remove_all(dir: &Path, names: Vec<String>) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Merged tables and their keys.
-const MERGE_TABLES: [(&str, &[&str]); 7] = [
+const MERGE_TABLES: [(&str, &[&str]); 8] = [
     ("score_runs", &["run_id"]),
     ("score_history", &["run_id", "symbol"]),
     // Migration v3; optional in the source (a pre-v3 backup has no such table).
@@ -2217,6 +2432,7 @@ const MERGE_TABLES: [(&str, &[&str]); 7] = [
     ("score_run_inputs", &["run_id", "idx"]),
     ("score_evaluations", &["run_id", "symbol"]),
     ("score_run_stats", &["run_id"]),
+    ("run_annotations", &["run_id", "created_at", "reason"]),
 ];
 
 /// Tables introduced after v1, as (version, table). A backup older than `version` may
@@ -2227,11 +2443,16 @@ const LATER_TABLES: &[(i64, &str)] = &[
     (EVALUATIONS_MIGRATION, "score_run_inputs"),
     (EVALUATIONS_MIGRATION, "score_evaluations"),
     (EVALUATIONS_MIGRATION, "score_run_stats"),
+    (QUOTE_FRESHNESS_MIGRATION, "run_annotations"),
 ];
 
 /// Columns introduced by migrations after v1, as (version, table, column). An older
 /// backup may lack exactly these (they are then filled with their default). Empty today.
-const LATER_COLUMNS: &[(i64, &str, &str)] = &[];
+const LATER_COLUMNS: &[(i64, &str, &str)] = &[
+    (QUOTE_FRESHNESS_MIGRATION, "score_history", "quote_ts"),
+    (QUOTE_FRESHNESS_MIGRATION, "score_history", "quote_age_secs"),
+    (QUOTE_FRESHNESS_MIGRATION, "score_history", "stale"),
+];
 
 #[derive(Debug, PartialEq)]
 struct Col {
@@ -2412,6 +2633,7 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
         run_inputs_added: n("score_run_inputs"),
         evaluations_added: n("score_evaluations"),
         run_stats_added: n("score_run_stats"),
+        annotations_added: n("run_annotations"),
         backup_runs: rep.score_runs,
         backup_rows: rep.score_history,
     })
@@ -2512,6 +2734,78 @@ pub fn history_due(i: &DueInputs) -> Due {
         return Due::Interval;
     }
     Due::No("interval not elapsed")
+}
+
+/// Quote-freshness inputs for one due run (wall-clock epochs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreshInputs {
+    pub now: i64,
+    /// Rows the run would store, and how many of them are older than `stale_after`.
+    pub rows: usize,
+    pub stale_rows: usize,
+    /// End of the feed's last full quote pass. `None` = the source does not track it
+    /// (then the pass and clock-jump gates do not apply).
+    pub last_full_pass_at: Option<i64>,
+    /// When the recorder last detected a wall-clock gap (suspend / clock jump).
+    pub jump_at: Option<i64>,
+    pub stale_after: i64,
+}
+
+/// Deferral reason when a due run must wait for fresher quotes, else `None`.
+/// Applies to every trigger, so the 18 h close catch-up also needs a quote pass that
+/// completed AFTER the wake: after a gap, until a full pass ends later than the gap was
+/// detected; a full pass within `stale_after`; at most [`MAX_STALE_SHARE`] stale rows.
+pub fn freshness_gate(i: &FreshInputs) -> Option<&'static str> {
+    if let Some(pass) = i.last_full_pass_at {
+        if let Some(j) = i.jump_at {
+            if pass <= j {
+                return Some("clock jump: waiting for a quote pass after wake");
+            }
+        }
+        if i.now - pass > i.stale_after {
+            return Some("waiting for a fresh quote pass");
+        }
+    }
+    if i.rows > 0 && i.stale_rows as f64 > i.rows as f64 * MAX_STALE_SHARE {
+        return Some("too many stale quotes");
+    }
+    None
+}
+
+/// Wall-clock tick tracking for the recorder (detects suspend / clock jumps).
+#[derive(Debug)]
+pub struct TickClock {
+    pub stale_after: i64,
+    state: Mutex<(Option<i64>, Option<i64>)>,
+}
+
+impl TickClock {
+    pub fn new(stale_after: i64) -> Self {
+        Self {
+            stale_after,
+            state: Mutex::new((None, None)),
+        }
+    }
+
+    /// Records a tick at `now` and returns the time of the pending clock jump, if any.
+    /// A gap longer than [`CLOCK_JUMP_SECS`] (either direction) since the previous tick
+    /// starts a jump; it clears once a full quote pass ended after it.
+    pub fn tick(&self, now: i64, last_full_pass_at: Option<i64>) -> Option<i64> {
+        let mut st = self.state.lock().unwrap();
+        let (last, mut jump) = *st;
+        if let Some(prev) = last {
+            if (now - prev).abs() > CLOCK_JUMP_SECS {
+                jump = Some(now);
+            }
+        }
+        if let (Some(j), Some(p)) = (jump, last_full_pass_at) {
+            if p > j {
+                jump = None;
+            }
+        }
+        *st = (Some(now), jump);
+        jump
+    }
 }
 
 /// Decision flips per (profile, model). A `rule_version` boundary starts a new series:
@@ -2773,6 +3067,8 @@ mod tests {
         s.record_run_full(&meta(1), &[r], Some(&tiny_eval(&["ADSK", "BK"])))
             .unwrap();
         assert_eq!(s.shadow_count().unwrap(), 6);
+        s.annotate_run(&meta(1).run_id(), "stale quotes", 1)
+            .unwrap();
         let c = s.conn.lock().unwrap();
         for t in HISTORY_TABLES {
             let del = format!("{} FROM {t}", "DELETE");
@@ -3240,7 +3536,12 @@ mod tests {
         let s = ScoreHistoryStore::open(&p, Some(&dir.join("bk"))).unwrap();
         assert_eq!(s.run_count().unwrap(), 400);
         let c = s.conn.lock().unwrap();
-        for t in HISTORY_TABLES.iter().skip(4) {
+        // Annotations are operator-written only (none in this run loop).
+        for t in HISTORY_TABLES
+            .iter()
+            .skip(4)
+            .filter(|t| **t != "run_annotations")
+        {
             assert!(table_count(&c, t) > 0, "{t}");
         }
         assert_eq!(table_count(&c, "score_evaluations"), 800);
@@ -3322,6 +3623,11 @@ mod tests {
                 .into_iter()
                 .map(|c| (c.name, c.ty))
                 .collect();
+            cols.retain(|(n, _)| {
+                !LATER_COLUMNS
+                    .iter()
+                    .any(|(v, lt, lc)| *lt == t && lc == n && *v > version)
+            });
             cols.reverse();
             edit(t, &mut cols);
             let ddl = cols
@@ -3334,6 +3640,16 @@ mod tests {
         }
         if version >= EVALUATIONS_MIGRATION {
             b.execute_batch(EVALUATIONS_DDL).unwrap();
+        }
+        if version >= QUOTE_FRESHNESS_MIGRATION {
+            let ddl = QUOTE_FRESHNESS_DDL
+                .split(';')
+                .filter(|x| !x.contains("ALTER") && !x.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(";");
+            // Triggers span several `;`; only the table is needed for a merge source.
+            let table = ddl.split("CREATE TRIGGER").next().unwrap();
+            b.execute_batch(table).unwrap();
         }
         let has = |t: &str, c: &str| {
             b.query_row(
@@ -3399,6 +3715,7 @@ mod tests {
             "price_cents",
             "target_cents",
             "trust_signal",
+            "stale",
         ];
         let hv = [
             "'sp500-7-v3'",
@@ -3411,6 +3728,7 @@ mod tests {
             "24175",
             "30250",
             "'t'",
+            "0",
         ];
         let (n, v): (Vec<&str>, Vec<&str>) = hc
             .iter()
@@ -3624,9 +3942,15 @@ mod tests {
                 j(&["update", t]),
                 j(&["drop", "table", t]),
                 j(&["drop", "table", "if", "exists", t]),
-                j(&["alter", "table", t]),
                 j(&["replace", "into", t]),
             ];
+            // ALTER TABLE is allowed only as an additive `ADD COLUMN` (migrations).
+            for at in find_all(&s, &j(&["alter", "table", t])) {
+                let rest = s[at..].splitn(4, ' ').nth(3).unwrap_or("");
+                if !rest.starts_with(&j(&["add", "column", ""])) {
+                    bad.push(j(&["alter", "table", t]));
+                }
+            }
             for o in ors {
                 needles.push(j(&["update", "or", o, t]));
                 needles.push(j(&["insert", "or", o, "into", t]));
@@ -4361,6 +4685,7 @@ mod tests {
             "score_run_inputs",
             "score_evaluations",
             "score_run_stats",
+            "run_annotations",
         ];
         s.missing_triggers
             .retain(|t| !later.iter().any(|p| t.starts_with(p)));
@@ -4502,7 +4827,7 @@ mod tests {
     fn fresh_db_is_current_schema_with_all_triggers() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(REQUIRED_TRIGGERS.len(), 24);
+        assert_eq!(REQUIRED_TRIGGERS.len(), 27);
         assert!(s.missing_triggers.is_empty());
         let c = s.conn.lock().unwrap();
         let n: i64 = c
@@ -4528,5 +4853,69 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f == "score_shadow: update"));
+    }
+
+    #[test]
+    fn annotations_are_append_only_and_validated() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        s.record_run(&meta(100), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        let id = meta(100).run_id();
+        assert!(s
+            .annotate_run("sp500-999-v3", "x", 1)
+            .unwrap_err()
+            .contains("not found"));
+        assert!(s.annotate_run(&id, "  ", 1).is_err());
+        assert!(s.annotate_run(&id, "a\nb", 1).is_err());
+        assert!(s.annotate_run(&id, &"x".repeat(501), 1).is_err());
+        s.annotate_run(&id, "stale quotes after wake", 10).unwrap();
+        s.annotate_run(&id, "second note", 11).unwrap();
+        assert!(s.annotate_run(&id, "second note", 11).is_err(), "duplicate");
+        let a = s.annotations(&id).unwrap();
+        assert_eq!(
+            a.iter().map(|x| x.reason.as_str()).collect::<Vec<_>>(),
+            ["stale quotes after wake", "second note"]
+        );
+        {
+            let c = s.conn.lock().unwrap();
+            let t = HISTORY_TABLES[8];
+            let rep = ["INSERT", "OR", "REPLACE"].join(" ");
+            for sql in [
+                format!("{} FROM {t}", "DELETE"),
+                format!("{} {t} SET reason = 'x'", "UPDATE"),
+                format!("{rep} INTO {t} SELECT * FROM {t}"),
+            ] {
+                let e = c.execute(&sql, []).unwrap_err().to_string();
+                assert!(e.contains("append-only"), "{sql}: {e}");
+            }
+        }
+        // Shown on /history points of that run only; other output unchanged.
+        let pts = s.history("ADSK", None, 200, None, None).unwrap();
+        assert_eq!(
+            pts[0].annotations,
+            ["stale quotes after wake", "second note"]
+        );
+        assert_eq!(s.annotations(&id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn v4_db_migrates_to_v5_with_backup_and_old_rows_not_stale() {
+        let dir = tmpdir("v5-mig");
+        let (p, bdir) = (dir.join("history.sqlite"), dir.join("bk"));
+        let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..4]).unwrap();
+        assert_eq!(s.schema_version().unwrap(), 4);
+        s.missing_triggers
+            .retain(|t| !t.starts_with("run_annotations"));
+        *s.selfcheck.lock().unwrap() = SelfCheck::Passed;
+        s.record_run(&meta(100), &[row("ADSK", "Act", 40, 60, 10, 30)])
+            .unwrap();
+        drop(s);
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        assert!(s.migration_backup.is_some(), "backup before v4 -> v5");
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        assert_eq!(s.stale_counts(&meta(100).run_id()).unwrap(), (1, 0));
+        assert_eq!(s.history("ADSK", None, 200, None, None).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

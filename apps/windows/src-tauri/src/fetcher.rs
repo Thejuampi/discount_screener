@@ -1261,6 +1261,7 @@ mod list_ready_tests {
                 intrinsic_value_cents: 0,
                 previous_close_cents: 0,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             }),
             signal: None,
             fundamentals: None,

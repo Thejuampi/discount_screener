@@ -188,3 +188,29 @@ price moves every run (non-material, so inputs are still stored about once a day
 
 Material-change days add one extra input set each. Nothing is ever pruned, so growth is
 linear.
+
+## Quote freshness (migration v5)
+
+Fix for the 11/04 wake race: the box was frozen 10/29 ~21:10 EDT → 11/04 ~17:18 EST and the
+18 h close catch-up recorded `sp500-1793830789-v3` about a minute after wake, while 50/89 rows
+still carried 10/29 prices.
+
+- Each quote's wall-clock fetch time (`MarketSnapshot.quote_fetched_at`, in memory only, so
+  stored input bytes / hashes are unchanged) and the end of the last full refresh pass are tracked.
+- `score_history` gains additive `quote_ts`, `quote_age_secs`, `stale` (NOT NULL DEFAULT 0;
+  pre-v5 rows are 0). A row whose quote is older than `--quote-stale-secs` (default 1800) is
+  stored with `stale = 1` and excluded from `/history`, decision changes and
+  `history-shadow-report`. Unknown quote time counts as fresh.
+- A due run (interval or close, including the 18 h catch-up) is **deferred** while:
+  1. a wall-clock gap > 300 s between recorder ticks (suspend / clock jump) was seen and no full
+     quote pass has completed after it (`clock jump: waiting for a quote pass after wake`);
+  2. the last full pass ended more than the threshold ago (`waiting for a fresh quote pass`);
+  3. more than 10% of the rows to store are stale (`too many stale quotes`).
+  Deferrals are logged once per change. On fresh data the gate is a no-op: official rows and
+  decisions are identical.
+- `/status`: `oldest_quote_age_secs`, `stale_symbols`, `last_full_pass_at_epoch`.
+- `run_annotations (run_id, reason, created_at)`: append-only (no delete / update / overwrite
+  triggers, startup check, backups, restore merge). Add one with
+  `vantage-headless history-annotate RUN_ID --reason TEXT [--data-dir DIR]` (offline with the
+  lock, else via the daemon) or `POST /history/annotate?run=&reason=`; read with
+  `GET /history/annotations?run=`. Annotations show on `/history` points of that run.
