@@ -701,27 +701,36 @@ fn inputs_policy(
 
 /// zstd level for input blobs (deterministic; decoding does not depend on it).
 const INPUT_ZSTD_LEVEL: i32 = 19;
+/// Hard cap on `score_inputs.raw_size` before any decompress (zip-bomb / SIGABRT guard).
+pub const INPUT_BLOB_MAX_RAW_SIZE: i64 = 64 * 1024 * 1024;
+/// Content-addressed blob store under the backup dir (`inputs/<sha256>`).
+const INPUTS_BLOB_SUBDIR: &str = "inputs";
 
 fn zstd_bytes(b: &[u8]) -> Result<Vec<u8>, String> {
     zstd::bulk::compress(b, INPUT_ZSTD_LEVEL).map_err(err)
 }
 
 /// Decodes a `score_inputs` blob and checks it against its sha256 and `raw_size`.
-/// zstd expansion is capped at `raw_size` so a crafted blob cannot bomb the process.
+/// Rejects `raw_size` above [`INPUT_BLOB_MAX_RAW_SIZE`] *before* decompress so a
+/// crafted size cannot SIGABRT inside zstd; zstd expansion is also capped at `raw_size`.
 fn check_blob(
     hash: &str,
     enc: Option<&str>,
     size: Option<i64>,
     bytes: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
+    let size = size.ok_or_else(|| format!("blob {hash}: missing raw_size"))?;
+    if size < 0 {
+        return Err(format!("blob {hash}: negative raw_size {size}"));
+    }
+    if size > INPUT_BLOB_MAX_RAW_SIZE {
+        return Err(format!(
+            "blob {hash}: raw_size {size} exceeds cap {INPUT_BLOB_MAX_RAW_SIZE}"
+        ));
+    }
+    let max = size as usize;
     let raw = match enc {
-        Some("zstd") => {
-            let max = size
-                .filter(|&n| n >= 0)
-                .ok_or_else(|| format!("blob {hash}: zstd requires non-negative raw_size"))?
-                as usize;
-            zstd::bulk::decompress(&bytes, max).map_err(err)?
-        }
+        Some("zstd") => zstd::bulk::decompress(&bytes, max).map_err(err)?,
         Some("gzip") => gunzip_bytes(&bytes)?,
         Some("raw") => bytes,
         e => return Err(format!("blob {hash}: unknown encoding {e:?}")),
@@ -729,14 +738,94 @@ fn check_blob(
     if sha256_hex(&raw) != hash {
         return Err(format!("blob {hash}: content does not match its sha256"));
     }
-    if Some(raw.len() as i64) != size {
-        return Err(format!("blob {hash}: raw_size {size:?} != {}", raw.len()));
+    if raw.len() as i64 != size {
+        return Err(format!("blob {hash}: raw_size {size} != {}", raw.len()));
     }
     Ok(raw)
 }
 
+fn inputs_blob_dir(backup_dir: &Path) -> PathBuf {
+    backup_dir.join(INPUTS_BLOB_SUBDIR)
+}
+
+fn inputs_blob_path(backup_dir: &Path, hash: &str) -> PathBuf {
+    inputs_blob_dir(backup_dir).join(hash)
+}
+
+/// Append-only write of a content-addressed input blob. Returns true when a new
+/// file was created; false when the hash was already present (no overwrite).
+fn write_input_blob(backup_dir: &Path, hash: &str, bytes: &[u8]) -> Result<bool, String> {
+    let dir = inputs_blob_dir(backup_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = inputs_blob_path(backup_dir, hash);
+    if path.exists() {
+        return Ok(false);
+    }
+    let tmp = dir.join(format!(".{hash}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => Ok(true),
+        Err(e) if path.exists() => {
+            let _ = std::fs::remove_file(&tmp);
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!(
+                "rename {} -> {}: {e}",
+                tmp.display(),
+                path.display()
+            ))
+        }
+    }
+}
+
+/// Resolve blob bytes: non-empty inline bytes (legacy full backup) win; otherwise
+/// load from the append-only `inputs/<hash>` store under any of `blob_dirs`
+/// (typically the restore `backup_dir`, then the gzip's parent).
+fn resolve_input_bytes(
+    blob_dirs: &[PathBuf],
+    hash: &str,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    if !bytes.is_empty() {
+        return Ok(bytes);
+    }
+    if blob_dirs.is_empty() {
+        return Err(format!(
+            "blob {hash}: empty bytes in backup and no inputs store directory"
+        ));
+    }
+    let mut last = String::new();
+    for dir in blob_dirs {
+        let path = inputs_blob_path(dir, hash);
+        match std::fs::read(&path) {
+            Ok(b) => return Ok(b),
+            Err(e) => last = format!("{}: {e}", path.display()),
+        }
+    }
+    Err(format!(
+        "blob {hash}: missing or unreadable in inputs store ({last})"
+    ))
+}
+
+fn blob_dirs_for(backup_dir: Option<&Path>, src: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(d) = backup_dir {
+        dirs.push(d.to_path_buf());
+    }
+    if let Some(p) = src.and_then(|s| s.parent()) {
+        let p = p.to_path_buf();
+        if !dirs.iter().any(|d| d == &p) {
+            dirs.push(p);
+        }
+    }
+    dirs
+}
+
 /// Re-checks every `score_inputs` blob of an attached database before a restore merges it.
-fn verify_src_blobs(c: &Connection, schema: &str) -> Result<usize, String> {
+/// Empty `bytes` are resolved from the append-only `inputs/` store under `backup_dir`.
+fn verify_src_blobs(c: &Connection, schema: &str, blob_dirs: &[PathBuf]) -> Result<usize, String> {
     let mut st = c
         .prepare(
             &[
@@ -751,7 +840,7 @@ fn verify_src_blobs(c: &Connection, schema: &str) -> Result<usize, String> {
     let mut n = 0;
     while let Some(r) = rows.next().map_err(err)? {
         let hash: String = r.get(0).map_err(err)?;
-        let bytes: Vec<u8> = r.get(3).map_err(err)?;
+        let bytes = resolve_input_bytes(blob_dirs, &hash, r.get(3).map_err(err)?)?;
         check_blob(
             &hash,
             r.get::<_, Option<String>>(1).map_err(err)?.as_deref(),
@@ -1950,9 +2039,40 @@ impl ScoreHistoryStore {
             );
             c.execute("ATTACH DATABASE ?1 AS bk", params![tmp.to_string_lossy()])
                 .map_err(err)?;
+            // Incremental `score_inputs`: payload bytes live under
+            // `<backup_dir>/inputs/<sha256>` (append-only by content hash). The
+            // gzip sqlite carries metadata + empty bytes for that table; other
+            // tables stay full copies. Legacy backups with inline bytes still restore.
+            let blob_dir = dest.parent().map(|p| p.to_path_buf());
             let copied = (|| -> Result<(), String> {
                 c.execute_batch("BEGIN").map_err(err)?;
                 for t in HISTORY_TABLES {
+                    if t == "score_inputs" {
+                        let mut st = c
+                            .prepare(
+                                "SELECT hash, encoding, raw_size, bytes FROM main.score_inputs",
+                            )
+                            .map_err(err)?;
+                        let mut rows = st.query([]).map_err(err)?;
+                        let mut insert = c
+                            .prepare(
+                                "INSERT INTO bk.score_inputs (hash, encoding, raw_size, bytes)                                  VALUES (?1, ?2, ?3, x'')",
+                            )
+                            .map_err(err)?;
+                        while let Some(r) = rows.next().map_err(err)? {
+                            let hash: String = r.get(0).map_err(err)?;
+                            let enc: String = r.get(1).map_err(err)?;
+                            let raw_size: i64 = r.get(2).map_err(err)?;
+                            let bytes: Vec<u8> = r.get(3).map_err(err)?;
+                            if let Some(dir) = blob_dir.as_deref() {
+                                write_input_blob(dir, &hash, &bytes)?;
+                            }
+                            insert
+                                .execute(params![hash, enc, raw_size])
+                                .map_err(|e| format!("export score_inputs: {e}"))?;
+                        }
+                        continue;
+                    }
                     // Copied by column NAME, never by position.
                     let cols = columns(&c, "main", t)?
                         .into_iter()
@@ -2310,6 +2430,41 @@ fn merge_columns(
     Ok(out)
 }
 
+/// Merge `src.score_inputs` into live, resolving external `inputs/<hash>` blobs
+/// into full inline bytes (live DB always stores the payload).
+fn merge_score_inputs_from_src(c: &Connection, blob_dirs: &[PathBuf]) -> rusqlite::Result<usize> {
+    let mut st = c.prepare(
+        "SELECT hash, encoding, raw_size, bytes FROM src.score_inputs s          WHERE NOT EXISTS (SELECT 1 FROM main.score_inputs m WHERE m.hash = s.hash)",
+    )?;
+    let mut rows = st.query([])?;
+    let mut n = 0usize;
+    while let Some(r) = rows.next()? {
+        let hash: String = r.get(0)?;
+        let enc: String = r.get(1)?;
+        let raw_size: i64 = r.get(2)?;
+        let bytes: Vec<u8> = r.get(3)?;
+        let bytes = resolve_input_bytes(blob_dirs, &hash, bytes).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e,
+            )))
+        })?;
+        // Re-verify under the merge lock (tamper between plan and merge).
+        check_blob(&hash, Some(&enc), Some(raw_size), bytes.clone()).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e,
+            )))
+        })?;
+        c.execute(
+            "INSERT INTO main.score_inputs (hash, encoding, raw_size, bytes)              VALUES (?1, ?2, ?3, ?4)",
+            params![hash, enc, raw_size, bytes],
+        )?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// Append-only restore: merges the score tables of backup `src` (`.sqlite` or
 /// `.sqlite.gz`) into the app DB `<data_dir>/history.sqlite`, copying columns by name.
 /// Only rows whose key is missing are inserted; nothing is overwritten or deleted.
@@ -2337,7 +2492,8 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
             ));
         }
         if has_table(&c, "src", "score_inputs") {
-            verify_src_blobs(&c, "src")?;
+            let dirs = blob_dirs_for(Some(backup_dir), Some(src));
+            verify_src_blobs(&c, "src", &dirs)?;
         }
         let mut sqls = Vec::new();
         for (t, key) in MERGE_TABLES {
@@ -2348,6 +2504,11 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
                     continue;
                 }
                 return Err(format!("backup is schema v{src_v} but has no {t}"));
+            }
+            if t == "score_inputs" {
+                // Custom merge: resolve empty-bytes rows from `inputs/<hash>`.
+                sqls.push("__SCORE_INPUTS__".to_string());
+                continue;
             }
             let cols = merge_columns(&columns(&c, "main", t)?, &columns(&c, "src", t)?, t, src_v)?;
             let list = cols.join(", ");
@@ -2388,6 +2549,8 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
             for sql in &plan {
                 added.push(if sql.is_empty() {
                     0
+                } else if sql == "__SCORE_INPUTS__" {
+                    merge_score_inputs_from_src(&c, &blob_dirs_for(Some(backup_dir), Some(src)))?
                 } else {
                     c.execute(sql, [])?
                 });
@@ -3283,7 +3446,8 @@ mod tests {
         let e = tiny_eval(&["ADSK", "BK"]);
         src.record_run_full(&meta(5), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
             .unwrap();
-        let bk = root.join("full.sqlite.gz");
+        // Export into backup_dir so inputs/ lands next to restore's blob store.
+        let bk = bdir.join("full.sqlite.gz");
         src.export_to(&bk).unwrap();
         let want = src.reconstruct_snapshot(&meta(5).run_id()).unwrap();
         let data2 = root.join("d2");
@@ -3926,11 +4090,130 @@ mod tests {
         ]
         .concat();
         c.execute(&ins, params![h, "zstd", n, z]).unwrap();
-        assert_eq!(verify_src_blobs(&c, "src").unwrap(), 1);
+        assert_eq!(verify_src_blobs(&c, "src", &[]).unwrap(), 1);
         c.execute(&ins, params![h, "zstd", n + 5, z]).unwrap();
-        assert!(verify_src_blobs(&c, "src")
+        assert!(verify_src_blobs(&c, "src", &[])
             .unwrap_err()
             .contains("raw_size"));
+    }
+
+    #[test]
+    fn check_blob_rejects_raw_size_over_64mb_before_decompress() {
+        let raw = b"tiny";
+        let h = sha256_hex(raw);
+        let z = zstd::bulk::compress(raw, 1).unwrap();
+        let over = INPUT_BLOB_MAX_RAW_SIZE + 1;
+        let err = check_blob(&h, Some("zstd"), Some(over), z).unwrap_err();
+        assert!(
+            err.contains("exceeds cap") || err.contains(&over.to_string()),
+            "expected clean oversize error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn incremental_backup_dedups_blobs_and_restores_byte_identical() {
+        let root = tmpdir("incr-blobs");
+        let data = root.join("data");
+        let bdir = root.join("backups");
+        let p = data.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let e = tiny_eval(&["ADSK", "BK"]);
+        s.record_run_full(&meta(10), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let b1 = bdir.join("day1.sqlite.gz");
+        s.export_to(&b1).unwrap();
+        let blobs1: Vec<_> = std::fs::read_dir(bdir.join("inputs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(!blobs1.is_empty(), "first export writes inputs/ blobs");
+        // Second export same inputs: no new blob files (append-only by hash).
+        let b2 = bdir.join("day2.sqlite.gz");
+        s.export_to(&b2).unwrap();
+        let blobs2: Vec<_> = std::fs::read_dir(bdir.join("inputs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(blobs1.len(), blobs2.len(), "no duplicate blob files");
+        // Sqlite in backup has empty bytes for score_inputs.
+        {
+            let pl = plain(&b1).unwrap();
+            let c = Connection::open(&pl.path).unwrap();
+            let empty: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM score_inputs WHERE length(bytes) = 0",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let total: i64 = table_count(&c, "score_inputs");
+            assert_eq!(empty, total, "incremental backup stores empty bytes");
+        }
+        // Live snapshot bytes before wipe.
+        let before = {
+            let c = s.conn.lock().unwrap();
+            let mut st = c
+                .prepare("SELECT hash, encoding, raw_size, bytes FROM score_inputs ORDER BY hash")
+                .unwrap();
+            st.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Vec<u8>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        drop(s);
+        std::fs::remove_dir_all(&data).unwrap();
+        let r = restore(&b1, &data, &bdir).unwrap();
+        assert!(r.inputs_added > 0);
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let after = {
+            let c = s.conn.lock().unwrap();
+            let mut st = c
+                .prepare("SELECT hash, encoding, raw_size, bytes FROM score_inputs ORDER BY hash")
+                .unwrap();
+            st.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Vec<u8>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(before, after, "restore reconstructs byte-identical inputs");
+        // Missing blob fails atomically (no inputs merged into empty target).
+        let victim = std::fs::read_dir(bdir.join("inputs"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let stash = root.join("stash-blob");
+        std::fs::rename(&victim, &stash).unwrap();
+        let empty = root.join("empty-live");
+        let err = restore(&b2, &empty, &bdir).unwrap_err();
+        assert!(
+            err.contains("missing") || err.contains("blob") || err.contains("inputs"),
+            "{err}"
+        );
+        if empty.join("history.sqlite").exists() {
+            let s2 = ScoreHistoryStore::open(&empty.join("history.sqlite"), Some(&bdir)).unwrap();
+            assert_eq!(
+                table_count(&s2.conn.lock().unwrap(), "score_inputs"),
+                0,
+                "refused restore must not merge inputs"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// End-to-end: a backup whose `score_inputs` blob fails `verify_src_blobs` is

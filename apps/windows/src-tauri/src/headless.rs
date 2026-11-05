@@ -1146,8 +1146,9 @@ pub struct HeadlessEngine {
     history: Option<crate::score_history::ScoreHistoryStore>,
     /// When the current generation's initial pass was first seen complete.
     pass_seen: Mutex<Option<(u64, i64)>>,
-    /// `/status` ranked-row count, cached per `(feed_generation, pass_generation)`.
-    status_rank: Mutex<Option<(u64, u64, usize)>>,
+    /// `/status` ranked-row count, cached per
+    /// `(feed_generation, pass_generation, rank_input_generation)`.
+    status_rank: Mutex<Option<(u64, u64, u64, usize)>>,
 }
 
 pub use crate::score_history::{HISTORY_YEAR_COVERAGE, HISTORY_YEAR_WAIT_SECS};
@@ -1168,6 +1169,7 @@ pub fn android_universe(profile: &str) -> Option<Vec<String>> {
 fn spawn_year_worker(
     symbols: Vec<String>,
     year: Arc<Mutex<std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>>>,
+    rank_input_generation: Arc<std::sync::atomic::AtomicU64>,
 ) {
     std::thread::spawn(move || loop {
         if let Ok(client) = crate::fetcher::YahooClient::new() {
@@ -1177,6 +1179,7 @@ fn spawn_year_worker(
                     if !c.is_empty() {
                         let sum = crate::android_chart::build_summary(&c);
                         year.lock().unwrap().insert(sym.clone(), sum);
+                        rank_input_generation.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(120));
@@ -1216,7 +1219,7 @@ impl HeadlessEngine {
         let year = Arc::new(Mutex::new(seed));
         if cfg.fetch_year_charts && !cfg.no_feed {
             if let Some(u) = android_universe(&cfg.profile) {
-                spawn_year_worker(u, year.clone());
+                spawn_year_worker(u, year.clone(), Arc::clone(&state.rank_input_generation));
             }
         }
         if cfg.market_context && !cfg.no_feed {
@@ -1376,22 +1379,33 @@ impl HeadlessEngine {
         history_all_json(store, symbol, run, &profile, since, limit)
     }
 
-    /// Ranked-row count for `/status`, recomputed when the feed or pass generation changes
-    /// (avoids serializing the whole snapshot on every call).
+    /// Ranked-row count for `/status`, recomputed when feed, pass, or rank-input
+    /// generation changes (avoids serializing the whole snapshot on every call).
+    /// All three keys must match (`&&`); a single mismatched counter must miss.
     fn status_ranked_rows(&self, snap: &OpportunitySnapshot) -> usize {
         let feed = self.state.feed_generation.load(Ordering::Relaxed);
         let pass = self
             .state
             .initial_pass_completed_generation
             .load(Ordering::Relaxed);
-        if let Some((f, p, n)) = *self.status_rank.lock().unwrap() {
-            if f == feed && p == pass {
+        let rank_in = self.state.rank_input_generation.load(Ordering::Relaxed);
+        if let Some((f, p, r, n)) = *self.status_rank.lock().unwrap() {
+            if f == feed && p == pass && r == rank_in {
                 return n;
             }
         }
         let n = rank_android_v3(snap, android_universe(&snap.profile).as_deref()).len();
-        *self.status_rank.lock().unwrap() = Some((feed, pass, n));
+        *self.status_rank.lock().unwrap() = Some((feed, pass, rank_in, n));
         n
+    }
+
+    /// Test/probe: last cached key for `/status` ranked_rows, if any.
+    #[cfg(test)]
+    fn status_rank_cache_key(&self) -> Option<(u64, u64, u64)> {
+        self.status_rank
+            .lock()
+            .unwrap()
+            .map(|(f, p, r, _)| (f, p, r))
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -2743,13 +2757,111 @@ mod full_universe_parity_tests {
     }
 
     #[test]
-    fn status_rank_cache_key_is_generation_pair() {
-        // /status caches ranked_rows on (feed_generation, pass_generation), not a
-        // full snapshot fingerprint — so either counter bumping must miss the cache.
-        let key = |feed: u64, pass: u64| (feed, pass);
-        assert_eq!(key(1, 2), key(1, 2));
-        assert_ne!(key(1, 2), key(2, 2));
-        assert_ne!(key(1, 2), key(1, 3));
+    fn status_rank_cache_key_is_generation_triple() {
+        // /status caches ranked_rows on (feed, pass, rank_input). Any one counter
+        // bump must miss — and the check uses `&&` (not `||`) so a single match is
+        // not enough (kills G2).
+        let key = |feed: u64, pass: u64, rank: u64| (feed, pass, rank);
+        assert_eq!(key(1, 2, 3), key(1, 2, 3));
+        assert_ne!(key(1, 2, 3), key(9, 2, 3));
+        assert_ne!(key(1, 2, 3), key(1, 9, 3));
+        assert_ne!(key(1, 2, 3), key(1, 2, 9));
+        // G2: OR of equality would treat (1,9,9) as a hit against (1,2,3).
+        let hit_or =
+            |a: (u64, u64, u64), b: (u64, u64, u64)| a.0 == b.0 || a.1 == b.1 || a.2 == b.2;
+        let hit_and =
+            |a: (u64, u64, u64), b: (u64, u64, u64)| a.0 == b.0 && a.1 == b.1 && a.2 == b.2;
+        assert!(hit_or((1, 2, 3), (1, 9, 9)));
+        assert!(!hit_and((1, 2, 3), (1, 9, 9)));
+    }
+
+    /// Engine-level: quote / year / pass bumps invalidate `/status` ranked_rows cache.
+    /// Kills G1 (always return cache) and G2 (`||` instead of `&&`).
+    #[test]
+    fn status_ranked_rows_cache_invalidates_on_rank_input_bumps() {
+        let dir = std::env::temp_dir().join(format!(
+            "ds-status-rank-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let eng = HeadlessEngine::start(EngineConfig {
+            data_dir: dir.clone(),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: 0,
+            history_backup_dir: None,
+            no_feed: true,
+        })
+        .unwrap();
+        // Seed one synthetic year chart so snap is non-empty for capture path.
+        eng.year
+            .lock()
+            .unwrap()
+            .insert("AAPL".into(), synthetic_year(19_000, 0));
+        // Force feed/pass known values.
+        eng.state.feed_generation.store(1, Ordering::Relaxed);
+        eng.state
+            .initial_pass_completed_generation
+            .store(1, Ordering::Relaxed);
+        eng.state.rank_input_generation.store(10, Ordering::Relaxed);
+
+        let (snap, _) = eng.current_snapshot();
+        let n1 = eng.status_ranked_rows(&snap);
+        assert_eq!(eng.status_rank_cache_key(), Some((1, 1, 10)));
+        // Same key → cache hit (count stable).
+        assert_eq!(eng.status_ranked_rows(&snap), n1);
+        assert_eq!(eng.status_rank_cache_key(), Some((1, 1, 10)));
+
+        // Price/quote-class bump: rank_input only.
+        eng.state.rank_input_generation.store(11, Ordering::Relaxed);
+        let _ = eng.status_ranked_rows(&snap);
+        assert_eq!(
+            eng.status_rank_cache_key(),
+            Some((1, 1, 11)),
+            "rank_input bump must miss cache (kills G1 always-hit)"
+        );
+
+        // Year-chart-class bump.
+        eng.year
+            .lock()
+            .unwrap()
+            .insert("MSFT".into(), synthetic_year(40_000, 1));
+        eng.state.rank_input_generation.store(12, Ordering::Relaxed);
+        let _ = eng.status_ranked_rows(&snap);
+        assert_eq!(eng.status_rank_cache_key(), Some((1, 1, 12)));
+
+        // Pass generation alone must miss even if feed+rank match (kills G2 ||).
+        eng.state
+            .initial_pass_completed_generation
+            .store(2, Ordering::Relaxed);
+        let _ = eng.status_ranked_rows(&snap);
+        assert_eq!(eng.status_rank_cache_key(), Some((1, 2, 12)));
+
+        // Feed alone.
+        eng.state.feed_generation.store(2, Ordering::Relaxed);
+        let _ = eng.status_ranked_rows(&snap);
+        assert_eq!(eng.status_rank_cache_key(), Some((2, 2, 12)));
+
+        // Persisted→live: bump rank_input when live capture becomes preferred.
+        // Simulate by bumping as ingest would.
+        eng.state
+            .rank_input_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let (snap2, src) = eng.current_snapshot();
+        let _ = src; // live or empty
+        let _ = eng.status_ranked_rows(&snap2);
+        assert_eq!(
+            eng.status_rank_cache_key().map(|k| k.2),
+            Some(13),
+            "persisted→live / ingest bump must refresh cache key"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Deterministic synthetic Year-chart summary around `price` (cents).
