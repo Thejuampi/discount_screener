@@ -822,13 +822,20 @@ fn open_input_blob_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// Non-Unix fallback: plain `File::open` (follows reparse points / symlinks).
+///
+/// CI is Ubuntu-only. On Windows, `inputs/` must not be attacker-writable —
+/// otherwise a reparse-point swap can redirect the open. Prefer locking down
+/// the directory ACL; a future hardening can open without following reparse
+/// points (`FILE_FLAG_OPEN_REPARSE_POINT`) if Windows CI is added.
 #[cfg(not(unix))]
 fn open_input_blob_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
 
-/// Unique quarantine destination that never overwrites an existing `.bad`
-/// entry (including a dangling symlink — `exists()` would miss those).
+/// Propose a quarantine destination that does not already exist (including a
+/// dangling symlink — `exists()` would miss those). Caller must still handle
+/// rename races via [`quarantine_input_blob_aside`]'s capped check-or-retry.
 fn unique_bad_quarantine_path(path: &Path, base: &str) -> PathBuf {
     let candidate = path.with_file_name(format!("{base}.bad"));
     // symlink_metadata: dangling symlinks still "exist" as an entry.
@@ -849,6 +856,44 @@ fn unique_bad_quarantine_path(path: &Path, base: &str) -> PathBuf {
     ))
 }
 
+const BAD_QUARANTINE_RENAME_ATTEMPTS: usize = 8;
+
+/// Move `path` aside to a unique `*.bad*` name. Check-or-retry before rename so
+/// a concurrent quarantine cannot clobber an existing `.bad` (capped attempts).
+fn quarantine_input_blob_aside(path: &Path, kind: &str) -> Result<(), String> {
+    let base = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("blob");
+    let mut last = String::new();
+    for _ in 0..BAD_QUARANTINE_RENAME_ATTEMPTS {
+        let bad = unique_bad_quarantine_path(path, base);
+        // Re-check immediately before rename (TOCTOU window with unique_*).
+        if std::fs::symlink_metadata(&bad).is_ok() {
+            last = format!("{} already exists", bad.display());
+            continue;
+        }
+        match std::fs::rename(path, &bad) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last = format!("{}: {e}", bad.display());
+                continue;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "blob {}: not a regular file ({kind}); quarantine to {}: {e}",
+                    path.display(),
+                    bad.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "blob {}: not a regular file ({kind}); quarantine exhausted after {BAD_QUARANTINE_RENAME_ATTEMPTS} attempts ({last})",
+        path.display()
+    ))
+}
+
 /// `inputs/<sha>` must be a regular file. Directories/symlinks are moved aside to
 /// `*.bad` (never deleted, never overwriting an existing `.bad`) so a durable
 /// rewrite can replace them; returns Err if the entry cannot be quarantined.
@@ -863,26 +908,14 @@ fn ensure_regular_input_blob_path(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     // Symlink or directory (or other): quarantine, never delete.
-    let base = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("blob");
-    let bad = unique_bad_quarantine_path(path, base);
-    std::fs::rename(path, &bad).map_err(|e| {
-        format!(
-            "blob {}: not a regular file ({}); quarantine to {}: {e}",
-            path.display(),
-            if meta.file_type().is_symlink() {
-                "symlink"
-            } else if meta.is_dir() {
-                "directory"
-            } else {
-                "special"
-            },
-            bad.display()
-        )
-    })?;
-    Ok(())
+    let kind = if meta.file_type().is_symlink() {
+        "symlink"
+    } else if meta.is_dir() {
+        "directory"
+    } else {
+        "special"
+    };
+    quarantine_input_blob_aside(path, kind)
 }
 
 /// Remove stale `.{sha}.{pid}.tmp` left by crashed writers. Only that exact
@@ -950,6 +983,9 @@ fn write_input_blob(backup_dir: &Path, hash: &str, bytes: &[u8]) -> Result<bool,
             let meta = f
                 .metadata()
                 .map_err(|e| format!("fstat {}: {e}", path.display()))?;
+            // Post-open is_file: on Unix this re-checks the same fd after
+            // O_NOFOLLOW; on non-Unix (plain File::open) it is the only
+            // regular-file guard before we trust blob bytes.
             if !meta.file_type().is_file() {
                 return Err(format!("{}: not a regular file after open", path.display()));
             }
@@ -1025,6 +1061,7 @@ fn resolve_input_bytes(
                         continue;
                     }
                 };
+                // Same post-open regular-file check as write_input_blob (non-Unix fallback).
                 if !meta.file_type().is_file() {
                     last = format!("{}: not a regular file", path.display());
                     continue;
