@@ -214,3 +214,68 @@ churn move the number).
 
 Plan disk for `backup_dir` separately from the live data-dir; rotation never deletes a
 kept gzip or an `inputs/` blob.
+
+## Quote freshness (migration v5)
+
+This fixes the 11/04 wake race. The box was frozen from 10/29 ~21:10 EDT to 11/04 ~17:18 EST. About a minute after
+wake, the 18 h close catch-up recorded `sp500-1793830789-v3` while 50 of its 89 rows still carried 10/29 prices.
+The Director approved this design on 2026-11-04, including the defaults: 1800 s stale threshold, 300 s clock-jump gap,
+10% stale share, and the 90% full-pass rule.
+
+- **`quote_ts`** is the wall-clock epoch at which OUR feed fetched the quote (`MarketSnapshot.quote_fetched_at`,
+  stamped on every priced ingest). Chart-close fallbacks prefer Yahoo chart `meta.regularMarketTime`, then the
+  last candle epoch, each only when present, `> 0`, and not more than 120 s ahead of wall; wall is used **only**
+  when both are genuinely missing (absent or `<= 0`). A present timestamp beyond that skew is left unknown
+  (`quote_fetched_at = None`) so the row is stale and does **not** count toward the 90% full-pass rule
+  (fail-closed — never substitute wall for a future stamp). A Yahoo equity daily bar is stamped at the session
+  open (~09:30 ET) and crypto at 00:00 UTC, so the bar time alone must not be preferred over
+  `regularMarketTime` or chart-path closes would never count toward full-pass after the open. After the regular
+  session, `regularMarketTime` sits near the 16:00 ET close, so a pass started after hours also fails safe
+  (that stamp is before `pass_start` and does not count). `/status` deferral warnings via `--defer-warn-hours`
+  fire **once per deferral episode** (tracked by `deferred_since`), not on every tick.
+  QuoteSummary has no trade time; that limit is unchanged. It is kept in memory only, so stored input bytes and hashes are unchanged.
+- **Known limit (no `market_ts`):** the price path (quoteSummary) does not give us Yahoo's `regularMarketTime`;
+  only the chart endpoint has it. Carrying it would add a field to the serialized snapshot rows and change input
+  bytes/hashes and official output, so it is not stored. A stale exchange quote fetched recently therefore looks
+  fresh; the gate only catches quotes WE have not refreshed.
+- **Future `quote_ts`** (wall clock stepped back below a fetch time): no age is computed (`quote_age_secs` NULL) and
+  the row counts as stale, in storage and in `/status`; ages are never clamped to 0.
+- **Deferral episode:** `deferred_since_epoch`/`deferred_reason` are set on a gate hit and cleared when a run is
+  recorded or when the tick is simply not due (`Due::No`).
+- **Full pass:** a refresh pass counts as full only if ≥ 90% of the universe received a fresh quote during it
+  (`last_full_pass_at`, wall clock).
+- **v5 columns on `score_history`** (additive; pre-v5 rows read as `stale = 0`, `quote_ts` and `quote_age_secs` NULL):
+  - `quote_ts`;
+  - `quote_age_secs` (CHECK `>= 0`);
+  - `stale` (NOT NULL DEFAULT 0, CHECK `IN (0,1)`).
+- **Stale rows:** a row is stale when its age is greater than `--quote-stale-secs` (default 1800; an age of exactly
+  1800 s is fresh).
+  - It fails closed: a priced row with no `quote_ts` is stale.
+  - Stale rows are stored but excluded from `/history`, decision changes and `history-shadow-report`.
+  - `/history?all=1` returns every evaluation with a boolean `stale`: `true` when that run's stored row was stale
+    (excluded from `/history`), `false` otherwise.
+- **Deferral.** A due run (interval or close, including the 18 h catch-up) is deferred while any of these holds:
+  1. `clock jump: waiting for a quote pass after wake`: a tick gap greater than `--clock-jump-secs` (default 300) in
+     either direction (suspend or backward step) was seen, and no NEW full pass has ended strictly after it. A pass
+     stamped in the jump second, or an older pass that looks later after a backward step, does not count.
+  2. `waiting for a fresh quote pass`: the last full pass is more than the threshold old.
+  3. `too many stale quotes`: more than `--max-stale-share` (default 0.10, so 2 of 20 is OK and 3 of 20 defers) of the
+     rows are stale.
+
+  Deferrals are logged once per change. After `--defer-warn-hours` (default 6) of continuous deferral, a `WARNING`
+  line is logged once. On fresh data the gate does nothing, and official rows and decisions are identical.
+- **`TickClock`** (tick and deferral tracking) is in memory only. It is never persisted, and a restart starts clean.
+- **`/status`** adds:
+  - `oldest_quote_age_secs`;
+  - `stale_symbols` (including priced symbols with no quote time);
+  - `last_full_pass_at_epoch`;
+  - `deferred_since_epoch` and `deferred_reason`.
+- **`run_annotations (run_id, reason, created_at)`** is append-only: triggers block delete, update and overwrite,
+  backed by the startup check, backups and the restore merge.
+  - Writing is **CLI-only**: `vantage-headless history-annotate RUN_ID --reason TEXT [--data-dir DIR]` writes
+    straight to `history.sqlite`. It is safe while `serve` runs (SQLite locking), never creates or migrates the file,
+    and refuses a store that is not at v5 or is missing any trigger.
+  - The daemon has no write route. Read annotations with `GET /history/annotations?run=`; they also appear on that
+    run's `/history` points.
+- **`POST /persist`** refuses any request that carries an `Origin` header and requires `X-Vantage-Cli: 1` (the CLI
+  sends it).

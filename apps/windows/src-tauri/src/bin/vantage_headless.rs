@@ -106,10 +106,14 @@ history TICKER [--days N] [--changes] [--profile P] [--tz IANA] [--json]\n\
      history-record-snapshot --data-dir DIR [--history-backup-dir B]   (offline: record the persisted snapshot)\n\
      history-backup --data-dir DIR [--history-backup-dir B] [--verify]   (verified backup now; --verify checks all)\n\
      history-restore FILE --data-dir DIR [--history-backup-dir B]   (append-only merge; refused while serve runs)\n\
+     history-annotate RUN_ID --reason TEXT [--data-dir DIR]   (append-only run note; CLI-only, writes the store file, OK while serve runs)\n\
      history-shadow-report --data-dir DIR [--profile P] [--min-n N] [--json]   (V3.1 shadow: demoted vs kept, 5/20/60d)\n\
 serve:  --history-interval-hours H (default 6; 0 disables score history)\n\
      \x20       --history-backup-dir B (default $VANTAGE_HISTORY_BACKUP_DIR, else $XDG_DATA_HOME/vantage/backups\n\
-     \x20       or ~/.local/share/vantage/backups) --no-feed (offline)"
+     \x20       or ~/.local/share/vantage/backups) --no-feed (offline)\n\
+     \x20       --quote-stale-secs S (default 1800: older quotes are stored stale=1; >10% stale defers a run)\n\
+     \x20       --clock-jump-secs S (default 300: tick gap treated as suspend/clock jump)\n\
+     \x20       --max-stale-share F (default 0.10)  --defer-warn-hours H (default 6: warn when deferred that long)"
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
@@ -324,6 +328,27 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 v.score_history,
                 v.score_shadow
             );
+            Ok(())
+        }
+        "history-annotate" => {
+            let run = o
+                .positional
+                .get(1)
+                .ok_or("history-annotate needs RUN_ID --reason TEXT")?;
+            let reason = o
+                .flags
+                .get("reason")
+                .ok_or("history-annotate needs --reason TEXT")?;
+            // CLI-only (no daemon route): appends straight to the store file; safe while
+            // `serve` runs (SQLite locking, busy timeout, schema + trigger check first).
+            let data_dir = data_dir_flag(&o)?;
+            let a = discount_screener_windows_lib::score_history::annotate_file(
+                &data_dir.join("history.sqlite"),
+                run,
+                reason,
+                now_epoch(),
+            )?;
+            println!("{}", serde_json::to_string(&a).unwrap());
             Ok(())
         }
         "history-shadow-report" => {
@@ -621,7 +646,7 @@ fn http_req(addr: &str, method: &str, path: &str) -> Result<String, String> {
     s.set_read_timeout(Some(Duration::from_secs(120))).ok();
     write!(
         s,
-        "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n"
+        "{method} {path} HTTP/1.0\r\nHost: {addr}\r\n{CLI_HEADER}: 1\r\nContent-Length: 0\r\n\r\n"
     )
     .map_err(|e| e.to_string())?;
     let mut buf = String::new();
@@ -654,6 +679,32 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
             .ok_or_else(|| format!("bad --history-interval-hours {h}"))?,
         None => 6,
     };
+    let quote_stale_secs: i64 = match o.flags.get("quote-stale-secs") {
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("bad --quote-stale-secs {v}"))?,
+        None => discount_screener_windows_lib::score_history::DEFAULT_QUOTE_STALE_SECS,
+    };
+    let clock_jump_secs: i64 = match o.flags.get("clock-jump-secs") {
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|n| *n > 60)
+            .ok_or_else(|| format!("bad --clock-jump-secs {v} (must be > 60)"))?,
+        None => discount_screener_windows_lib::score_history::CLOCK_JUMP_SECS,
+    };
+    let max_stale_share: f64 = match o.flags.get("max-stale-share") {
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|n: &f64| (0.0..1.0).contains(n))
+            .ok_or_else(|| format!("bad --max-stale-share {v} (0 <= x < 1)"))?,
+        None => discount_screener_windows_lib::score_history::MAX_STALE_SHARE,
+    };
+    let defer_warn_secs =
+        parse_defer_warn_secs(o.flags.get("defer-warn-hours").map(|v| v.as_str()))?;
     check_bind_addr(addr, allow_remote)?;
     // Held for the life of the process: a second serve or a restore on this data-dir refuses.
     let _lock = discount_screener_windows_lib::score_history::lock_data_dir(&data_dir)?;
@@ -674,6 +725,9 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
         history_interval_secs: history_hours * 3600,
         history_backup_dir: (history_hours > 0).then(|| backup_dir_flag(o)),
         no_feed: o.flags.contains_key("no-feed"),
+        quote_stale_secs,
+        clock_jump_secs,
+        max_stale_share,
     })?;
     if o.flags.contains_key("no-feed") {
         eprintln!("vantage-headless: --no-feed (offline: no quote feed, Year charts or regime)");
@@ -688,6 +742,8 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
     );
     {
         let engine = Arc::clone(&engine);
+        let mut last_skip: &'static str = "";
+        let mut warned_since: Option<i64> = None;
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(60));
             if let Err(e) = engine.persist() {
@@ -705,8 +761,27 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
                 Ok(HistoryWrite::Duplicate(id)) => {
                     eprintln!("score history: run {id} already stored (no-op)")
                 }
-                Ok(HistoryWrite::Skipped(_)) => {}
+                Ok(HistoryWrite::Skipped(why)) => {
+                    // Quote-freshness deferrals are logged once per change.
+                    let fresh_gate = why.contains("quote") || why.starts_with("clock jump");
+                    if fresh_gate && why != last_skip {
+                        eprintln!("score history: deferred ({why})");
+                    }
+                    last_skip = why;
+                }
                 Err(e) => eprintln!("score history: {e}"),
+            }
+            if let Some(since) = defer_warning(
+                engine.history_deferred(),
+                now_epoch(),
+                defer_warn_secs,
+                &mut warned_since,
+            ) {
+                eprintln!(
+                    "WARNING score history: runs deferred for {}h (since epoch {since}): {}",
+                    (now_epoch() - since) / 3600,
+                    engine.history_deferred().map_or("", |d| d.1)
+                );
             }
             match engine.backup_history_if_due(now_epoch()) {
                 Ok(Some(r)) => eprintln!(
@@ -783,6 +858,61 @@ struct Head {
     method: String,
     target: String,
     host: Option<String>,
+    /// Any `Origin` header present (browser-originated request).
+    origin: bool,
+    /// `X-Vantage-Cli: 1` present (sent by this binary's CLI).
+    cli: bool,
+}
+
+/// Returns `Some(since)` once per deferral episode when it has lasted `warn_after` secs.
+/// Default for `--defer-warn-hours`: warn once a history deferral lasts this long.
+const DEFAULT_DEFER_WARN_HOURS: i64 = 6;
+
+/// `--defer-warn-hours H` -> seconds (H > 0, overflow-checked).
+fn parse_defer_warn_secs(v: Option<&str>) -> Result<i64, String> {
+    let hours = match v {
+        Some(v) => v
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("bad --defer-warn-hours {v}"))?,
+        None => DEFAULT_DEFER_WARN_HOURS,
+    };
+    hours
+        .checked_mul(3600)
+        .ok_or_else(|| format!("bad --defer-warn-hours {hours} (too large)"))
+}
+
+fn defer_warning(
+    deferred: Option<(i64, &'static str)>,
+    now: i64,
+    warn_after: i64,
+    warned_since: &mut Option<i64>,
+) -> Option<i64> {
+    let (since, _) = deferred?;
+    if now - since >= warn_after && *warned_since != Some(since) {
+        *warned_since = Some(since);
+        return Some(since);
+    }
+    None
+}
+
+/// Header the CLI sends; required on state-changing routes.
+const CLI_HEADER: &str = "X-Vantage-Cli";
+
+/// CSRF guard for state-changing routes (`/persist`): a browser request (any `Origin`)
+/// is refused and the CLI header is required. `None` = allowed.
+fn mutation_guard(path: &str, origin: bool, cli: bool) -> Option<(&'static str, &'static str)> {
+    if path != "/persist" {
+        return None;
+    }
+    if origin {
+        return Some(("403 Forbidden", "Origin header not allowed on /persist"));
+    }
+    if !cli {
+        return Some(("403 Forbidden", "/persist requires X-Vantage-Cli: 1"));
+    }
+    None
 }
 
 /// Read the request line and headers under ONE deadline for the whole head
@@ -815,16 +945,28 @@ fn read_head(mut stream: &TcpStream) -> Result<Head, &'static str> {
     let mut parts = first.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
-    let host = lines.take_while(|l| !l.is_empty()).find_map(|l| {
-        let (k, v) = l.split_once(':')?;
-        k.trim()
-            .eq_ignore_ascii_case("host")
-            .then(|| v.trim().to_string())
-    });
+    let (mut host, mut origin, mut cli) = (None, false, false);
+    for l in lines.take_while(|l| !l.is_empty()) {
+        let Some((k, v)) = l.split_once(':') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if k.eq_ignore_ascii_case("host") {
+            if host.is_none() {
+                host = Some(v.to_string());
+            }
+        } else if k.eq_ignore_ascii_case("origin") {
+            origin = true;
+        } else if k.eq_ignore_ascii_case(CLI_HEADER) && v == "1" {
+            cli = true;
+        }
+    }
     Ok(Head {
         method,
         target,
         host,
+        origin,
+        cli,
     })
 }
 
@@ -863,6 +1005,11 @@ fn handle(mut stream: TcpStream, engine: &HeadlessEngine, allow_remote: bool) {
             "421 Misdirected Request",
             "Host must be a loopback name",
         );
+        return;
+    }
+    let path = head.target.split('?').next().unwrap_or("");
+    if let Some((status, msg)) = mutation_guard(path, head.origin, head.cli) {
+        let _ = respond(&mut stream, status, msg);
         return;
     }
     let (status, body) = route(engine, &head.method, &head.target);
@@ -945,6 +1092,10 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         "/parity" => {
             let model = parse_model(q.get("model").copied().unwrap_or("v3"))?;
             Ok(serde_json::to_value(engine.parity(model)?).unwrap())
+        }
+        "/history/annotations" => {
+            let run = pct_decode(q.get("run").ok_or("annotations needs run=")?)?;
+            Ok(serde_json::json!({ "run_id": run, "annotations": engine.annotations(&run)? }))
         }
         _ => Err(format!("not found: {path}")),
     })();
@@ -1223,5 +1374,141 @@ mod tests {
             .skip(1)
             .collect();
         assert_eq!(pos[0], pos[1], "{t}");
+    }
+    #[test]
+    fn persist_guard_rejects_origin_and_requires_cli_header() {
+        assert_eq!(mutation_guard("/persist", false, true), None);
+        assert_eq!(
+            mutation_guard("/persist", true, true).map(|g| g.0),
+            Some("403 Forbidden"),
+            "any Origin is refused even with the CLI header"
+        );
+        assert_eq!(
+            mutation_guard("/persist", false, false).map(|g| g.1),
+            Some("/persist requires X-Vantage-Cli: 1")
+        );
+        assert_eq!(mutation_guard("/status", true, false), None);
+    }
+
+    fn head_of(raw: &'static [u8]) -> Head {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            c.write_all(raw).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        let (s, _) = l.accept().unwrap();
+        let h = read_head(&s).unwrap();
+        t.join().unwrap();
+        h
+    }
+
+    #[test]
+    fn head_parses_origin_and_cli_header() {
+        let h = head_of(b"POST /persist HTTP/1.0\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example\r\nX-Vantage-Cli: 1\r\n\r\n");
+        assert!(h.origin && h.cli);
+        let h = head_of(b"POST /persist HTTP/1.0\r\nhost: localhost\r\nx-vantage-cli: 1\r\n\r\n");
+        assert!(!h.origin && h.cli && h.host.as_deref() == Some("localhost"));
+        let h = head_of(b"POST /persist HTTP/1.0\r\nHost: localhost\r\nX-Vantage-Cli: yes\r\n\r\n");
+        assert!(!h.cli, "only the exact value 1");
+    }
+
+    #[test]
+    fn annotate_is_cli_only_and_persist_is_guarded_end_to_end() {
+        use discount_screener_windows_lib::headless::{EngineConfig, HeadlessEngine};
+        let root = std::env::temp_dir().join(format!("vh-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = HeadlessEngine::start(EngineConfig {
+            data_dir: root.join("data"),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: 6 * 3600,
+            history_backup_dir: None,
+            no_feed: true,
+            quote_stale_secs: 1800,
+            clock_jump_secs: 300,
+            max_stale_share: 0.10,
+        })
+        .unwrap();
+        // The daemon has no annotate route (POST or GET).
+        assert!(
+            route(&engine, "POST", "/history/annotate?run=sp500-1-v3&reason=x")
+                .0
+                .starts_with("405")
+        );
+        assert!(
+            route(&engine, "GET", "/history/annotate?run=sp500-1-v3&reason=x")
+                .0
+                .starts_with("404")
+        );
+        // Reading annotations stays available.
+        assert!(route(&engine, "GET", "/history/annotations?run=sp500-1-v3")
+            .0
+            .starts_with("200"));
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let send = |extra: &str| -> String {
+            let mut c = TcpStream::connect(addr).unwrap();
+            write!(
+                c,
+                "POST /persist HTTP/1.0\r\nHost: 127.0.0.1\r\n{extra}Content-Length: 0\r\n\r\n"
+            )
+            .unwrap();
+            let (s, _) = l.accept().unwrap();
+            handle(s, &engine, false);
+            let mut buf = String::new();
+            c.read_to_string(&mut buf).unwrap();
+            buf
+        };
+        assert!(
+            send("Origin: http://localhost\r\nX-Vantage-Cli: 1\r\n").starts_with("HTTP/1.0 403")
+        );
+        assert!(send("").starts_with("HTTP/1.0 403"));
+        assert!(send("X-Vantage-Cli: 1\r\n").starts_with("HTTP/1.0 200"));
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn defer_warn_hours_default_and_overflow_checked() {
+        assert_eq!(
+            parse_defer_warn_secs(None),
+            Ok(DEFAULT_DEFER_WARN_HOURS * 3600)
+        );
+        assert_eq!(parse_defer_warn_secs(Some("2")), Ok(7200));
+        assert!(parse_defer_warn_secs(Some("0")).is_err());
+        assert!(parse_defer_warn_secs(Some("x")).is_err());
+        assert!(parse_defer_warn_secs(Some(&i64::MAX.to_string()))
+            .unwrap_err()
+            .contains("too large"));
+    }
+
+    #[test]
+    fn defer_warning_fires_once_after_threshold() {
+        let mut w = None;
+        let d = Some((1_000, "too many stale quotes"));
+        assert_eq!(
+            defer_warning(d, 1_000 + 6 * 3600 - 1, 6 * 3600, &mut w),
+            None
+        );
+        assert_eq!(
+            defer_warning(d, 1_000 + 6 * 3600, 6 * 3600, &mut w),
+            Some(1_000)
+        );
+        assert_eq!(
+            defer_warning(d, 1_000 + 7 * 3600, 6 * 3600, &mut w),
+            None,
+            "once"
+        );
+        assert_eq!(defer_warning(None, 99_999, 6 * 3600, &mut w), None);
+        let d2 = Some((50_000, "x"));
+        assert_eq!(
+            defer_warning(d2, 50_000 + 6 * 3600, 6 * 3600, &mut w),
+            Some(50_000)
+        );
     }
 }

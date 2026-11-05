@@ -114,16 +114,30 @@ pub fn shadow_report(
             path.display()
         ));
     }
+    // Migration v5: rows recorded with a stale quote are excluded (older files have no
+    // `stale` column, so nothing is filtered there).
+    let has_stale: bool = c
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('score_history') WHERE name = 'stale'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| e.to_string())?
+        > 0;
     // (profile, symbol, day) -> (captured_at, price_cents) of the day's last run.
     let mut px: HashMap<(String, String, NaiveDate), (i64, i64)> = HashMap::new();
     let mut cal: BTreeMap<String, BTreeSet<NaiveDate>> = BTreeMap::new();
     {
         let mut st = c
-            .prepare(
+            .prepare(if has_stale {
                 "SELECT r.profile, h.symbol, h.captured_at, h.price_cents FROM score_history h \
                  JOIN score_runs r ON r.run_id = h.run_id \
-                 WHERE r.model = 'v3' AND (?1 IS NULL OR r.profile = ?1)",
-            )
+                 WHERE r.model = 'v3' AND (?1 IS NULL OR r.profile = ?1) AND h.stale = 0"
+            } else {
+                "SELECT r.profile, h.symbol, h.captured_at, h.price_cents FROM score_history h \
+                 JOIN score_runs r ON r.run_id = h.run_id \
+                 WHERE r.model = 'v3' AND (?1 IS NULL OR r.profile = ?1)"
+            })
             .map_err(|e| e.to_string())?;
         let rows = st
             .query_map(params![profile], |r| {
@@ -149,12 +163,17 @@ pub fn shadow_report(
     let mut ent: HashMap<EntryKey, EntryVal> = HashMap::new();
     {
         let mut st = c
-            .prepare(
+            .prepare(if has_stale {
                 "SELECT r.profile, s.config_id, h.symbol, h.captured_at, h.decision, s.shadow_decision \
                  FROM score_shadow s JOIN score_history h ON h.run_id = s.run_id AND h.symbol = s.ticker \
                  JOIN score_runs r ON r.run_id = s.run_id \
-                 WHERE r.model = 'v3' AND (?1 IS NULL OR r.profile = ?1)",
-            )
+                 WHERE r.model = 'v3' AND (?1 IS NULL OR r.profile = ?1) AND h.stale = 0"
+            } else {
+                "SELECT r.profile, s.config_id, h.symbol, h.captured_at, h.decision, s.shadow_decision \
+                 FROM score_shadow s JOIN score_history h ON h.run_id = s.run_id AND h.symbol = s.ticker \
+                 JOIN score_runs r ON r.run_id = s.run_id \
+                 WHERE r.model = 'v3' AND (?1 IS NULL OR r.profile = ?1)"
+            })
             .map_err(|e| e.to_string())?;
         let rows = st
             .query_map(params![profile], |r| {
@@ -320,9 +339,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn demoted_vs_kept_forward_returns_and_insufficient_data() {
-        let dir = std::env::temp_dir().join(format!("shrep-{}", std::process::id()));
+    /// 7 weekday runs; on trading day `stale_day` every quote is 2 h old (stale rows).
+    fn build(tag: &str, stale_day: Option<i64>) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("shrep-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("history.sqlite");
@@ -348,17 +367,86 @@ mod tests {
                 incomplete_symbols: vec![],
             };
             let f = k as f64;
-            s.record_run(
+            let ts = if stale_day == Some(k) {
+                at - 7200
+            } else {
+                at - 60
+            };
+            let fresh = crate::score_history::QuoteFreshness {
+                quote_ts: [("DEM".to_string(), ts), ("KEEP".to_string(), ts)].into(),
+                stale_after_secs: 1800,
+            };
+            s.record_run_quotes(
                 &meta,
                 &[
                     row("DEM", 100.0 * (1.0 - 0.01 * f), "Watch"),
                     row("KEEP", 100.0 * (1.0 + 0.01 * f), "Act"),
                 ],
+                None,
+                Some(&fresh),
             )
             .unwrap();
             k += 1;
         }
         drop(s);
+        (dir, p)
+    }
+
+    #[test]
+    fn stale_rows_are_excluded_from_the_report() {
+        let (dir, p) = build("stale", Some(3));
+        // Horizon 1: with day 3 excluded, d2 exits at d4 (DEM 96/98), not the stale
+        // d3 price (97). Removing `h.stale = 0` from the price-map query would make
+        // d2→d3 and change this mean.
+        let r = shadow_report(&p, None, &[1, 5, 20], 2).unwrap();
+        let c = &r.configs[0];
+        assert_eq!(
+            (c.act_entries, c.demoted_entries, c.kept_entries),
+            (12, 6, 6)
+        );
+        let h1 = &c.horizons[0];
+        assert_eq!(h1.demoted.n, 5);
+        assert_eq!(h1.kept.n, 5);
+        let dem = [
+            99.0 / 100.0 - 1.0, // d0→d1
+            98.0 / 99.0 - 1.0,  // d1→d2
+            96.0 / 98.0 - 1.0,  // d2→d4 (skips stale d3)
+            95.0 / 96.0 - 1.0,  // d4→d5
+            94.0 / 95.0 - 1.0,  // d5→d6
+        ];
+        let keep = [
+            101.0 / 100.0 - 1.0,
+            102.0 / 101.0 - 1.0,
+            104.0 / 102.0 - 1.0, // d2→d4
+            105.0 / 104.0 - 1.0,
+            106.0 / 105.0 - 1.0,
+        ];
+        let mean = |xs: &[f64]| 100.0 * xs.iter().sum::<f64>() / xs.len() as f64;
+        assert!(
+            (h1.demoted.mean_pct.unwrap() - mean(&dem)).abs() < 1e-9,
+            "stale day must not be an exit price: got {} want {}",
+            h1.demoted.mean_pct.unwrap(),
+            mean(&dem)
+        );
+        assert!((h1.kept.mean_pct.unwrap() - mean(&keep)).abs() < 1e-9);
+        // Mutant that drops `h.stale = 0` from prices only would use d2→d3 and drift.
+        let poisoned_dem = mean(&[
+            99.0 / 100.0 - 1.0,
+            98.0 / 99.0 - 1.0,
+            97.0 / 98.0 - 1.0,
+            95.0 / 96.0 - 1.0,
+            94.0 / 95.0 - 1.0,
+        ]);
+        assert!(
+            (h1.demoted.mean_pct.unwrap() - poisoned_dem).abs() > 1e-6,
+            "sanity: stale-included mean must differ"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn demoted_vs_kept_forward_returns_and_insufficient_data() {
+        let (dir, p) = build("fresh", None);
         let r = shadow_report(&p, None, &[5, 20], 2).unwrap();
         assert_eq!(r.trading_days["sp500"], 7);
         assert_eq!(r.configs.len(), 6);

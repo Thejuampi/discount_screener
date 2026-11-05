@@ -691,7 +691,7 @@ impl YahooClient {
         symbol: &str,
         range: &str,
         interval: &str,
-    ) -> io::Result<Vec<HistoricalCandle>> {
+    ) -> io::Result<CandleFetch> {
         // Share-class dots must be Yahoo path form (`BRK.B` → `BRK-B`); Stooq still
         // receives the display ticker and applies its own dash mapping.
         let request_symbol = yahoo_request_symbol(symbol);
@@ -699,7 +699,7 @@ impl YahooClient {
             "{}{}?range={}&interval={}&includePrePost=false",
             CHART_API_URL, request_symbol, range, interval
         );
-        let yahoo: io::Result<Vec<HistoricalCandle>> = self
+        let yahoo: io::Result<CandleFetch> = self
             .client
             .get(&url)
             .header("Accept", "application/json")
@@ -714,12 +714,15 @@ impl YahooClient {
         // Stooq fallback — only for daily resolution (Stooq has no intraday and
         // returning daily where weekly/monthly was asked would corrupt indicators).
         match yahoo {
-            Ok(c) if !c.is_empty() => Ok(c),
+            Ok(c) if !c.candles.is_empty() => Ok(c),
             other => {
                 if interval == "1d" {
                     if let Some(c) = crate::stooq::fetch_daily_candles(symbol) {
                         if !c.is_empty() {
-                            return Ok(c);
+                            return Ok(CandleFetch {
+                                candles: c,
+                                regular_market_time: None,
+                            });
                         }
                     }
                 }
@@ -1018,7 +1021,15 @@ fn parse_chart_regular_market_price_cents(root: &Value) -> Option<i64> {
 
 // ── Candle parsing ─────────────────────────────────────────────────────────────
 
-fn parse_candles(resp: &Value) -> io::Result<Vec<HistoricalCandle>> {
+/// Candles from a chart fetch, plus Yahoo `meta.regularMarketTime` when present.
+/// The market time is for in-memory freshness stamping only (never in input bytes).
+#[derive(Clone, Debug, Default)]
+pub struct CandleFetch {
+    pub candles: Vec<HistoricalCandle>,
+    pub regular_market_time: Option<i64>,
+}
+
+fn parse_candles(resp: &Value) -> io::Result<CandleFetch> {
     let result = resp
         .get("chart")
         .and_then(|c| c.get("result"))
@@ -1097,7 +1108,14 @@ fn parse_candles(resp: &Value) -> io::Result<Vec<HistoricalCandle>> {
         });
     }
 
-    Ok(candles)
+    let regular_market_time = resp
+        .pointer("/chart/result/0/meta/regularMarketTime")
+        .and_then(|v| v.as_i64())
+        .filter(|&t| t > 0);
+    Ok(CandleFetch {
+        candles,
+        regular_market_time,
+    })
 }
 
 fn is_not_found(error: &io::Error) -> bool {
@@ -1131,6 +1149,84 @@ mod quote_html_recovery_tests {
         let error =
             io::Error::other("HTTP 500 Internal Server Error for quoteSummary BK: upstream");
         assert!(should_scrape_quote_html(true, &error));
+    }
+}
+
+#[cfg(test)]
+mod parse_candles_regular_market_time_tests {
+    use super::{parse_candles, CandleFetch};
+    use serde_json::json;
+
+    fn chart_json(rmt: Option<i64>) -> serde_json::Value {
+        let mut meta = json!({ "symbol": "TEST" });
+        if let Some(t) = rmt {
+            meta["regularMarketTime"] = json!(t);
+        }
+        json!({
+            "chart": {
+                "result": [{
+                    "meta": meta,
+                    "timestamp": [1_700_000_000i64],
+                    "indicators": {
+                        "quote": [{
+                            "open": [10.0],
+                            "high": [11.0],
+                            "low": [9.0],
+                            "close": [10.5],
+                            "volume": [1000]
+                        }]
+                    }
+                }]
+            }
+        })
+    }
+
+    #[test]
+    fn regular_market_time_present() {
+        let fetch = parse_candles(&chart_json(Some(1_700_000_123))).unwrap();
+        assert_eq!(fetch.regular_market_time, Some(1_700_000_123));
+        assert_eq!(fetch.candles.len(), 1);
+    }
+
+    #[test]
+    fn regular_market_time_absent() {
+        let fetch = parse_candles(&chart_json(None)).unwrap();
+        assert_eq!(fetch.regular_market_time, None);
+    }
+
+    #[test]
+    fn regular_market_time_zero_and_negative_filtered() {
+        assert_eq!(
+            parse_candles(&chart_json(Some(0)))
+                .unwrap()
+                .regular_market_time,
+            None,
+            "0 is not a real trade time"
+        );
+        assert_eq!(
+            parse_candles(&chart_json(Some(-1)))
+                .unwrap()
+                .regular_market_time,
+            None
+        );
+    }
+
+    #[test]
+    fn regular_market_time_wrong_json_key_ignored() {
+        // S4: must read meta.regularMarketTime, not a sibling / misspelled key.
+        let mut v = chart_json(None);
+        v["chart"]["result"][0]["meta"]["regularMarketTimestamp"] = json!(1_700_000_999i64);
+        v["chart"]["result"][0]["meta"]["regular_market_time"] = json!(1_700_000_998i64);
+        let fetch = parse_candles(&v).unwrap();
+        assert_eq!(
+            fetch.regular_market_time, None,
+            "wrong key must not be accepted"
+        );
+        v["chart"]["result"][0]["meta"]["regularMarketTime"] = json!(1_700_000_777i64);
+        assert_eq!(
+            parse_candles(&v).unwrap().regular_market_time,
+            Some(1_700_000_777)
+        );
     }
 }
 
@@ -1261,6 +1357,7 @@ mod list_ready_tests {
                 intrinsic_value_cents: 0,
                 previous_close_cents: 0,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             }),
             signal: None,
             fundamentals: None,

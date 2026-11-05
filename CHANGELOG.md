@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Score history quote-freshness gate (migration v5)
+- Runs are deferred after a suspend / clock jump until a full quote pass completes after it, when the last pass is
+  older than `--quote-stale-secs` (default 1800), or when > 10% of rows are stale; this also gates the 18 h close catch-up.
+- Additive `quote_ts`, `quote_age_secs`, `stale` columns; stale rows are stored but excluded from `/history`,
+  decision changes and the shadow report. `/status` adds `oldest_quote_age_secs`, `stale_symbols`.
+- A priced row with no quote time counts as stale (fails closed). A full pass needs fresh quotes for at least 90% of
+  the universe.
+- Flags: `--clock-jump-secs` (300), `--max-stale-share` (0.10), `--defer-warn-hours` (6). `/status` adds
+  `deferred_since_epoch` and `deferred_reason`.
+- `/history?all=1` returns a boolean `stale` flag on every evaluation.
+- Append-only `run_annotations`, written only by the `history-annotate` CLI (no daemon write route).
+- `POST /persist` refuses requests with an `Origin` header and requires `X-Vantage-Cli: 1`.
+- A quote time in the future counts as stale (no age). Chart-close prefers `meta.regularMarketTime`, then a
+  non-future candle time; wall only when both are missing (absent/`<=0`). A present timestamp beyond the 120 s
+  skew is left unknown (not wall) so it stays stale and out of the 90% full-pass count. After hours,
+  `regularMarketTime` ≈ 16:00 ET, so a post-close pass fails safe. `--defer-warn-hours` warns once per
+  deferral episode. QuoteSummary still has no trade time.
+- A not-due tick clears the deferral shown in `/status`.
+
 ### V3.1 decision rule — SHADOW MODE (Android core + headless)
 
 - Official Act/Watch/Avoid, ranking and `rule_version` stay **V3** (byte-identical to main, shadow fields excluded).
