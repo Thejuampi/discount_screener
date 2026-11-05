@@ -188,23 +188,25 @@ history tables or the blob store). Each rotated `.sqlite.gz` still holds the **s
 score tables in full (runs, history, evaluations, run_inputs, stats, shadow).
 `score_inputs` payloads are **incremental**: content-addressed files under
 `backup_dir/inputs/<sha256>` (append-only shared store; empty `bytes` in the gzip).
-Legacy backups with inline `bytes` still restore. New blob files appear only for new
-hashes, so repeating the same input set across days does not duplicate payload bytes.
+**The `inputs/` directory must travel with the `.gz` files and must never be deleted** —
+a `.gz` alone does not restore on a new machine (empty `bytes` need the matching
+`inputs/<sha256>` blobs). Legacy backups with inline `bytes` still restore. New blob
+files appear only for new hashes; corrupt/truncated blobs are repaired on the next
+export (good blobs are never deleted).
 
 Uncompressed upper bounds (live DB, never-prune, worst-case daily input churn) are the
-table above (~0.6 GB sp500 / ~2.2 GB r2k year 1; ~11 GB r2k year 5). Gzip of the small
-tables is typically ~0.4× the uncompressed sqlite; the inputs store is already zstd inside
-each blob (~same as live). Rough backup-dir planning:
+table above (~0.6 GB sp500 / ~2.2 GB r2k year 1; ~11 GB r2k year 5). Measured relative
+to live: small-table `.sqlite.gz` ≈ **0.09×** live DB; the shared `inputs/` store ≈
+**0.32×** live. Rough backup-dir planning:
 
 | | live DB (approx) | backup dir (gzip small tables + shared `inputs/` store) |
 |---|---|---|
-| sp500 year 1 (~0.6 GB live, worst) | ~0.6 GB | small-table gzips ≪ 1 GB + **~0.6 GB** inputs store ≈ **~1–2 GB** |
-| r2k year 1 (~2.2 GB live, worst) | ~2.2 GB | small-table gzips a few GB + **~2.2 GB** inputs ≈ **~4–6 GB** |
-| r2k year 5 (~11 GB live, worst) | ~11 GB | small-table gzips + **~11 GB** inputs + ~30 pre-* slot copies of small tables → **~15–25 GB** (vs ~80–120 GB when every copy still embedded full inputs) |
+| sp500 year 1 (~0.6 GB live, worst) | ~0.6 GB | small-table gzips (~0.09×) + inputs (~0.32×) ≈ **~0.3–0.5 GB** |
+| r2k year 1 (~2.2 GB live, worst) | ~2.2 GB | ≈ **~0.9 GB** (0.09× + 0.32×) growing with rotation heads |
+| r2k year 5 (~11 GB live, worst) | ~11 GB | rotation of small-table gzips + shared inputs ≈ **~25 GB**; up to **~55 GB** worst case with the ~30 pre-* / manual slot copies of small tables |
 
-Pre-* / manual slots still keep ~30 extra copies of the **small** tables (not a second
-full inputs store). Plan disk for `backup_dir` separately from the live data-dir;
-rotation never deletes a kept gzip or an `inputs/` blob.
+Plan disk for `backup_dir` separately from the live data-dir; rotation never deletes a
+kept gzip or an `inputs/` blob.
 
 ## Quote freshness (migration v5)
 

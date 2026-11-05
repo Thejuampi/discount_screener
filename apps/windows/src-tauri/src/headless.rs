@@ -1184,6 +1184,18 @@ pub fn android_universe(profile: &str) -> Option<Vec<String>> {
     crate::profiles::android_profile_symbols(profile)
 }
 
+/// Publish one Year-chart summary and bump `rank_input_generation` so `/status`
+/// ranked_rows cannot keep a stale count. Isolated for unit tests (no network).
+fn publish_year_summary(
+    year: &Mutex<std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>>,
+    symbol: String,
+    summary: crate::android_chart::AndroidChartSummary,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
+) {
+    year.lock().unwrap().insert(symbol, summary);
+    rank_input_generation.fetch_add(1, Ordering::Relaxed);
+}
+
 fn spawn_year_worker(
     symbols: Vec<String>,
     year: Arc<Mutex<std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>>>,
@@ -1196,8 +1208,7 @@ fn spawn_year_worker(
                 if let Ok(c) = client.fetch_candles(sym, "1y", "1wk") {
                     if !c.is_empty() {
                         let sum = crate::android_chart::build_summary(&c);
-                        year.lock().unwrap().insert(sym.clone(), sum);
-                        rank_input_generation.fetch_add(1, Ordering::Relaxed);
+                        publish_year_summary(&year, sym.clone(), sum, &rank_input_generation);
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(120));
@@ -3383,8 +3394,9 @@ mod full_universe_parity_tests {
         assert!(!hit_and((1, 2, 3), (1, 9, 9)));
     }
 
-    /// Engine-level: quote / year / pass bumps invalidate `/status` ranked_rows cache.
-    /// Kills G1 (always return cache) and G2 (`||` instead of `&&`).
+    /// Engine-level: real year-publish / pass / feed bumps invalidate `/status`
+    /// ranked_rows cache. Kills G1 (always return cache) and G2 (`||` instead of `&&`).
+    /// Year path goes through [`publish_year_summary`] (no hand bump).
     #[test]
     fn status_ranked_rows_cache_invalidates_on_rank_input_bumps() {
         let dir = std::env::temp_dir().join(format!(
@@ -3410,42 +3422,41 @@ mod full_universe_parity_tests {
             max_stale_share: crate::score_history::MAX_STALE_SHARE,
         })
         .unwrap();
-        // Seed one synthetic year chart so snap is non-empty for capture path.
-        eng.year
-            .lock()
-            .unwrap()
-            .insert("AAPL".into(), synthetic_year(19_000, 0));
-        // Force feed/pass known values.
+        // Seed via the real year-publish path (bumps rank_input).
         eng.state.feed_generation.store(1, Ordering::Relaxed);
         eng.state
             .initial_pass_completed_generation
             .store(1, Ordering::Relaxed);
+        // Reset counter so the first publish lands on a known value.
         eng.state.rank_input_generation.store(10, Ordering::Relaxed);
+        publish_year_summary(
+            &eng.year,
+            "AAPL".into(),
+            synthetic_year(19_000, 0),
+            &eng.state.rank_input_generation,
+        );
+        assert_eq!(eng.state.rank_input_generation.load(Ordering::Relaxed), 11);
 
         let (snap, _) = eng.current_snapshot();
         let n1 = eng.status_ranked_rows(&snap);
-        assert_eq!(eng.status_rank_cache_key(), Some((1, 1, 10)));
-        // Same key → cache hit (count stable).
+        assert_eq!(eng.status_rank_cache_key(), Some((1, 1, 11)));
         assert_eq!(eng.status_ranked_rows(&snap), n1);
-        assert_eq!(eng.status_rank_cache_key(), Some((1, 1, 10)));
+        assert_eq!(eng.status_rank_cache_key(), Some((1, 1, 11)));
 
-        // Price/quote-class bump: rank_input only.
-        eng.state.rank_input_generation.store(11, Ordering::Relaxed);
+        // Year-chart bump via real publish path (kills mutant that drops year bump).
+        publish_year_summary(
+            &eng.year,
+            "MSFT".into(),
+            synthetic_year(40_000, 1),
+            &eng.state.rank_input_generation,
+        );
+        assert_eq!(eng.state.rank_input_generation.load(Ordering::Relaxed), 12);
         let _ = eng.status_ranked_rows(&snap);
         assert_eq!(
             eng.status_rank_cache_key(),
-            Some((1, 1, 11)),
-            "rank_input bump must miss cache (kills G1 always-hit)"
+            Some((1, 1, 12)),
+            "year publish bump must miss cache (kills G1 always-hit)"
         );
-
-        // Year-chart-class bump.
-        eng.year
-            .lock()
-            .unwrap()
-            .insert("MSFT".into(), synthetic_year(40_000, 1));
-        eng.state.rank_input_generation.store(12, Ordering::Relaxed);
-        let _ = eng.status_ranked_rows(&snap);
-        assert_eq!(eng.status_rank_cache_key(), Some((1, 1, 12)));
 
         // Pass generation alone must miss even if feed+rank match (kills G2 ||).
         eng.state
@@ -3459,20 +3470,32 @@ mod full_universe_parity_tests {
         let _ = eng.status_ranked_rows(&snap);
         assert_eq!(eng.status_rank_cache_key(), Some((2, 2, 12)));
 
-        // Persisted→live: bump rank_input when live capture becomes preferred.
-        // Simulate by bumping as ingest would.
-        eng.state
-            .rank_input_generation
-            .fetch_add(1, Ordering::Relaxed);
-        let (snap2, src) = eng.current_snapshot();
-        let _ = src; // live or empty
+        // Another year publish (persisted→live / ingest-class bump).
+        publish_year_summary(
+            &eng.year,
+            "GOOG".into(),
+            synthetic_year(21_000, 2),
+            &eng.state.rank_input_generation,
+        );
+        let (snap2, _src) = eng.current_snapshot();
         let _ = eng.status_ranked_rows(&snap2);
         assert_eq!(
             eng.status_rank_cache_key().map(|k| k.2),
             Some(13),
-            "persisted→live / ingest bump must refresh cache key"
+            "year publish must refresh cache key"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publish_year_summary_bumps_rank_input_generation() {
+        let year = Mutex::new(std::collections::HashMap::new());
+        let rank = std::sync::atomic::AtomicU64::new(0);
+        publish_year_summary(&year, "X".into(), synthetic_year(1000, 0), &rank);
+        assert_eq!(rank.load(Ordering::Relaxed), 1);
+        assert!(year.lock().unwrap().contains_key("X"));
+        publish_year_summary(&year, "Y".into(), synthetic_year(2000, 1), &rank);
+        assert_eq!(rank.load(Ordering::Relaxed), 2);
     }
 
     /// Deterministic synthetic Year-chart summary around `price` (cents).

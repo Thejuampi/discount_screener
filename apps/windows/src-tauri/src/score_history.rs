@@ -832,35 +832,85 @@ fn inputs_blob_dir(backup_dir: &Path) -> PathBuf {
     backup_dir.join(INPUTS_BLOB_SUBDIR)
 }
 
-fn inputs_blob_path(backup_dir: &Path, hash: &str) -> PathBuf {
-    inputs_blob_dir(backup_dir).join(hash)
+/// Content-addressed blob names are exactly 64 lowercase hex chars (sha256).
+/// Validated *before* any path join so traversal like `../../secret` is refused.
+fn validate_input_hash(hash: &str) -> Result<(), String> {
+    if hash.len() != 64 || !hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(format!(
+            "blob hash must be 64 lowercase hex characters, got {hash:?}"
+        ));
+    }
+    Ok(())
 }
 
-/// Append-only write of a content-addressed input blob. Returns true when a new
-/// file was created; false when the hash was already present (no overwrite).
+fn inputs_blob_path(backup_dir: &Path, hash: &str) -> Result<PathBuf, String> {
+    validate_input_hash(hash)?;
+    Ok(inputs_blob_dir(backup_dir).join(hash))
+}
+
+fn fsync_dir(dir: &Path) -> Result<(), String> {
+    let f = std::fs::File::open(dir).map_err(|e| format!("open dir {}: {e}", dir.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("fsync dir {}: {e}", dir.display()))
+}
+
+/// Durable write: temp file → fsync → rename → fsync dir.
+fn durable_replace_file(dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("blob"),
+        std::process::id()
+    ));
+    {
+        let mut f =
+            std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        use std::io::Write;
+        f.write_all(bytes)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        f.sync_all()
+            .map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename {} -> {}: {e}", tmp.display(), path.display())
+    })?;
+    fsync_dir(dir)?;
+    Ok(())
+}
+
+/// True when on-disk blob bytes match `expected` (length + content).
+fn blob_file_matches(path: &Path, expected: &[u8]) -> bool {
+    match std::fs::read(path) {
+        Ok(got) => got.len() == expected.len() && got == expected,
+        Err(_) => false,
+    }
+}
+
+/// Content-addressed input blob write. If `inputs/<sha>` already exists and matches,
+/// leaves it alone. If it exists but is corrupt (wrong length/bytes), rewrites it
+/// atomically with the correct payload — never deletes a good blob.
+/// Returns true when a new/repaired file was written.
 fn write_input_blob(backup_dir: &Path, hash: &str, bytes: &[u8]) -> Result<bool, String> {
+    validate_input_hash(hash)?;
     let dir = inputs_blob_dir(backup_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let path = inputs_blob_path(backup_dir, hash);
+    fsync_dir(&dir).ok(); // best-effort after mkdir
+    let path = inputs_blob_path(backup_dir, hash)?;
     if path.exists() {
-        return Ok(false);
+        if blob_file_matches(&path, bytes) {
+            return Ok(false);
+        }
+        // Corrupt/truncated: rewrite atomically; do not unlink the good path first.
+        durable_replace_file(&dir, &path, bytes)?;
+        return Ok(true);
     }
-    let tmp = dir.join(format!(".{hash}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    match std::fs::rename(&tmp, &path) {
+    match durable_replace_file(&dir, &path, bytes) {
         Ok(()) => Ok(true),
-        Err(e) if path.exists() => {
-            let _ = std::fs::remove_file(&tmp);
+        Err(_) if path.exists() && blob_file_matches(&path, bytes) => {
+            // Lost the race to another writer that produced the correct blob.
             Ok(false)
         }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(format!(
-                "rename {} -> {}: {e}",
-                tmp.display(),
-                path.display()
-            ))
-        }
+        Err(e) => Err(e),
     }
 }
 
@@ -882,7 +932,13 @@ fn resolve_input_bytes(
     }
     let mut last = String::new();
     for dir in blob_dirs {
-        let path = inputs_blob_path(dir, hash);
+        let path = match inputs_blob_path(dir, hash) {
+            Ok(p) => p,
+            Err(e) => {
+                last = e;
+                continue;
+            }
+        };
         match std::fs::read(&path) {
             Ok(b) => return Ok(b),
             Err(e) => last = format!("{}: {e}", path.display()),
@@ -2362,6 +2418,14 @@ fn check_backup(dest: &Path, runs: i64, rows: i64) -> Result<BackupReport, Strin
             rep.score_history
         )));
     }
+    // Every score_inputs row must resolve to a blob whose payload matches hash.
+    let dirs = blob_dirs_for(dest.parent(), Some(dest));
+    let plain = plain(dest).map_err(fail)?;
+    let c = Connection::open_with_flags(&plain.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| fail(format!("open backup for blob check: {e}")))?;
+    if has_table(&c, "main", "score_inputs") {
+        verify_src_blobs(&c, "main", &dirs).map_err(fail)?;
+    }
     Ok(rep)
 }
 
@@ -2661,17 +2725,11 @@ fn merge_score_inputs_from_src(c: &Connection, blob_dirs: &[PathBuf]) -> rusqlit
         let raw_size: i64 = r.get(2)?;
         let bytes: Vec<u8> = r.get(3)?;
         let bytes = resolve_input_bytes(blob_dirs, &hash, bytes).map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e,
-            )))
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e)))
         })?;
         // Re-verify under the merge lock (tamper between plan and merge).
         check_blob(&hash, Some(&enc), Some(raw_size), bytes.clone()).map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                e,
-            )))
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e)))
         })?;
         c.execute(
             "INSERT INTO main.score_inputs (hash, encoding, raw_size, bytes)              VALUES (?1, ?2, ?3, ?4)",
@@ -4528,12 +4586,138 @@ mod tests {
         let raw = b"tiny";
         let h = sha256_hex(raw);
         let z = zstd::bulk::compress(raw, 1).unwrap();
-        let over = INPUT_BLOB_MAX_RAW_SIZE + 1;
+        // Far above the 64 MiB cap (and above typical usize tricks) — must refuse
+        // cleanly before any decompress attempt.
+        let over = 1_i64 << 46;
         let err = check_blob(&h, Some("zstd"), Some(over), z).unwrap_err();
         assert!(
-            err.contains("exceeds cap") || err.contains(&over.to_string()),
+            err.contains("exceeds cap"),
             "expected clean oversize error, got: {err}"
         );
+    }
+
+    #[test]
+    fn input_hash_rejects_path_traversal_before_join() {
+        let err = validate_input_hash("../../secret").unwrap_err();
+        assert!(err.contains("64 lowercase hex"), "{err}");
+        let err = inputs_blob_path(Path::new("/tmp"), "../../secret").unwrap_err();
+        assert!(err.contains("64 lowercase hex"), "{err}");
+        // Nothing under inputs/ is created or read for a bad name.
+        let dir = tmpdir("hash-trav");
+        let inputs = dir.join("inputs");
+        let _ = std::fs::create_dir_all(&inputs);
+        assert!(write_input_blob(&dir, "../../secret", b"x").is_err());
+        assert!(std::fs::read_dir(&inputs).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_input_blob_repairs_zero_and_flipped_then_restore_ok() {
+        let root = tmpdir("blob-repair");
+        let data = root.join("data");
+        let bdir = root.join("backups");
+        let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+        let e = tiny_eval(&["ADSK"]);
+        s.record_run_full(&meta(10), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let good = bdir.join("day1.sqlite.gz");
+        s.export_to(&good).unwrap();
+        // Collect the one inputs blob and its correct bytes.
+        let inputs = bdir.join("inputs");
+        let names: Vec<_> = std::fs::read_dir(&inputs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 1);
+        let hash = names[0].clone();
+        let correct = std::fs::read(inputs.join(&hash)).unwrap();
+        assert!(!correct.is_empty());
+
+        // Zero-length corrupt → next export repairs.
+        std::fs::write(inputs.join(&hash), b"").unwrap();
+        assert_eq!(std::fs::metadata(inputs.join(&hash)).unwrap().len(), 0);
+        let day2 = bdir.join("day2.sqlite.gz");
+        s.export_to(&day2).unwrap();
+        assert_eq!(
+            std::fs::read(inputs.join(&hash)).unwrap(),
+            correct,
+            "zero-length blob repaired on export"
+        );
+
+        // Flipped-byte corrupt → next export repairs.
+        let mut flipped = correct.clone();
+        flipped[0] ^= 0xff;
+        std::fs::write(inputs.join(&hash), &flipped).unwrap();
+        let day3 = bdir.join("day3.sqlite.gz");
+        s.export_to(&day3).unwrap();
+        assert_eq!(
+            std::fs::read(inputs.join(&hash)).unwrap(),
+            correct,
+            "flipped-byte blob repaired on export"
+        );
+
+        // Restore from repaired backup is OK / byte-identical.
+        let want = {
+            let c = s.conn.lock().unwrap();
+            let mut st = c
+                .prepare("SELECT hash, bytes FROM score_inputs ORDER BY hash")
+                .unwrap();
+            st.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        drop(s);
+        let live2 = root.join("live2");
+        restore(&day3, &live2, &bdir).unwrap();
+        let s2 = ScoreHistoryStore::open(&live2.join("history.sqlite"), Some(&bdir)).unwrap();
+        let got = {
+            let c = s2.conn.lock().unwrap();
+            let mut st = c
+                .prepare("SELECT hash, bytes FROM score_inputs ORDER BY hash")
+                .unwrap();
+            st.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(want, got);
+
+        // check_backup fails on missing blob.
+        let orphan = bdir.join("orphan.sqlite.gz");
+        std::fs::copy(&day3, &orphan).unwrap();
+        std::fs::remove_file(inputs.join(&hash)).unwrap();
+        let err = check_backup(&orphan, 1, 1).unwrap_err();
+        assert!(
+            err.contains("missing") || err.contains("blob") || err.contains("inputs"),
+            "{err}"
+        );
+        assert!(
+            PathBuf::from(format!("{}.failed", orphan.display())).exists() || !orphan.exists(),
+            "failed backup renamed"
+        );
+
+        // check_backup fails on corrupt blob (restore correct file first).
+        // Re-export to recreate the good blob, then corrupt after a fresh copy.
+        let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+        let day4 = bdir.join("day4.sqlite.gz");
+        s.export_to(&day4).unwrap();
+        drop(s);
+        let mut bad_bytes = std::fs::read(inputs.join(&hash)).unwrap();
+        bad_bytes[0] ^= 0xaa;
+        std::fs::write(inputs.join(&hash), &bad_bytes).unwrap();
+        let corrupt = bdir.join("corrupt.sqlite.gz");
+        std::fs::copy(&day4, &corrupt).unwrap();
+        let err = check_backup(&corrupt, 1, 1).unwrap_err();
+        assert!(
+            err.contains("blob") || err.contains("match") || err.contains("sha"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

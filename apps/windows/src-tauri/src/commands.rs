@@ -1047,6 +1047,7 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
     let inflight = Arc::clone(&state.valuation_inflight);
     let feed_log = Arc::clone(&state.feed_log);
     let feed_gen = state.feed_generation_arc();
+    let rank_input_generation = Arc::clone(&state.rank_input_generation);
     let valuation_yahoo = state.valuation_yahoo.clone();
     let mut worker_context = request_context.clone();
 
@@ -1066,6 +1067,7 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
                     &valuation_yahoo,
                     &feed_gen,
                     generation,
+                    &rank_input_generation,
                     &mut worker_context,
                 )
             }));
@@ -1079,6 +1081,7 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
                         &screener,
                         &feed_gen,
                         generation,
+                        &rank_input_generation,
                         &worker_context.input_key,
                         &worker_context.dcf_revision,
                         &error,
@@ -1092,6 +1095,7 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
                         &screener,
                         &feed_gen,
                         generation,
+                        &rank_input_generation,
                         &worker_context.input_key,
                         &worker_context.dcf_revision,
                         error,
@@ -1113,6 +1117,7 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
             &state.screener,
             &state.feed_generation,
             generation,
+            &state.rank_input_generation,
             &request_context.input_key,
             &request_context.dcf_revision,
             &format!("start valuation worker: {error}"),
@@ -1125,36 +1130,56 @@ fn record_demand_valuation_failure(
     screener: &Arc<std::sync::Mutex<crate::engine::ScreenerState>>,
     active_generation: &std::sync::atomic::AtomicU64,
     generation: u64,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
     expected_input_key: &[u8],
     expected_dcf_revision: &[u8],
     error: &str,
 ) {
-    let mut state = screener.lock().unwrap();
-    if !generation_is_current(active_generation, generation) || error == DEMAND_INPUTS_CHANGED {
+    if error == DEMAND_INPUTS_CHANGED {
         return;
     }
-    let Some(fund) = state.fundamentals.get(symbol).cloned() else {
+    // Snapshot inputs under the lock, then publish via the central mutate helper
+    // so rank_input_generation bumps with every ranking-affecting write.
+    let prepared = {
+        let state = screener.lock().unwrap();
+        if !generation_is_current(active_generation, generation) {
+            return;
+        }
+        let Some(fund) = state.fundamentals.get(symbol).cloned() else {
+            return;
+        };
+        let price = state
+            .snapshots
+            .get(symbol)
+            .map(|snapshot| snapshot.market_price_cents);
+        if financial_dcf_input_key(&fund, price) != expected_input_key
+            || dcf_revision_key(&state, symbol) != expected_dcf_revision
+        {
+            return;
+        }
+        let class = crate::dcf_model::classify_business(
+            fund.sector_name.as_deref(),
+            fund.industry_name.as_deref(),
+            fund.sector_key.as_deref(),
+            fund.industry_key.as_deref(),
+            false,
+        );
+        Some((fund, class, error.to_string()))
+    };
+    let Some((fund, class, error)) = prepared else {
         return;
     };
-    let price = state
-        .snapshots
-        .get(symbol)
-        .map(|snapshot| snapshot.market_price_cents);
-    if financial_dcf_input_key(&fund, price) != expected_input_key
-        || dcf_revision_key(&state, symbol) != expected_dcf_revision
-    {
-        return;
-    }
-    let class = crate::dcf_model::classify_business(
-        fund.sector_name.as_deref(),
-        fund.industry_name.as_deref(),
-        fund.sector_key.as_deref(),
-        fund.industry_key.as_deref(),
-        false,
-    );
     if class != crate::dcf_model::BusinessClass::OperatingNonFinancial {
-        state.clear_dcf(symbol);
-        state.set_valuation_error(symbol.to_string(), error.to_string());
+        let _ = mutate_current_enrichment_state(
+            active_generation,
+            generation,
+            screener,
+            rank_input_generation,
+            |state| {
+                state.clear_dcf(symbol);
+                state.set_valuation_error(symbol.to_string(), error);
+            },
+        );
         return;
     }
     let market_params = crate::dcf_model::MarketParams::default_usd();
@@ -1163,7 +1188,7 @@ fn record_demand_valuation_failure(
             business_class: class,
             fundamentals: &fund,
             fcff_analysis: None,
-            fcff_failure: Some(error),
+            fcff_failure: Some(error.as_str()),
             forward_evidence: Err(
                 crate::operating_valuation_runtime::ForwardSourceFailure::Transport,
             ),
@@ -1172,8 +1197,16 @@ fn record_demand_valuation_failure(
             market_price_cents: None,
         },
     );
-    state.clear_dcf(symbol);
-    state.ingest_operating_valuation(symbol.to_string(), None, envelope);
+    let _ = mutate_current_enrichment_state(
+        active_generation,
+        generation,
+        screener,
+        rank_input_generation,
+        |state| {
+            state.clear_dcf(symbol);
+            state.ingest_operating_valuation(symbol.to_string(), None, envelope);
+        },
+    );
 }
 
 fn current_epoch_day() -> i64 {
@@ -1284,6 +1317,7 @@ fn compute_demand_valuation_once(
     valuation_yahoo: &Option<Arc<YahooClient>>,
     active_generation: &std::sync::atomic::AtomicU64,
     generation: u64,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
     failure_context: &mut DemandFailureContext,
 ) -> Result<(), String> {
     compute_demand_valuation_once_with_financial_refresh(
@@ -1293,6 +1327,7 @@ fn compute_demand_valuation_once(
         valuation_yahoo,
         active_generation,
         generation,
+        rank_input_generation,
         failure_context,
         |symbol| {
             let Some(yahoo) = valuation_yahoo.as_deref() else {
@@ -1313,6 +1348,7 @@ fn compute_demand_valuation_once_with_financial_refresh<F>(
     valuation_yahoo: &Option<Arc<YahooClient>>,
     active_generation: &std::sync::atomic::AtomicU64,
     generation: u64,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
     failure_context: &mut DemandFailureContext,
     refresh_financial_fundamentals: F,
 ) -> Result<(), String>
@@ -1449,14 +1485,32 @@ where
         if shares_resolved_from_sec {
             analysis.reason_codes.push("shares=sec_dei_fallback".into());
         }
-        let mut state = screener.lock().unwrap();
-        if !generation_is_current(active_generation, generation) {
+        let mut refused = None::<String>;
+        let applied = mutate_current_enrichment_state(
+            active_generation,
+            generation,
+            screener,
+            rank_input_generation,
+            |state| {
+                if !demand_publication_inputs_are_current(
+                    state,
+                    symbol,
+                    &fund,
+                    price,
+                    &dcf_revision,
+                ) {
+                    refused = Some(DEMAND_INPUTS_CHANGED.into());
+                    return;
+                }
+                state.ingest_dcf_analysis(symbol.to_string(), analysis);
+            },
+        );
+        if !applied {
             return Err("profile changed during demand valuation".into());
         }
-        if !demand_publication_inputs_are_current(&state, symbol, &fund, price, &dcf_revision) {
-            return Err(DEMAND_INPUTS_CHANGED.into());
+        if let Some(e) = refused {
+            return Err(e);
         }
-        state.ingest_dcf_analysis(symbol.to_string(), analysis);
         return Ok(());
     }
 
@@ -1576,14 +1630,26 @@ where
             market_price_cents: price,
         },
     );
-    let mut state = screener.lock().unwrap();
-    if !generation_is_current(active_generation, generation) {
+    let mut refused = None::<String>;
+    let applied = mutate_current_enrichment_state(
+        active_generation,
+        generation,
+        screener,
+        rank_input_generation,
+        |state| {
+            if !demand_publication_inputs_are_current(state, symbol, &fund, price, &dcf_revision) {
+                refused = Some(DEMAND_INPUTS_CHANGED.into());
+                return;
+            }
+            state.ingest_operating_valuation(symbol.to_string(), analysis, envelope);
+        },
+    );
+    if !applied {
         return Err("profile changed during demand valuation".into());
     }
-    if !demand_publication_inputs_are_current(&state, symbol, &fund, price, &dcf_revision) {
-        return Err(DEMAND_INPUTS_CHANGED.into());
+    if let Some(e) = refused {
+        return Err(e);
     }
-    state.ingest_operating_valuation(symbol.to_string(), analysis, envelope);
     Ok(())
 }
 
@@ -1862,8 +1928,16 @@ fn apply_universe_profile_serial_with(
     state.last_full_pass_at.store(0, Ordering::SeqCst);
 
     {
-        let mut screener = state.screener.lock().unwrap();
-        screener.clear_universe();
+        // Closed-world clear: bump rank_input via the central mutation helper so
+        // `/status` ranked_rows cannot keep a stale count across profile switches.
+        let gen = state.feed_generation.load(Ordering::SeqCst);
+        let _ = mutate_current_enrichment_state(
+            &state.feed_generation,
+            gen,
+            &state.screener,
+            &state.rank_input_generation,
+            |screener| screener.clear_universe(),
+        );
     }
     *state.active_profile.lock().unwrap() = profile_name.clone();
     *state.active_symbols.lock().unwrap() = Arc::clone(&symbols);
@@ -1953,7 +2027,6 @@ fn ingest_fetch_result(
     mut result: crate::fetcher::FetchResult,
     crypto: bool,
     etf: bool,
-    rank_input_generation: Option<&std::sync::atomic::AtomicU64>,
 ) -> RefreshOutcome {
     if let Some(snap) = result.snapshot.as_mut() {
         if snap.market_price_cents > 0 {
@@ -1977,9 +2050,6 @@ fn ingest_fetch_result(
         }
         if let Some(fund) = result.fundamentals {
             screener.ingest_fundamentals(fund);
-        }
-        if let Some(g) = rank_input_generation {
-            g.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -2176,6 +2246,7 @@ pub async fn run_qa_valuation_divergence_audit(
     let cik_cache = Arc::clone(&state.edgar_cik_map);
     let feed_log = Arc::clone(&state.feed_log);
     let feed_gen = state.feed_generation_arc();
+    let rank_input_generation = Arc::clone(&state.rank_input_generation);
     let generation = feed_gen.load(Ordering::SeqCst);
     let valuation_yahoo = state.valuation_yahoo.clone();
     crate::tauri_compat::async_runtime::spawn_blocking(move || {
@@ -2201,6 +2272,7 @@ pub async fn run_qa_valuation_divergence_audit(
                     &valuation_yahoo,
                     &feed_gen,
                     generation,
+                    &rank_input_generation,
                     &mut audit_context,
                 ) {
                     feed_log.warn(&format!("qa-divergence-audit {symbol}: {error}"));
@@ -2420,10 +2492,10 @@ pub(crate) fn ensure_symbol_loaded_inner(
                 &state.feed_generation,
                 generation,
                 &state.screener,
+                &state.rank_input_generation,
                 |s| {
                     s.ingest_chart_summary(symbol.clone(), summary);
                     s.ingest_daily_candles(symbol.clone(), candles);
-                    state.rank_input_generation.fetch_add(1, Ordering::Relaxed);
                 },
             ) {
                 return Err("profile changed during detail load".into());
@@ -2439,6 +2511,7 @@ pub(crate) fn ensure_symbol_loaded_inner(
     let screener = Arc::clone(&state.screener);
     let fng_cache = Arc::clone(&state.fng_cache);
     let feed_gen = state.feed_generation_arc();
+    let rank_input_generation = Arc::clone(&state.rank_input_generation);
     let deep_symbol = symbol.clone();
     let _ = thread::Builder::new()
         .name(format!("ensure-deep-{}", deep_symbol))
@@ -2453,12 +2526,18 @@ pub(crate) fn ensure_symbol_loaded_inner(
             if let Ok(candles) = client.fetch_candles(&deep_symbol, "5y", "1wk") {
                 if let Some(summary) = compute_chart_summary(&candles) {
                     let crypto = is_crypto(&deep_symbol);
-                    if !mutate_current_enrichment_state(&feed_gen, generation, &screener, |s| {
-                        s.ingest_weekly_summary(deep_symbol.clone(), summary);
-                        if crypto {
-                            s.ingest_weekly_candles(deep_symbol.clone(), candles.clone());
-                        }
-                    }) {
+                    if !mutate_current_enrichment_state(
+                        &feed_gen,
+                        generation,
+                        &screener,
+                        &rank_input_generation,
+                        |s| {
+                            s.ingest_weekly_summary(deep_symbol.clone(), summary);
+                            if crypto {
+                                s.ingest_weekly_candles(deep_symbol.clone(), candles.clone());
+                            }
+                        },
+                    ) {
                         return;
                     }
                     if crypto {
@@ -2481,9 +2560,13 @@ pub(crate) fn ensure_symbol_loaded_inner(
                             fng,
                             now_e,
                         );
-                        if !mutate_current_enrichment_state(&feed_gen, generation, &screener, |s| {
-                            s.ingest_crypto_metrics(deep_symbol.clone(), metrics)
-                        }) {
+                        if !mutate_current_enrichment_state(
+                            &feed_gen,
+                            generation,
+                            &screener,
+                            &rank_input_generation,
+                            |s| s.ingest_crypto_metrics(deep_symbol.clone(), metrics),
+                        ) {
                             return;
                         }
                     }
@@ -2494,9 +2577,13 @@ pub(crate) fn ensure_symbol_loaded_inner(
             }
             if let Ok(candles) = client.fetch_candles(&deep_symbol, "1mo", "1h") {
                 if let Some(summary) = compute_chart_summary(&candles) {
-                    if !mutate_current_enrichment_state(&feed_gen, generation, &screener, |s| {
-                        s.ingest_hourly_summary(deep_symbol.clone(), summary)
-                    }) {
+                    if !mutate_current_enrichment_state(
+                        &feed_gen,
+                        generation,
+                        &screener,
+                        &rank_input_generation,
+                        |s| s.ingest_hourly_summary(deep_symbol.clone(), summary),
+                    ) {
                         return;
                     }
                 }
@@ -2510,10 +2597,13 @@ pub(crate) fn ensure_symbol_loaded_inner(
                 DETAIL_MONTHLY_CHART_REQUEST.interval,
             ) {
                 if let Some(summary) = compute_chart_summary(&candles) {
-                    let _ =
-                        mutate_current_enrichment_state(&feed_gen, generation, &screener, |s| {
-                            s.ingest_monthly_summary(deep_symbol.clone(), summary)
-                        });
+                    let _ = mutate_current_enrichment_state(
+                        &feed_gen,
+                        generation,
+                        &screener,
+                        &rank_input_generation,
+                        |s| s.ingest_monthly_summary(deep_symbol.clone(), summary),
+                    );
                 }
             }
         });
@@ -2860,6 +2950,7 @@ fn mutate_current_enrichment_state(
     active_generation: &std::sync::atomic::AtomicU64,
     generation: u64,
     screener: &Mutex<crate::engine::ScreenerState>,
+    rank_input_generation: &std::sync::atomic::AtomicU64,
     mutate: impl FnOnce(&mut crate::engine::ScreenerState),
 ) -> bool {
     let mut state = screener.lock().unwrap();
@@ -2867,6 +2958,9 @@ fn mutate_current_enrichment_state(
         return false;
     }
     mutate(&mut state);
+    // Central bump: every ranking-affecting screener mutation (quote, chart, DCF,
+    // closed-world clear, …) invalidates `/status` ranked_rows via this helper.
+    rank_input_generation.fetch_add(1, Ordering::Relaxed);
     true
 }
 
@@ -2965,11 +3059,11 @@ fn needs_enrichment_retry(
 #[cfg(test)]
 mod feed_coordinator_tests {
     use super::{
-        batch_retry_delay_ms, compute_demand_valuation_once_with_financial_refresh,
-        financial_required_drivers_missing, format_incomplete_retry_status,
-        format_terminal_incomplete_status, ingest_fetch_result,
-        mark_initial_pass_complete_if_current, needs_enrichment_retry,
-        reset_initial_pass_completion, resolve_regime_score_status,
+        apply_refresh_chart_if_current, apply_refresh_quote_if_current, batch_retry_delay_ms,
+        compute_demand_valuation_once_with_financial_refresh, financial_required_drivers_missing,
+        format_incomplete_retry_status, format_terminal_incomplete_status, ingest_fetch_result,
+        mark_initial_pass_complete_if_current, mutate_current_enrichment_state,
+        needs_enrichment_retry, reset_initial_pass_completion, resolve_regime_score_status,
         symbol_state_enrichment_complete, warmable_completed_generation, RefreshOutcome,
         RegimeScoreStatus,
     };
@@ -3143,25 +3237,161 @@ mod feed_coordinator_tests {
         );
     }
 
+    /// Real mutation paths must bump `rank_input_generation` via the central
+    /// helper — quote ingest, refresh chart, detail weekly chart, DCF ingest,
+    /// and closed-world clear. No hand bumps; kills per-path mutants that skip
+    /// the helper (or remove the central fetch_add).
+    #[test]
+    fn rank_input_bumps_on_quote_chart_detail_dcf_and_clear_paths() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Mutex;
+
+        let active = AtomicU64::new(1);
+        let rank = AtomicU64::new(0);
+        let screener = Mutex::new(ScreenerState::new());
+
+        let before = rank.load(Ordering::Relaxed);
+        let quote = FetchResult {
+            symbol: "AAA".into(),
+            snapshot: Some(MarketSnapshot {
+                symbol: "AAA".into(),
+                company_name: Some("Aaa".into()),
+                profitable: true,
+                market_price_cents: 10_000,
+                intrinsic_value_cents: 0,
+                previous_close_cents: 0,
+                next_earnings_epoch: None,
+                quote_fetched_at: None,
+            }),
+            signal: None,
+            fundamentals: Some(FundamentalSnapshot {
+                symbol: "AAA".into(),
+                sector_name: Some("Technology".into()),
+                ..Default::default()
+            }),
+        };
+        assert!(
+            apply_refresh_quote_if_current(&active, 1, &screener, quote, false, false, &rank,)
+                .is_some()
+        );
+        assert_eq!(
+            rank.load(Ordering::Relaxed),
+            before + 1,
+            "quote ingest path must bump (kills quote-path mutant)"
+        );
+
+        let before = rank.load(Ordering::Relaxed);
+        let candles = vec![crate::engine::HistoricalCandle {
+            epoch_seconds: 1_700_000_000,
+            open_cents: 10_000,
+            high_cents: 11_000,
+            low_cents: 9_500,
+            close_cents: 10_500,
+            volume: 1_000,
+        }];
+        assert!(apply_refresh_chart_if_current(
+            &active,
+            1,
+            &screener,
+            "AAA",
+            candles,
+            RefreshOutcome {
+                visible: true,
+                enriched: true,
+            },
+            &rank,
+        )
+        .is_some());
+        assert_eq!(
+            rank.load(Ordering::Relaxed),
+            before + 1,
+            "refresh chart path must bump (kills chart-path mutant)"
+        );
+
+        // Detail deep-chart path: weekly summary ingest through the helper
+        // (same mutate site as ensure_symbol_loaded deep worker).
+        let before = rank.load(Ordering::Relaxed);
+        let weekly = crate::engine::compute_chart_summary(&[crate::engine::HistoricalCandle {
+            epoch_seconds: 1_700_000_000,
+            open_cents: 10_000,
+            high_cents: 11_000,
+            low_cents: 9_500,
+            close_cents: 10_500,
+            volume: 1_000,
+        }])
+        .expect("summary");
+        assert!(mutate_current_enrichment_state(
+            &active,
+            1,
+            &screener,
+            &rank,
+            |s| {
+                s.ingest_weekly_summary("AAA".into(), weekly);
+            },
+        ));
+        assert_eq!(
+            rank.load(Ordering::Relaxed),
+            before + 1,
+            "detail weekly-chart path must bump"
+        );
+
+        // DCF ingest through the helper (financial residual-income publish shape).
+        let before = rank.load(Ordering::Relaxed);
+        assert!(mutate_current_enrichment_state(
+            &active,
+            1,
+            &screener,
+            &rank,
+            |s| {
+                // Minimal: clear any prior DCF error marker as ranking-affecting write.
+                s.clear_dcf("AAA");
+            },
+        ));
+        assert_eq!(
+            rank.load(Ordering::Relaxed),
+            before + 1,
+            "DCF/clear_dcf path must bump"
+        );
+
+        // Closed-world clear.
+        let before = rank.load(Ordering::Relaxed);
+        assert!(mutate_current_enrichment_state(
+            &active,
+            1,
+            &screener,
+            &rank,
+            |s| s.clear_universe(),
+        ));
+        assert_eq!(
+            rank.load(Ordering::Relaxed),
+            before + 1,
+            "closed-world clear must bump"
+        );
+        assert!(screener.lock().unwrap().snapshots.is_empty());
+    }
+
     #[test]
     fn stale_enrichment_cannot_write_after_generation_change() {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Mutex;
 
         let active = AtomicU64::new(4);
+        let rank = AtomicU64::new(0);
         let screener = Mutex::new(ScreenerState::new());
         assert!(super::mutate_current_enrichment_state(
             &active,
             4,
             &screener,
-            |state| state.scoring_model = "current".into()
+            &rank,
+            |state| state.scoring_model = "current".into(),
         ));
         active.store(5, Ordering::SeqCst);
         assert!(!super::mutate_current_enrichment_state(
             &active,
             4,
             &screener,
-            |state| state.scoring_model = "stale".into()
+            &rank,
+            |state| state.scoring_model = "stale".into(),
         ));
         assert_eq!(screener.lock().unwrap().scoring_model, "current");
     }
@@ -3343,6 +3573,7 @@ mod feed_coordinator_tests {
         use std::sync::Mutex;
 
         let active = AtomicU64::new(7);
+        let rank = AtomicU64::new(0);
         let screener = Mutex::new(ScreenerState::new());
         let status = Mutex::new(crate::state::FeedStatus::default());
         active.store(8, Ordering::SeqCst);
@@ -3350,6 +3581,7 @@ mod feed_coordinator_tests {
             &active,
             7,
             &screener,
+            &rank,
             |state| state.ingest_insider(
                 "OLD".into(),
                 crate::engine::InsiderData {
@@ -3435,6 +3667,7 @@ mod feed_coordinator_tests {
         use std::sync::{Arc, Mutex};
 
         let active = AtomicU64::new(5);
+        let rank = AtomicU64::new(0);
         let mut state = ScreenerState::new();
         let fund = FundamentalSnapshot {
             symbol: "NEW".into(),
@@ -3460,6 +3693,7 @@ mod feed_coordinator_tests {
             &screener,
             &active,
             4,
+            &rank,
             &old_key,
             &old_revision,
             "old failure",
@@ -3477,6 +3711,7 @@ mod feed_coordinator_tests {
             &screener,
             &active,
             5,
+            &rank,
             &old_key,
             &old_revision,
             "old input failure",
@@ -3489,6 +3724,7 @@ mod feed_coordinator_tests {
             &screener,
             &active,
             5,
+            &rank,
             &current_key,
             &old_revision,
             "old DCF failure",
@@ -3501,6 +3737,7 @@ mod feed_coordinator_tests {
             &screener,
             &active,
             5,
+            &rank,
             &current_key,
             &current_revision,
             super::DEMAND_INPUTS_CHANGED,
@@ -3512,6 +3749,7 @@ mod feed_coordinator_tests {
             &screener,
             &active,
             5,
+            &rank,
             &current_key,
             &current_revision,
             "current failure",
@@ -3533,6 +3771,7 @@ mod feed_coordinator_tests {
         use std::sync::{Arc, Mutex};
 
         let active = AtomicU64::new(7);
+        let rank = AtomicU64::new(0);
         let fund = FundamentalSnapshot {
             symbol: "COF".into(),
             sector_name: Some("Financial Services".into()),
@@ -3558,6 +3797,7 @@ mod feed_coordinator_tests {
             &None,
             &active,
             7,
+            &rank,
             &mut failure_context,
             |_| Ok(Some(refreshed)),
         )
@@ -3568,6 +3808,7 @@ mod feed_coordinator_tests {
             &screener,
             &active,
             7,
+            &rank,
             &failure_context.input_key,
             &failure_context.dcf_revision,
             &error,
@@ -3590,6 +3831,7 @@ mod feed_coordinator_tests {
         use std::sync::{Arc, Mutex};
 
         let active = AtomicU64::new(7);
+        let rank = AtomicU64::new(0);
         let fund = FundamentalSnapshot {
             symbol: "COF".into(),
             sector_name: Some("Financial Services".into()),
@@ -3613,6 +3855,7 @@ mod feed_coordinator_tests {
             &None,
             &active,
             7,
+            &rank,
             &mut failure_context,
             |_| Ok(Some(refreshed)),
         )
@@ -3630,6 +3873,7 @@ mod feed_coordinator_tests {
             &screener,
             &active,
             7,
+            &rank,
             &failure_context.input_key,
             &failure_context.dcf_revision,
             &error,
@@ -3643,6 +3887,7 @@ mod feed_coordinator_tests {
         use std::sync::{Arc, Mutex};
 
         let active = AtomicU64::new(4);
+        let rank = AtomicU64::new(0);
         let mut state = ScreenerState::new();
         state.ingest_fundamentals(FundamentalSnapshot {
             symbol: "COF".into(),
@@ -3664,6 +3909,7 @@ mod feed_coordinator_tests {
             &None,
             &active,
             4,
+            &rank,
             &mut failure_context,
             |_| {
                 active.store(5, Ordering::SeqCst);
@@ -3693,6 +3939,7 @@ mod feed_coordinator_tests {
         use std::sync::{Arc, Mutex};
 
         let active = AtomicU64::new(4);
+        let rank = AtomicU64::new(0);
         let mut state = ScreenerState::new();
         let stale_fund = FundamentalSnapshot {
             symbol: "COF".into(),
@@ -3727,6 +3974,7 @@ mod feed_coordinator_tests {
             &None,
             &active,
             4,
+            &rank,
             &mut failure_context,
             |_| {
                 screener
@@ -4073,6 +4321,7 @@ mod feed_coordinator_tests {
         let screener = std::sync::Arc::new(std::sync::Mutex::new(state));
         let cik_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
         let active = std::sync::atomic::AtomicU64::new(1);
+        let rank = std::sync::atomic::AtomicU64::new(0);
         let mut refresh_calls = 0;
         let mut failure_context =
             super::DemandFailureContext::capture(&screener.lock().unwrap(), "COF");
@@ -4083,6 +4332,7 @@ mod feed_coordinator_tests {
             &None,
             &active,
             1,
+            &rank,
             &mut failure_context,
             |requested_symbol| {
                 refresh_calls += 1;
@@ -4261,7 +4511,6 @@ mod feed_coordinator_tests {
             },
             false,
             false,
-            None,
         );
 
         assert!(outcome.visible);
@@ -4336,7 +4585,6 @@ mod feed_coordinator_tests {
             },
             false,
             false,
-            None,
         );
 
         assert!(outcome.visible);
@@ -4370,9 +4618,15 @@ fn apply_refresh_quote_if_current(
     rank_input_generation: &std::sync::atomic::AtomicU64,
 ) -> Option<RefreshOutcome> {
     let mut outcome = RefreshOutcome::default();
-    mutate_current_enrichment_state(active_generation, generation, screener, |state| {
-        outcome = ingest_fetch_result(state, result, crypto, etf, Some(rank_input_generation));
-    })
+    mutate_current_enrichment_state(
+        active_generation,
+        generation,
+        screener,
+        rank_input_generation,
+        |state| {
+            outcome = ingest_fetch_result(state, result, crypto, etf);
+        },
+    )
     .then_some(outcome)
 }
 
@@ -4388,72 +4642,75 @@ fn apply_refresh_chart_if_current(
     let summary = compute_chart_summary(&candles);
     let crypto = is_crypto(sym);
     let etf = is_etf(sym);
-    mutate_current_enrichment_state(active_generation, generation, screener, |state| {
-        let Some(summary) = summary else { return };
-        let close = summary.latest_close_cents;
-        let already = state.snapshots.contains_key(sym);
-        state.ingest_chart_summary(sym.to_string(), summary);
-        state.ingest_daily_candles(sym.to_string(), candles);
-        if close <= 0 {
-            return;
-        }
-        if already {
-            let needs_price = state
-                .snapshots
-                .get(sym)
-                .map(|x| x.market_price_cents <= 0)
-                .unwrap_or(true);
-            if needs_price {
-                use crate::engine::MarketSnapshot;
-                let prev = state.snapshots.get(sym).cloned();
+    mutate_current_enrichment_state(
+        active_generation,
+        generation,
+        screener,
+        rank_input_generation,
+        |state| {
+            let Some(summary) = summary else { return };
+            let close = summary.latest_close_cents;
+            let already = state.snapshots.contains_key(sym);
+            state.ingest_chart_summary(sym.to_string(), summary);
+            state.ingest_daily_candles(sym.to_string(), candles);
+            if close <= 0 {
+                return;
+            }
+            if already {
+                let needs_price = state
+                    .snapshots
+                    .get(sym)
+                    .map(|x| x.market_price_cents <= 0)
+                    .unwrap_or(true);
+                if needs_price {
+                    use crate::engine::MarketSnapshot;
+                    let prev = state.snapshots.get(sym).cloned();
+                    state.ingest_partial_snapshot(MarketSnapshot {
+                        symbol: sym.to_string(),
+                        company_name: prev.as_ref().and_then(|x| x.company_name.clone()),
+                        profitable: prev.as_ref().map(|x| x.profitable).unwrap_or(crypto || etf),
+                        market_price_cents: close,
+                        intrinsic_value_cents: prev
+                            .as_ref()
+                            .map(|x| x.intrinsic_value_cents)
+                            .unwrap_or(0),
+                        previous_close_cents: prev
+                            .as_ref()
+                            .map(|x| x.previous_close_cents)
+                            .unwrap_or(0),
+                        next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
+                        quote_fetched_at: Some(wall_epoch()),
+                    });
+                }
+                outcome.visible = true;
+            } else {
+                use crate::engine::{FundamentalSnapshot, MarketSnapshot};
                 state.ingest_partial_snapshot(MarketSnapshot {
                     symbol: sym.to_string(),
-                    company_name: prev.as_ref().and_then(|x| x.company_name.clone()),
-                    profitable: prev.as_ref().map(|x| x.profitable).unwrap_or(crypto || etf),
+                    company_name: None,
+                    profitable: crypto || etf,
                     market_price_cents: close,
-                    intrinsic_value_cents: prev
-                        .as_ref()
-                        .map(|x| x.intrinsic_value_cents)
-                        .unwrap_or(0),
-                    previous_close_cents: prev
-                        .as_ref()
-                        .map(|x| x.previous_close_cents)
-                        .unwrap_or(0),
-                    next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
-                    quote_fetched_at: Some(wall_epoch()),
+                    intrinsic_value_cents: 0,
+                    previous_close_cents: 0,
+                    next_earnings_epoch: None,
+                    quote_fetched_at: (close > 0).then(wall_epoch),
                 });
+                let sector = if crypto {
+                    Some("Cryptocurrency".to_string())
+                } else {
+                    etf_sector(sym).map(|s| s.to_string())
+                };
+                if sector.is_some() {
+                    state.ingest_fundamentals(FundamentalSnapshot {
+                        symbol: sym.to_string(),
+                        sector_name: sector,
+                        ..Default::default()
+                    });
+                }
+                outcome.visible = true;
             }
-            outcome.visible = true;
-        } else {
-            use crate::engine::{FundamentalSnapshot, MarketSnapshot};
-            state.ingest_partial_snapshot(MarketSnapshot {
-                symbol: sym.to_string(),
-                company_name: None,
-                profitable: crypto || etf,
-                market_price_cents: close,
-                intrinsic_value_cents: 0,
-                previous_close_cents: 0,
-                next_earnings_epoch: None,
-                quote_fetched_at: (close > 0).then(wall_epoch),
-            });
-            let sector = if crypto {
-                Some("Cryptocurrency".to_string())
-            } else {
-                etf_sector(sym).map(|s| s.to_string())
-            };
-            if sector.is_some() {
-                state.ingest_fundamentals(FundamentalSnapshot {
-                    symbol: sym.to_string(),
-                    sector_name: sector,
-                    ..Default::default()
-                });
-            }
-            outcome.visible = true;
-        }
-        if outcome.visible {
-            rank_input_generation.fetch_add(1, Ordering::Relaxed);
-        }
-    })
+        },
+    )
     .then_some(outcome)
 }
 
@@ -4841,6 +5098,7 @@ fn spawn_feed_workers(
         let fng_cache = Arc::clone(&state.fng_cache);
         let feed_log = Arc::clone(&state.feed_log);
         let feed_gen = Arc::clone(&feed_gen);
+        let rank_input_generation = Arc::clone(&rank_input_generation);
 
         for (w, receiver) in enrichment_receivers.into_iter().enumerate() {
             let client = Arc::clone(&client);
@@ -4848,6 +5106,7 @@ fn spawn_feed_workers(
             let fng_cache = Arc::clone(&fng_cache);
             let feed_log = Arc::clone(&feed_log);
             let feed_gen = Arc::clone(&feed_gen);
+            let rank_input_generation = Arc::clone(&rank_input_generation);
 
             if let Err(e) = thread::Builder::new()
                 .name(format!("enrich-{w}"))
@@ -4920,6 +5179,7 @@ fn spawn_feed_workers(
                                                 &feed_gen,
                                                 generation,
                                                 &screener,
+                                                &rank_input_generation,
                                                 |state| {
                                                     state.ingest_weekly_summary(
                                                         sym.to_string(),
@@ -4963,6 +5223,7 @@ fn spawn_feed_workers(
                                                     &feed_gen,
                                                     generation,
                                                     &screener,
+                                                    &rank_input_generation,
                                                     |state| {
                                                         state.ingest_crypto_metrics(
                                                             sym.to_string(),
@@ -4979,6 +5240,7 @@ fn spawn_feed_workers(
                                                 &feed_gen,
                                                 generation,
                                                 &screener,
+                                                &rank_input_generation,
                                                 |state| {
                                                     state.ingest_hourly_summary(
                                                         sym.to_string(),
@@ -5028,6 +5290,7 @@ fn spawn_feed_workers(
         let screener = Arc::clone(&state.screener);
         let feed_status = Arc::clone(&state.feed_status);
         let feed_gen = Arc::clone(&feed_gen);
+        let rank_input_generation = Arc::clone(&rank_input_generation);
 
         thread::Builder::new()
             .name("edgar-dcf".to_string())
@@ -5099,19 +5362,19 @@ fn spawn_feed_workers(
                         };
 
                         if business_class == crate::dcf_model::BusinessClass::FinancialServices {
-                            let mut s = screener.lock().unwrap();
-                            if !generation_is_current(&feed_gen, generation) {
-                                return;
-                            }
-                            let fund = s.fundamentals.get(sym).cloned();
-                            let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
-                            if let Some(fund) = fund {
-                                let key = financial_dcf_input_key(&fund, price);
+                            let (fund, price, has_analysis) = {
+                                let s = screener.lock().unwrap();
+                                let fund = s.fundamentals.get(sym).cloned();
+                                let price = s.snapshots.get(sym).map(|x| x.market_price_cents);
                                 let has_analysis =
                                     s.dcf_analyses.get(sym).is_some_and(|analysis| {
                                         analysis.model
                                         == crate::dcf_model::ValuationModel::ResidualIncomeEquity
                                     });
+                                (fund, price, has_analysis)
+                            };
+                            if let Some(fund) = fund {
+                                let key = financial_dcf_input_key(&fund, price);
                                 let now = Instant::now();
                                 if financial_dcf_schedule.should_compute(
                                     sym,
@@ -5125,8 +5388,16 @@ fn spawn_feed_workers(
                                         "fundamentals",
                                     );
                                     let success = if let Ok(analysis) = result {
-                                        s.ingest_dcf_analysis(sym.to_string(), analysis);
-                                        true
+                                        mutate_current_enrichment_state(
+                                            &feed_gen,
+                                            generation,
+                                            &screener,
+                                            &rank_input_generation,
+                                            |state| {
+                                                state
+                                                    .ingest_dcf_analysis(sym.to_string(), analysis);
+                                            },
+                                        )
                                     } else {
                                         false
                                     };
@@ -5146,6 +5417,7 @@ fn spawn_feed_workers(
                                     &feed_gen,
                                     generation,
                                     &screener,
+                                    &rank_input_generation,
                                     |state| state.clear_dcf(sym),
                                 ) {
                                     return;
@@ -5169,6 +5441,7 @@ fn spawn_feed_workers(
                                 &feed_gen,
                                 generation,
                                 &screener,
+                                &rank_input_generation,
                                 |state| {
                                     state.ingest_insider(
                                         sym.to_string(),
