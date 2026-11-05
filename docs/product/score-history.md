@@ -64,23 +64,14 @@ production on the box: `/workspace/vh-data/history.sqlite`.
   not take this lock — close it before restoring.)
 - **A manual `rm -rf` of the data-dir is covered only by the off-dir backups.** Restore with `history-restore`.
 
-## Storage (measured on the RC binary)
-| | per run (94 ranked rows, sp500 today) | per run (501 rows, worst case) |
-|---|---|---|
-| app DB growth | ~12 KB | ~67 KB |
-| gzip backup | ~3–3.7 KB | ~20 KB |
+## Storage (pre-v4 ranked-only; kept for history)
 
-About 1,700 runs/year (4 interval runs/day + ≤252 close snapshots): **~20 MB/yr in the DB** at 94 rows/run
-(~115 MB/yr at 501 rows). Each backup holds the full history: ~6 MB after one year at 94 rows (~33 MB at the
-~20 KB/run worst case), ~29 MB / ~166 MB after five years.
-
-Projected backup dir (all retained copies: 7 daily + 11 more month heads + one per past year; the second figure
-adds the worst case of all 30 pre-migration/pre-restore/manual slots full at current size):
-
-| | year 1 | year 5 |
-|---|---|---|
-| ~20 KB/run gz (501 rows, reviewer basis) | ~0.4 GB (≤ 1.4 GB) | ~3.1 GB (≤ 8.1 GB) |
-| ~3.5 KB/run gz (94 rows, today) | ~73 MB (≤ 0.25 GB) | ~0.55 GB (≤ 1.4 GB) |
+Before migration v4 the backups held only the ranked `score_history` rows (~12–67 KB of
+DB growth per run). Those figures are obsolete once full-universe evaluations and zstd
+inputs are stored — see **Expected storage** below for current numbers. The structural
+rule is unchanged: **every retained backup is a full copy of the never-pruned DB**, so
+backup-dir size scales with (live DB size × number of retained copies), not with one day's
+delta.
 
 ## Box daemon start command
 ```
@@ -123,3 +114,103 @@ The store path is configuration, not a code default.
   table is accepted, a v3 backup without it is refused.
 - `vantage-headless history-shadow-report --data-dir DIR [--profile P] [--min-n N] [--json]`: demoted vs kept
   forward returns at 5/20/60 recorded trading days.
+## Full-universe evaluations (migration v4)
+
+Every recorded run also stores one row per **universe** symbol in `score_evaluations`
+(`status` / `reason`: `ok`/`qualified`; `excluded`/`unprofitable`, `gap_below_min:<bps>`,
+`no_intrinsic_value`; `failed`/`not_loaded`, `invalid_price`, `score_error:<msg>`).
+Excluded rows carry diagnostic f/t/fc and composite scores; `decision` is NULL unless `ok`.
+The official ranking (`rank_android_v3`) is exactly the `ok` evaluations in main's order.
+
+**Evaluations are written on every run** (all universe symbols). Excluded rows also get a
+diagnostic T (`technical`) when the Year chart allows; otherwise `technical` is NULL and
+`technical_reason` says why (`not_loaded`, `score_error`, `no_year_chart`, `no_latest_close`,
+`no_indicators`). `decision` stays NULL for every non-`ok` row.
+
+**Full inputs** (the raw snapshot rows) are stored only when the deterministic policy says so;
+`score_run_stats.inputs_reason` records which rule fired, checked in this order:
+
+1. `first` - no earlier run of this profile+model stored inputs;
+2. `close` - the post-close run (trigger `close`) always stores them (one per trading day);
+3. `daily` - the most recent inputs are >= 24 h older than this run (days whose close slot
+   was taken by an interval run, restarts);
+4. `material:loaded_set` - the set of loaded symbols (reason != `not_loaded`) differs from the
+   most recent run with inputs;
+5. `material:evaluation` - any symbol's (status, reason class, decision) differs from that run;
+   the reason class drops the `:<detail>` suffix (`gap_below_min:120` -> `gap_below_min`).
+   Score, rank and price moves alone are **not** material;
+6. otherwise `skipped:unchanged`.
+
+`inputs_stored` is 1 for rules 1-5. `inputs_run_id` is explicit on every run: the run itself
+when it stored inputs, otherwise the most recent run that did (the inputs it can be read
+against). Blobs are content-addressed in `score_inputs` (sha256 of the exact serde bytes,
+`encoding = 'zstd'` level 19, deduplicated across runs); `score_run_inputs` lists the run's rows
+in order and `score_run_stats` holds counts plus the snapshot envelope, so
+`ScoreHistoryStore::reconstruct_snapshot(run_id)` rebuilds the snapshot byte for byte (hashes
+re-checked) for runs with inputs, and errors naming `inputs_run_id` for runs without.
+
+**Nothing is ever pruned**: there is no retention/prune code path (a test scans the source and
+keeps 400 daily runs across reopen). All four tables are append-only (triggers, self-check,
+export, restore by name; older backups without them restore fine). Everything is written in
+the run's one transaction.
+
+`GET /history?all=1[&run=<id>][&profile=]` returns the latest (or given) run's evaluations
+and stats; `run` must be a valid `<profile>-<epoch>-<model>` id of an evaluated run of that
+profile, otherwise 400. `GET /history?all=1&symbol=X[&since=<epoch>][&limit=N]` returns one
+symbol's evaluations across runs (newest `limit`, default 500, max 10000, returned oldest
+first; one joined query). Duplicate snapshot symbols are ranked as on main; the stored record
+is the first evaluation, with the rank of its own row. Restore re-checks every
+`score_inputs` blob (sha256 and `raw_size`) before merging, and `RestoreReport` counts the
+rows added to every table.
+`/status.ranked_rows` is the real ranked count (cached per feed / pass /
+`rank_input_generation`, so V3 is not recomputed on every call and the snapshot is not
+re-serialized for the cache key; quote, Year-chart, and pass completion bumps all miss);
+`snapshot_rows` the loaded rows; `score_panics` the number of scoring panics caught since
+start (one per panicked evaluation, not unique symbols; each also logged).
+
+### Expected storage (synthetic RC, zstd, 4 runs/day incl. the post-close run)
+
+Measured with the RC driver (`rc_full_universe`, 8 runs = 2 days, SQLite page sizes incl.
+indexes). "Unchanged" = identical rows between runs (blobs deduplicate); "worst" = every row's
+price moves every run (non-material, so inputs are still stored about once a day).
+
+| Universe | evaluations / run | score_history / run | inputs per stored set | per day | per year |
+|---|---|---|---|---|---|
+| 501 (sp500) | ~90 KB | ~37 KB | ~0 (unchanged) – ~1.0 MB (worst) | ~0.6 – 1.6 MB | ~0.22 – 0.6 GB |
+| 1937 (r2k) | ~344 KB | ~136 KB | ~0 (unchanged) – ~3.9 MB (worst) | ~2.2 – 6.1 MB | ~0.8 – 2.2 GB |
+
+Material-change days add one extra input set each. Nothing is ever pruned, so growth is
+linear.
+
+**Backup directory size (never-prune):** retention is unchanged (7 daily + 12 monthly +
+every yearly, plus newest-10 pre-migration / pre-restore / manual slots — never prune
+history tables or the blob store). Each rotated `.sqlite.gz` still holds the **small**
+score tables in full (runs, history, evaluations, run_inputs, stats, shadow).
+`score_inputs` payloads are **incremental**: content-addressed files under
+`backup_dir/inputs/<sha256>` (append-only shared store; empty `bytes` in the gzip).
+**The `inputs/` directory must travel with the `.gz` files and must never be deleted** —
+a `.gz` alone does not restore on a new machine (empty `bytes` need the matching
+`inputs/<sha256>` blobs). Legacy backups with inline `bytes` still restore. New blob
+files appear only for new hashes; corrupt/truncated blobs are repaired on the next
+export (good blobs are never deleted).
+
+Uncompressed upper bounds (live DB, never-prune, worst-case daily input churn) are the
+table above (~0.6 GB sp500 / ~2.2 GB r2k year 1; ~11 GB r2k year 5). Measured relative
+to live: small-table `.sqlite.gz` ≈ **0.09×** live DB; the shared `inputs/` store ≈
+**0.32×** live. Rough backup-dir planning:
+
+| | live DB (approx) | backup dir (gzip small tables + shared `inputs/` store) |
+|---|---|---|
+| sp500 year 1 (~0.6 GB live, worst) | ~0.6 GB | small-table gzips (~0.09×) + inputs (~0.32×) ≈ **~0.3–0.5 GB** |
+| r2k year 1 (~2.2 GB live, worst) | ~2.2 GB | ≈ **~0.9 GB** (0.09× + 0.32×) growing with rotation heads |
+| r2k year 5 (~11 GB live, worst) | ~11 GB | rotation of small-table gzips + shared inputs ≈ **~25 GB**; up to **~55 GB** worst case with the ~30 pre-* / manual slot copies of small tables |
+
+**How r2k reaches ~25 GB:** plan `backup_dir ≈ N × 0.09× + 0.32×` of the live DB size, where
+`N` is the number of retained small-table `.sqlite.gz` heads (7 daily + 12 monthly + yearlies
+≈ ~20–30) each ≈ **0.09×** live, and the shared append-only `inputs/` store ≈ **0.32×** live
+(content-addressed; grows with unique payloads, not with every gzip). For r2k year-5 live
+~11 GB: `~25 × 0.09× × 11 GB + 0.32× × 11 GB ≈ 25 GB` (order-of-magnitude; exact N and
+churn move the number).
+
+Plan disk for `backup_dir` separately from the live data-dir; rotation never deletes a
+kept gzip or an `inputs/` blob.
