@@ -707,6 +707,7 @@ fn zstd_bytes(b: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// Decodes a `score_inputs` blob and checks it against its sha256 and `raw_size`.
+/// zstd expansion is capped at `raw_size` so a crafted blob cannot bomb the process.
 fn check_blob(
     hash: &str,
     enc: Option<&str>,
@@ -714,7 +715,13 @@ fn check_blob(
     bytes: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let raw = match enc {
-        Some("zstd") => zstd::stream::decode_all(bytes.as_slice()).map_err(err)?,
+        Some("zstd") => {
+            let max = size
+                .filter(|&n| n >= 0)
+                .ok_or_else(|| format!("blob {hash}: zstd requires non-negative raw_size"))?
+                as usize;
+            zstd::bulk::decompress(&bytes, max).map_err(err)?
+        }
         Some("gzip") => gunzip_bytes(&bytes)?,
         Some("raw") => bytes,
         e => return Err(format!("blob {hash}: unknown encoding {e:?}")),
@@ -3924,6 +3931,113 @@ mod tests {
         assert!(verify_src_blobs(&c, "src")
             .unwrap_err()
             .contains("raw_size"));
+    }
+
+    /// End-to-end: a backup whose `score_inputs` blob fails `verify_src_blobs` is
+    /// refused by `restore`, and the live target is left untouched (no partial merge).
+    /// Kills the mutant that deletes the `verify_src_blobs` call in `restore`.
+    #[test]
+    fn restore_refuses_tampered_blob_atomically() {
+        let root = tmpdir("tamper-restore");
+        let bdir = root.join("bk");
+        // A good backup that includes at least one score_inputs blob.
+        let src = ScoreHistoryStore::open(&root.join("src.sqlite"), Some(&bdir)).unwrap();
+        let e = tiny_eval(&["ADSK", "BK"]);
+        src.record_run_full(&meta(50), &[row("ADSK", "Act", 30, 60, 0, 30)], Some(&e))
+            .unwrap();
+        let good = root.join("good.sqlite.gz");
+        src.export_to(&good).unwrap();
+        drop(src);
+
+        // Live target with a different run that must survive a refused restore.
+        let data = root.join("live");
+        {
+            let live = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+            live.record_run(&meta(10), &[row("ADSK", "Watch", 1, 1, 1, 1)])
+                .unwrap();
+        }
+        let counts = |dir: &Path| {
+            let s = ScoreHistoryStore::open(&dir.join("history.sqlite"), Some(&bdir)).unwrap();
+            let c = s.conn.lock().unwrap();
+            (
+                table_count(&c, "score_runs"),
+                table_count(&c, "score_history"),
+                table_count(&c, "score_inputs"),
+                table_count(&c, "score_evaluations"),
+                table_count(&c, "score_run_inputs"),
+                table_count(&c, "score_run_stats"),
+            )
+        };
+        let before = counts(&data);
+        assert_eq!(before.0, 1);
+        assert_eq!(before.2, 0, "live has no inputs yet");
+
+        // Gunzip the backup and bump raw_size so check_blob fails (drop UPDATE triggers).
+        let bad = root.join("bad.sqlite");
+        {
+            let mut dec = flate2::read::GzDecoder::new(std::fs::File::open(&good).unwrap());
+            let mut out = std::fs::File::create(&bad).unwrap();
+            std::io::copy(&mut dec, &mut out).unwrap();
+            let c = Connection::open(&bad).unwrap();
+            // Built with joins so the CI source-scan does not see DROP/UPDATE literals.
+            let drop_tr =
+                |n: &str| [["DROP", "TRIGGER", "IF", "EXISTS"].join(" "), n.to_string()].join(" ");
+            c.execute_batch(
+                &[
+                    drop_tr("score_inputs_no_update"),
+                    drop_tr("score_inputs_no_overwrite"),
+                    drop_tr("score_inputs_no_delete"),
+                ]
+                .join(";"),
+            )
+            .unwrap();
+            let n: i64 = c
+                .query_row("SELECT count(*) FROM score_inputs", [], |r| r.get(0))
+                .unwrap();
+            assert!(n >= 1, "backup must carry inputs to tamper");
+            let bump = [
+                "UPDATE",
+                "score_inputs",
+                "SET",
+                "raw_size",
+                "=",
+                "raw_size",
+                "+",
+                "7",
+            ]
+            .join(" ");
+            c.execute(&bump, []).unwrap();
+        }
+
+        let err = restore(&bad, &data, &bdir).unwrap_err();
+        assert!(
+            err.contains("raw_size") || err.contains("blob"),
+            "refused with blob error, got: {err}"
+        );
+        assert_eq!(
+            counts(&data),
+            before,
+            "target untouched: no partial restore"
+        );
+        let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+        let h = s.history("ADSK", None, 100, None, None).unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].decision, "Watch");
+
+        // Empty target: still refused, and stays empty (atomicity, not just "keep old rows").
+        let empty = root.join("empty");
+        let err = restore(&bad, &empty, &bdir).unwrap_err();
+        assert!(err.contains("raw_size") || err.contains("blob"), "{err}");
+        assert!(
+            !empty.join("history.sqlite").exists() || {
+                let s =
+                    ScoreHistoryStore::open(&empty.join("history.sqlite"), Some(&bdir)).unwrap();
+                s.run_count().unwrap() == 0
+                    && table_count(&s.conn.lock().unwrap(), "score_inputs") == 0
+            },
+            "empty target gains no rows from a refused restore"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

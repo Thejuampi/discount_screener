@@ -563,10 +563,11 @@ fn recompute_cohort(
 fn write_observation_audit(members: &[ForecastObservation], capture_id: &str) {
     // The checked-in fixture is only rewritten on explicit request; otherwise the audit
     // goes to the temp dir so a test run never dirties the tree.
-    let path = if std::env::var_os("VH_UPDATE_OBSERVATION_FIXTURE").is_some() {
-        observation_path()
-    } else {
-        std::env::temp_dir().join("high_signal_screener_observation_latest.json")
+    // Only rewrite the checked-in fixture on an explicit truthy flag; `=0` / unset
+    // / any other value keeps the write in the temp dir so tests never dirty the tree.
+    let path = match std::env::var("VH_UPDATE_OBSERVATION_FIXTURE") {
+        Ok(v) if matches!(v.as_str(), "1" | "true" | "TRUE" | "True") => observation_path(),
+        _ => std::env::temp_dir().join("high_signal_screener_observation_latest.json"),
     };
     let body = serde_json::json!({
         "contract": "valuation-high-signal-screener-cohort-v1",
