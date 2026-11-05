@@ -765,9 +765,9 @@ fn inputs_blob_path(backup_dir: &Path, hash: &str) -> Result<PathBuf, String> {
 }
 
 fn fsync_dir(dir: &Path) -> Result<(), String> {
-    // Durability seam: open the directory fd and fsync it after rename so the
-    // directory entry for the new blob is on stable storage (temp→fsync→rename→fsync-dir).
-    // Tests can skip asserting fsync by exercising the write/rename path only.
+    // Directory fsync after rename: persists the new directory entry
+    // (temp → fsync(file) → rename → fsync(dir)). Not a test seam — production
+    // durability; unit tests exercise write/rename without asserting fsync.
     let f = std::fs::File::open(dir).map_err(|e| format!("open dir {}: {e}", dir.display()))?;
     f.sync_all()
         .map_err(|e| format!("fsync dir {}: {e}", dir.display()))
@@ -799,15 +799,59 @@ fn durable_replace_file(dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), Str
 
 /// True when on-disk blob bytes match `expected` (length + content).
 fn blob_file_matches(path: &Path, expected: &[u8]) -> bool {
-    match std::fs::read(path) {
+    match open_input_blob_nofollow(path).and_then(|mut f| {
+        use std::io::Read;
+        let mut got = Vec::new();
+        f.read_to_end(&mut got).map(|_| got)
+    }) {
         Ok(got) => got.len() == expected.len() && got == expected,
         Err(_) => false,
     }
 }
 
+/// Open `inputs/<sha>` for read with `O_NOFOLLOW` so a TOCTOU symlink swap
+/// cannot redirect the read. Caller must fstat the returned fd (`metadata()`)
+/// and only treat a regular file as a valid blob.
+#[cfg(unix)]
+fn open_input_blob_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // Linux O_NOFOLLOW = 0x20000; macOS uses the same bit in OpenOptionsExt.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x20000)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_input_blob_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// Unique quarantine destination that never overwrites an existing `.bad`
+/// entry (including a dangling symlink — `exists()` would miss those).
+fn unique_bad_quarantine_path(path: &Path, base: &str) -> PathBuf {
+    let candidate = path.with_file_name(format!("{base}.bad"));
+    // symlink_metadata: dangling symlinks still "exist" as an entry.
+    if std::fs::symlink_metadata(&candidate).is_err() {
+        return candidate;
+    }
+    static BAD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = BAD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    path.with_file_name(format!(
+        "{base}.bad.{}.{}{}",
+        std::process::id(),
+        nanos,
+        seq
+    ))
+}
+
 /// `inputs/<sha>` must be a regular file. Directories/symlinks are moved aside to
-/// `*.bad` (never deleted) so a durable rewrite can replace them; returns Err if
-/// the entry cannot be quarantined.
+/// `*.bad` (never deleted, never overwriting an existing `.bad`) so a durable
+/// rewrite can replace them; returns Err if the entry cannot be quarantined.
 fn ensure_regular_input_blob_path(path: &Path) -> Result<(), String> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -823,12 +867,7 @@ fn ensure_regular_input_blob_path(path: &Path) -> Result<(), String> {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("blob");
-    let bad = path.with_file_name(format!("{base}.bad"));
-    let bad = if bad.exists() {
-        path.with_file_name(format!("{base}.bad.{}", std::process::id()))
-    } else {
-        bad
-    };
+    let bad = unique_bad_quarantine_path(path, base);
     std::fs::rename(path, &bad).map_err(|e| {
         format!(
             "blob {}: not a regular file ({}); quarantine to {}: {e}",
@@ -848,6 +887,10 @@ fn ensure_regular_input_blob_path(path: &Path) -> Result<(), String> {
 
 /// Remove stale `.{sha}.{pid}.tmp` left by crashed writers. Only that exact
 /// pattern inside `inputs/`, and only when older than `max_age`.
+///
+/// `write_input_blob` uses `max_age = 15 minutes`. A writer stalled longer than
+/// that may lose its temp (cleanup removes it) and then get `Err` on rename —
+/// callers must retry. Fresh temps and non-numeric pid suffixes are kept.
 fn cleanup_stale_input_tmps(inputs_dir: &Path, max_age: std::time::Duration) -> usize {
     let Ok(rd) = std::fs::read_dir(inputs_dir) else {
         return 0;
@@ -888,6 +931,11 @@ fn cleanup_stale_input_tmps(inputs_dir: &Path, max_age: std::time::Duration) -> 
 /// leaves it alone. If it exists but is corrupt (wrong length/bytes), rewrites it
 /// atomically with the correct payload — never deletes a good blob.
 /// Returns true when a new/repaired file was written.
+///
+/// Opens existing blobs with `O_NOFOLLOW` + fstat on that fd (TOCTOU-safe).
+/// Opportunistic cleanup of `.{sha}.{pid}.tmp` older than 15 minutes: a writer
+/// stalled past that window can observe `Err` from rename after its temp was
+/// reaped and must retry.
 fn write_input_blob(backup_dir: &Path, hash: &str, bytes: &[u8]) -> Result<bool, String> {
     validate_input_hash(hash)?;
     let dir = inputs_blob_dir(backup_dir);
@@ -897,17 +945,44 @@ fn write_input_blob(backup_dir: &Path, hash: &str, bytes: &[u8]) -> Result<bool,
     let _ = cleanup_stale_input_tmps(&dir, std::time::Duration::from_secs(15 * 60));
     let path = inputs_blob_path(backup_dir, hash)?;
     ensure_regular_input_blob_path(&path)?;
-    if path.exists() {
-        if blob_file_matches(&path, bytes) {
-            return Ok(false);
+    match open_input_blob_nofollow(&path) {
+        Ok(f) => {
+            let meta = f
+                .metadata()
+                .map_err(|e| format!("fstat {}: {e}", path.display()))?;
+            if !meta.file_type().is_file() {
+                return Err(format!("{}: not a regular file after open", path.display()));
+            }
+            use std::io::Read;
+            let mut got = Vec::new();
+            // Read from the same fd we fstat'd (no path re-walk).
+            let mut f = f;
+            f.read_to_end(&mut got)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            if got.len() == bytes.len() && got == bytes {
+                return Ok(false);
+            }
+            // Corrupt/truncated: rewrite atomically; do not unlink the good path first.
+            durable_replace_file(&dir, &path, bytes)?;
+            return Ok(true);
         }
-        // Corrupt/truncated: rewrite atomically; do not unlink the good path first.
-        durable_replace_file(&dir, &path, bytes)?;
-        return Ok(true);
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            // Symlink (O_NOFOLLOW → ELOOP) or directory (EISDIR): quarantine then rewrite.
+            let os = e.raw_os_error();
+            let is_special = matches!(os, Some(40) | Some(21)) // ELOOP, EISDIR
+                || e.kind() == std::io::ErrorKind::Other
+                || e.kind() == std::io::ErrorKind::IsADirectory;
+            if is_special {
+                ensure_regular_input_blob_path(&path)?;
+            } else {
+                return Err(format!("open {}: {e}", path.display()));
+            }
+        }
     }
     match durable_replace_file(&dir, &path, bytes) {
         Ok(()) => Ok(true),
-        Err(_) if path.exists() && blob_file_matches(&path, bytes) => {
+        Err(_) if blob_file_matches(&path, bytes) => {
             // Lost the race to another writer that produced the correct blob.
             Ok(false)
         }
@@ -918,6 +993,7 @@ fn write_input_blob(backup_dir: &Path, hash: &str, bytes: &[u8]) -> Result<bool,
 /// Resolve blob bytes: non-empty inline bytes (legacy full backup) win; otherwise
 /// load from the append-only `inputs/<hash>` store under any of `blob_dirs`
 /// (typically the restore `backup_dir`, then the gzip's parent).
+/// Opens with `O_NOFOLLOW` and reads from that fd after fstat confirms a regular file.
 fn resolve_input_bytes(
     blob_dirs: &[PathBuf],
     hash: &str,
@@ -940,30 +1016,34 @@ fn resolve_input_bytes(
                 continue;
             }
         };
-        match std::fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_file() => {}
-            Ok(meta) => {
-                last = format!(
-                    "{}: not a regular file ({})",
-                    path.display(),
-                    if meta.file_type().is_symlink() {
-                        "symlink"
-                    } else if meta.is_dir() {
-                        "directory"
-                    } else {
-                        "special"
+        match open_input_blob_nofollow(&path) {
+            Ok(f) => {
+                let meta = match f.metadata() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        last = format!("{}: fstat {e}", path.display());
+                        continue;
                     }
-                );
-                continue;
+                };
+                if !meta.file_type().is_file() {
+                    last = format!("{}: not a regular file", path.display());
+                    continue;
+                }
+                use std::io::Read;
+                let mut f = f;
+                let mut b = Vec::new();
+                match f.read_to_end(&mut b) {
+                    Ok(_) => return Ok(b),
+                    Err(e) => last = format!("{}: {e}", path.display()),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                last = format!("{}: {e}", path.display());
             }
             Err(e) => {
-                last = format!("{}: {e}", path.display());
-                continue;
+                // Symlink (O_NOFOLLOW) or other — report as not a regular file.
+                last = format!("{}: not a regular file ({e})", path.display());
             }
-        }
-        match std::fs::read(&path) {
-            Ok(b) => return Ok(b),
-            Err(e) => last = format!("{}: {e}", path.display()),
         }
     }
     Err(format!(
@@ -4324,9 +4404,9 @@ mod tests {
         assert!(path.is_file(), "rewrote as regular file");
         assert_eq!(std::fs::read(&path).unwrap(), b"payload-dir");
         let bad = inputs.join(format!("{hash}.bad"));
-        assert!(bad.exists() && bad.is_dir(), "directory quarantined to .bad");
+        assert!(bad.is_dir(), "directory quarantined to .bad");
 
-        // Symlink occupying the blob name.
+        // Symlink-to-file occupying the blob name.
         let hash2 = "c".repeat(64);
         let path2 = inputs.join(&hash2);
         let target = inputs.join("elsewhere");
@@ -4338,7 +4418,56 @@ mod tests {
         let bad2 = inputs.join(format!("{hash2}.bad"));
         assert!(bad2.symlink_metadata().unwrap().file_type().is_symlink());
 
-        // resolve_input_bytes refuses a symlink left in place.
+        // Symlink-to-directory occupying the blob name.
+        let hash_dirlink = "a".repeat(64);
+        let path_dirlink = inputs.join(&hash_dirlink);
+        let target_dir = inputs.join("else-dir");
+        std::fs::create_dir(&target_dir).unwrap();
+        std::os::unix::fs::symlink(&target_dir, &path_dirlink).unwrap();
+        assert!(write_input_blob(&dir, &hash_dirlink, b"payload-dirlink").unwrap());
+        assert!(path_dirlink.is_file());
+        assert_eq!(std::fs::read(&path_dirlink).unwrap(), b"payload-dirlink");
+        let bad_dirlink = inputs.join(format!("{hash_dirlink}.bad"));
+        assert!(
+            bad_dirlink.symlink_metadata().unwrap().file_type().is_symlink(),
+            "symlink-to-directory quarantined"
+        );
+
+        // Dangling symlink occupying the blob name.
+        let hash_dang = "f".repeat(64);
+        let path_dang = inputs.join(&hash_dang);
+        std::os::unix::fs::symlink(inputs.join("missing-target"), &path_dang).unwrap();
+        assert!(write_input_blob(&dir, &hash_dang, b"payload-dangling").unwrap());
+        assert!(path_dang.is_file());
+        assert_eq!(std::fs::read(&path_dang).unwrap(), b"payload-dangling");
+        let bad_dang = inputs.join(format!("{hash_dang}.bad"));
+        assert!(
+            bad_dang.symlink_metadata().unwrap().file_type().is_symlink(),
+            "dangling symlink quarantined"
+        );
+
+        // Existing dangling `.bad` must not be overwritten — unique suffix.
+        let hash4 = "1".repeat(64);
+        let path4 = inputs.join(&hash4);
+        let bad4 = inputs.join(format!("{hash4}.bad"));
+        std::os::unix::fs::symlink(inputs.join("gone"), &bad4).unwrap();
+        std::fs::create_dir(&path4).unwrap();
+        assert!(write_input_blob(&dir, &hash4, b"payload-unique-bad").unwrap());
+        assert!(path4.is_file());
+        // Original dangling .bad still a symlink; quarantine used a unique name.
+        assert!(bad4.symlink_metadata().unwrap().file_type().is_symlink());
+        let unique_bads: Vec<_> = std::fs::read_dir(&inputs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!("{hash4}.bad.")) )
+            .collect();
+        assert!(
+            !unique_bads.is_empty(),
+            "must quarantine to unique .bad.* when .bad is a dangling symlink"
+        );
+
+        // resolve_input_bytes refuses a symlink left in place (O_NOFOLLOW).
         let hash3 = "d".repeat(64);
         let path3 = inputs.join(&hash3);
         std::os::unix::fs::symlink(&target, &path3).unwrap();
@@ -4361,12 +4490,24 @@ mod tests {
         // Keep a good blob and a non-matching tmp.
         std::fs::write(inputs.join(&hash), b"good").unwrap();
         std::fs::write(inputs.join(".notahash.1.tmp"), b"y").unwrap();
+        // Non-numeric pid suffix must be kept (T2).
+        let weird = inputs.join(format!(".{hash}.12a.tmp"));
+        std::fs::write(&weird, b"z").unwrap();
+        // Fresh matching tmp must be kept when max_age is large (T1).
+        let fresh = inputs.join(format!(".{hash}.99999.tmp"));
+        std::fs::write(&fresh, b"fresh").unwrap();
         // max_age=0 treats every matching tmp as stale (no filetime dependency).
         let n = cleanup_stale_input_tmps(&inputs, std::time::Duration::from_secs(0));
         assert!(n >= 1, "stale tmp removed");
         assert!(!stale.exists());
         assert!(inputs.join(&hash).exists());
         assert!(inputs.join(".notahash.1.tmp").exists());
+        assert!(weird.exists(), "non-numeric pid suffix tmp must be kept");
+        // Re-create a fresh matching tmp and confirm max_age=3600 keeps it.
+        std::fs::write(&fresh, b"fresh2").unwrap();
+        let kept = cleanup_stale_input_tmps(&inputs, std::time::Duration::from_secs(3600));
+        assert_eq!(kept, 0, "fresh tmp with max_age=3600 must be kept");
+        assert!(fresh.exists(), "fresh matching tmp kept at max_age=3600");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

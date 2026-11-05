@@ -2452,6 +2452,10 @@ impl ScreenerState {
 
     /// Reconcile cached valuation with business class. Overwrites wrong FCFF for
     /// financials (even when a large positive DCF is already cached).
+    ///
+    /// Note: this mutates DCF / operating-valuation caches **without** bumping
+    /// `rank_input_generation`. Headless does not call it; GUI detail paths that
+    /// need a ranked recount go through the gated enrichment helpers instead.
     pub fn ensure_model_routed_valuation(&mut self, symbol: &str) {
         let Some(fund) = self.fundamentals.get(symbol).cloned() else {
             return;
