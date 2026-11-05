@@ -868,6 +868,12 @@ pub struct RestoreReport {
     pub rows_added: usize,
     /// V3.1 shadow rows added (0 for a pre-v3 backup without `score_shadow`).
     pub shadow_added: usize,
+    /// Rows added per later table: `score_inputs`, `score_run_inputs`,
+    /// `score_evaluations`, `score_run_stats` (0 when the backup predates them).
+    pub inputs_added: usize,
+    pub run_inputs_added: usize,
+    pub evaluations_added: usize,
+    pub run_stats_added: usize,
     /// Row counts found in the (verified) backup.
     pub backup_runs: i64,
     pub backup_rows: i64,
@@ -898,6 +904,24 @@ pub fn validate_symbol(raw: &str) -> Result<String, String> {
     } else {
         Err(format!(
             "bad symbol '{raw}' (expected ^[A-Z0-9.\\-^=]{{1,16}}$)"
+        ))
+    }
+}
+
+/// A run id as written by [`RunMeta::run_id`]: `<profile>-<epoch>-<model>`, at most
+/// 64 chars of `[a-z0-9._-]`.
+pub fn validate_run_id(raw: &str) -> Result<String, String> {
+    let ok = !raw.is_empty()
+        && raw.len() <= 64
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
+        && raw.split('-').filter(|p| !p.is_empty()).count() >= 3;
+    if ok {
+        Ok(raw.to_string())
+    } else {
+        Err(format!(
+            "bad run id '{raw}' (expected <profile>-<epoch>-<model>)"
         ))
     }
 }
@@ -2349,20 +2373,20 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
     store.export_to(&pre)?;
     rotate_pre_backups(backup_dir)?;
     let c = store.conn.lock().map_err(|_| "lock")?;
-    let merged = (|| -> Result<(usize, usize, usize), String> {
+    let merged = (|| -> Result<Vec<usize>, String> {
         c.execute_batch("BEGIN EXCLUSIVE").map_err(err)?;
-        let res = (|| -> rusqlite::Result<(usize, usize, usize)> {
-            let runs = c.execute(&plan[0], [])?;
-            let rows = c.execute(&plan[1], [])?;
-            let shadow = match plan.get(2).filter(|q| !q.is_empty()) {
-                Some(q) => c.execute(q, [])?,
-                None => 0,
-            };
-            for sql in plan.iter().skip(3).filter(|q| !q.is_empty()) {
-                c.execute(sql, [])?;
+        let res = (|| -> rusqlite::Result<Vec<usize>> {
+            // One count per MERGE_TABLES entry; a skipped (later) table adds 0.
+            let mut added = Vec::with_capacity(plan.len());
+            for sql in &plan {
+                added.push(if sql.is_empty() {
+                    0
+                } else {
+                    c.execute(sql, [])?
+                });
             }
             c.execute_batch("COMMIT")?;
-            Ok((runs, rows, shadow))
+            Ok(added)
         })();
         res.map_err(|e| {
             let _ = c.execute_batch("ROLLBACK");
@@ -2370,14 +2394,24 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
         })
     })();
     let _ = c.execute("DETACH DATABASE src", []);
-    let (runs_added, rows_added, shadow_added) = merged?;
+    let added = merged?;
+    let n = |t: &str| {
+        MERGE_TABLES
+            .iter()
+            .position(|(x, _)| *x == t)
+            .map_or(0, |i| added[i])
+    };
     c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .map_err(err)?;
     Ok(RestoreReport {
         pre_restore_backup: Some(pre),
-        runs_added,
-        rows_added,
-        shadow_added,
+        runs_added: n("score_runs"),
+        rows_added: n("score_history"),
+        shadow_added: n("score_shadow"),
+        inputs_added: n("score_inputs"),
+        run_inputs_added: n("score_run_inputs"),
+        evaluations_added: n("score_evaluations"),
+        run_stats_added: n("score_run_stats"),
         backup_runs: rep.score_runs,
         backup_rows: rep.score_history,
     })
@@ -3233,6 +3267,10 @@ mod tests {
         let data = root.join("d");
         let r = restore(&f, &data, &bdir).unwrap();
         assert_eq!((r.runs_added, r.rows_added), (1, 1));
+        assert_eq!(
+            (r.evaluations_added, r.run_stats_added, r.inputs_added),
+            (0, 0, 0)
+        );
         // Full round trip: export a store with evaluations, restore into an empty dir.
         let src = ScoreHistoryStore::open(&root.join("src.sqlite"), Some(&bdir)).unwrap();
         let e = tiny_eval(&["ADSK", "BK"]);
@@ -3242,7 +3280,20 @@ mod tests {
         src.export_to(&bk).unwrap();
         let want = src.reconstruct_snapshot(&meta(5).run_id()).unwrap();
         let data2 = root.join("d2");
-        restore(&bk, &data2, &bdir).unwrap();
+        let r = restore(&bk, &data2, &bdir).unwrap();
+        assert_eq!((r.evaluations_added, r.run_stats_added), (2, 1));
+        assert!(r.inputs_added >= 1 && r.run_inputs_added >= 1);
+        let r = restore(&bk, &data2, &bdir).unwrap();
+        assert_eq!(
+            (
+                r.evaluations_added,
+                r.run_stats_added,
+                r.inputs_added,
+                r.run_inputs_added
+            ),
+            (0, 0, 0, 0),
+            "second restore adds nothing"
+        );
         let s = ScoreHistoryStore::open(&data2.join("history.sqlite"), Some(&bdir)).unwrap();
         assert_eq!(s.reconstruct_snapshot(&meta(5).run_id()).unwrap(), want);
         assert_eq!(s.evaluations(&meta(5).run_id()).unwrap().len(), 2);
@@ -4424,7 +4475,31 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_v3_with_all_triggers() {
+    fn evaluation_checks_refuse_bad_status_and_decision_on_non_ok_rows() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let c = s.conn.lock().unwrap();
+        let ins = [
+            "INS",
+            "ERT INTO score_evaluations (run_id, symbol, captured_at, status, reason, decision) \
+             VALUES (?1, ?2, 0, ?3, 'r', ?4)",
+        ]
+        .concat();
+        let put = |sym: &str, st: &str, d: Option<&str>| c.execute(&ins, params!["R", sym, st, d]);
+        assert!(put("A", "ok", Some("Act")).is_ok());
+        assert!(put("B", "excluded", None).is_ok());
+        assert!(put("C", "failed", None).is_ok());
+        for (sym, st, d) in [
+            ("D", "excluded", Some("Act")),
+            ("E", "failed", Some("Watch")),
+            ("F", "bogus", None),
+        ] {
+            let e = put(sym, st, d).unwrap_err().to_string();
+            assert!(e.contains("CHECK"), "{sym}: {e}");
+        }
+    }
+
+    #[test]
+    fn fresh_db_is_current_schema_with_all_triggers() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(REQUIRED_TRIGGERS.len(), 24);

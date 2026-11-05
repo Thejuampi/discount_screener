@@ -310,12 +310,16 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let live = data_dir.join("history.sqlite");
             let v = verify_file(&live, true)?;
             println!(
-                "merged {file} into {} (append-only): +{} runs, +{} rows, +{} shadow rows; \
-                 now score_runs={} score_history={} score_shadow={}",
+                "merged {file} into {} (append-only): +{} runs, +{} rows, +{} shadow rows, \
+                 +{} evaluations, +{} run stats, +{} input blobs, +{} run inputs; now score_runs={} score_history={} score_shadow={}",
                 live.display(),
                 r.runs_added,
                 r.rows_added,
                 r.shadow_added,
+                r.evaluations_added,
+                r.run_stats_added,
+                r.inputs_added,
+                r.run_inputs_added,
                 v.score_runs,
                 v.score_history,
                 v.score_shadow

@@ -1145,6 +1145,28 @@ pub struct HeadlessEngine {
     history: Option<crate::score_history::ScoreHistoryStore>,
     /// When the current generation's initial pass was first seen complete.
     pass_seen: Mutex<Option<(u64, i64)>>,
+    /// `/status` ranked-row count, cached per snapshot content fingerprint.
+    status_rank: Mutex<Option<(u64, usize)>>,
+}
+
+/// Content fingerprint of a snapshot (profile + rows; not the capture time), so
+/// `/status` recomputes V3 only when the scoring input changes.
+fn snapshot_fingerprint(snap: &OpportunitySnapshot) -> u64 {
+    use std::hash::Hasher;
+    struct W(std::collections::hash_map::DefaultHasher);
+    impl std::io::Write for W {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.write(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut w = W(Default::default());
+    w.0.write(snap.profile.as_bytes());
+    let _ = serde_json::to_writer(&mut w, &snap.rows);
+    w.0.finish()
 }
 
 pub use crate::score_history::{HISTORY_YEAR_COVERAGE, HISTORY_YEAR_WAIT_SECS};
@@ -1234,6 +1256,7 @@ impl HeadlessEngine {
             year,
             history,
             pass_seen: Mutex::new(None),
+            status_rank: Mutex::new(None),
         }))
     }
 
@@ -1372,6 +1395,19 @@ impl HeadlessEngine {
         history_all_json(store, symbol, run, &profile, since, limit)
     }
 
+    /// Ranked-row count for `/status`, recomputed only when the snapshot content changes.
+    fn status_ranked_rows(&self, snap: &OpportunitySnapshot) -> usize {
+        let fp = snapshot_fingerprint(snap);
+        if let Some((f, n)) = *self.status_rank.lock().unwrap() {
+            if f == fp {
+                return n;
+            }
+        }
+        let n = rank_android_v3(snap, android_universe(&snap.profile).as_deref()).len();
+        *self.status_rank.lock().unwrap() = Some((fp, n));
+        n
+    }
+
     pub fn status(&self) -> EngineStatus {
         let fs = self.state.feed_status.lock().unwrap().clone();
         let (snap, source) = self.current_snapshot();
@@ -1383,7 +1419,7 @@ impl HeadlessEngine {
             symbols_loaded: fs.symbols_loaded,
             symbols_total: self.state.active_symbols.lock().unwrap().len(),
             last_error: fs.last_error,
-            ranked_rows: rank_android_v3(&snap, android_universe(&snap.profile).as_deref()).len(),
+            ranked_rows: self.status_ranked_rows(&snap),
             snapshot_rows: snap.len(),
             score_panics: SCORE_PANICS.load(Ordering::Relaxed),
             source,
@@ -1426,9 +1462,11 @@ impl HistorySource for HeadlessEngine {
     }
 }
 
-/// Builds the stored evaluation of a run: one record per universe symbol (plus any
-/// loaded symbol outside it is ignored, exactly like the ranking), the exact serde
-/// bytes of every snapshot row, and the snapshot envelope.
+/// Builds the stored evaluation of a run: one record per universe symbol (the first
+/// evaluation when a symbol is duplicated in the snapshot; loaded symbols outside the
+/// universe are ignored, exactly like the ranking), the exact serde bytes of every
+/// snapshot row, and the snapshot envelope. `ok` records carry their position in
+/// [`rank_android_v3`] as `rank`.
 pub fn run_evaluation(
     snap: &OpportunitySnapshot,
     rank_universe: Option<&[String]>,
@@ -1453,22 +1491,34 @@ pub fn run_evaluation(
         }
     }
     let ranked = rank_evaluations(&evals);
-    let rank_of: std::collections::HashMap<&str, usize> = ranked
-        .iter()
-        .enumerate()
-        .map(|(i, r)| (r.symbol.as_str(), i + 1))
-        .collect();
+    // Ranking positions per symbol (a duplicated snapshot symbol is ranked as on main,
+    // possibly more than once).
+    let mut positions: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, r) in ranked.iter().enumerate() {
+        positions.entry(r.symbol.as_str()).or_default().push(i + 1);
+    }
+    // Only the first evaluation of a symbol is stored; its rank is the position of that
+    // evaluation's own row in the ranking.
+    let rank_of = |e: &Evaluation| -> Option<i64> {
+        let ps = positions.get(e.symbol.as_str())?;
+        let row = e.row.as_ref()?;
+        ps.iter()
+            .copied()
+            .find(|p| &ranked[p - 1] == row)
+            .map(|p| p as i64)
+    };
+    let mut stored = std::collections::HashSet::new();
     let records = evals
         .iter()
+        .filter(|e| stored.insert(e.symbol.clone()))
         .map(|e| {
             let a = e.row.as_ref();
             EvalRecord {
                 symbol: e.symbol.clone(),
                 status: e.status.into(),
                 reason: e.reason.clone(),
-                rank: (e.status == "ok")
-                    .then(|| rank_of.get(e.symbol.as_str()).map(|r| *r as i64))
-                    .flatten(),
+                rank: (e.status == "ok").then(|| rank_of(e)).flatten(),
                 gate_gap_bps: e.gate_gap_bps.map(i64::from),
                 composite: a.map(|r| r.composite_score as i64),
                 coverage: a.map(|r| r.coverage as i64),
@@ -1706,7 +1756,15 @@ pub fn history_all_json(
         }));
     }
     let run_id = match run {
-        Some(r) => r.to_string(),
+        Some(r) => {
+            let r = crate::score_history::validate_run_id(r)?;
+            if !store.run_in_profile(&r, profile, HISTORY_MODEL)? {
+                return Err(format!(
+                    "run {r} is not an evaluated {HISTORY_MODEL} run of profile {profile}"
+                ));
+            }
+            r
+        }
         None => store
             .latest_run_id(profile, HISTORY_MODEL)?
             .ok_or_else(|| format!("no evaluated run for profile {profile}"))?,
@@ -2426,6 +2484,18 @@ mod history_tick_tests {
         // /history?all=1 shape.
         let v = history_all_json(&s, None, None, "sp500", None, None).unwrap();
         assert_eq!(v["rows"], 100);
+        // ?run= must be a valid id of this profile's evaluated runs.
+        let rid = v["run_id"].as_str().unwrap().to_string();
+        let v2 = history_all_json(&s, None, Some(&rid), "sp500", None, None).unwrap();
+        assert_eq!(v2["rows"], 100);
+        let e = history_all_json(&s, None, Some(&rid), "russell2000", None, None).unwrap_err();
+        assert!(e.contains("not an evaluated"), "{e}");
+        for bad in ["", "../x", "SP500-1-v3", "a b", "x;drop"] {
+            assert!(
+                history_all_json(&s, None, Some(bad), "sp500", None, None).is_err(),
+                "{bad}"
+            );
+        }
         assert_eq!(v["stats"]["universe_size"], 100);
         let v = history_all_json(&s, Some("S99"), None, "sp500", None, None).unwrap();
         assert_eq!(v["evaluations"][0]["reason"], "not_loaded");
@@ -2588,6 +2658,134 @@ mod full_universe_parity_tests {
         }
     }
 
+    /// M1: a QUALIFIED row with price 0 stays `ok` and ranked exactly as on main (the
+    /// invalid_price check must not run before the qualification gate).
+    #[test]
+    fn qualified_price_zero_row_stays_ok_and_ranked_as_main() {
+        let screener = crate::commands::opportunity_projection_tests::fixture_state();
+        let mut snap = OpportunitySnapshot::capture(&screener, "fixture");
+        let q = (0..snap.rows.len())
+            .find(|&i| {
+                let mut r = snap.rows[i].clone();
+                r.row.market_price_cents = 0;
+                matches!(
+                    android_row(&r).qualification,
+                    crate::engine::QualificationStatus::Qualified
+                )
+            })
+            .expect("a row that stays qualified at price 0");
+        snap.rows[q].row.market_price_cents = 0;
+        let sym = snap.rows[q].row.symbol.clone();
+        let all: Vec<String> = snap.rows.iter().map(|r| r.row.symbol.clone()).collect();
+        let ev = evaluate_android_v3(&snap, Some(&all));
+        let e = ev.iter().find(|e| e.symbol == sym).unwrap();
+        assert_eq!((e.status, e.reason.as_str()), ("ok", "qualified"));
+        let main = rank_android_v3_main(&snap, Some(&all));
+        assert!(main.iter().any(|r| r.symbol == sym));
+        assert_eq!(
+            serde_json::to_vec(&rank_android_v3(&snap, Some(&all))).unwrap(),
+            serde_json::to_vec(&main).unwrap()
+        );
+        let (_, run) = run_evaluation(&snap, Some(&all), &all).unwrap();
+        let rec = run.evals.iter().find(|r| r.symbol == sym).unwrap();
+        assert_eq!(rec.status, "ok");
+        let m = main.iter().find(|r| r.symbol == sym).unwrap();
+        assert_eq!(rec.decision, m.decision, "decision as on main");
+    }
+
+    /// M5: every stored `ok` rank is its 1-based position in `rank_android_v3`; non-ok
+    /// records have no rank.
+    #[test]
+    fn stored_rank_is_position_in_official_ranking() {
+        let screener = crate::commands::opportunity_projection_tests::fixture_state();
+        let snap = OpportunitySnapshot::capture(&screener, "fixture");
+        let mut u: Vec<String> = snap.rows.iter().map(|r| r.row.symbol.clone()).collect();
+        u.push("NOTLOADED".into());
+        let official = rank_android_v3(&snap, Some(&u));
+        assert!(official.len() > 1);
+        let (ranked, run) = run_evaluation(&snap, Some(&u), &u).unwrap();
+        assert_eq!(ranked, official);
+        let mut seen = 0;
+        for r in &run.evals {
+            match r.status.as_str() {
+                "ok" => {
+                    let pos = official.iter().position(|o| o.symbol == r.symbol).unwrap();
+                    assert_eq!(r.rank, Some(pos as i64 + 1), "{}", r.symbol);
+                    seen += 1;
+                }
+                _ => assert_eq!(r.rank, None, "{}", r.symbol),
+            }
+        }
+        assert_eq!(seen, official.len());
+    }
+
+    /// A symbol duplicated in the snapshot: ranking as on main; one record stored (the
+    /// first evaluation) whose rank is that evaluation's own row position.
+    #[test]
+    fn duplicate_symbol_stores_first_evaluation_with_its_own_rank() {
+        let screener = crate::commands::opportunity_projection_tests::fixture_state();
+        let mut snap = OpportunitySnapshot::capture(&screener, "fixture");
+        let all: Vec<String> = snap.rows.iter().map(|r| r.row.symbol.clone()).collect();
+        let first = evaluate_android_v3(&snap, Some(&all));
+        let d = first.iter().position(|e| e.status == "ok").unwrap();
+        let mut dup = snap.rows[d].clone();
+        // Make the duplicate score differently so the two ranked rows are distinguishable.
+        dup.row.market_price_cents = dup.row.market_price_cents * 9 / 10;
+        snap.rows.push(dup);
+        let sym = snap.rows[d].row.symbol.clone();
+        let main = rank_android_v3_main(&snap, Some(&all));
+        let (ranked, run) = run_evaluation(&snap, Some(&all), &all).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&ranked).unwrap(),
+            serde_json::to_vec(&main).unwrap()
+        );
+        let recs: Vec<_> = run.evals.iter().filter(|r| r.symbol == sym).collect();
+        assert_eq!(recs.len(), 1, "one stored record per symbol");
+        assert_eq!(run.evals.len(), all.len());
+        let ev = evaluate_android_v3(&snap, Some(&all));
+        let first_row = ev
+            .iter()
+            .find(|e| e.symbol == sym)
+            .unwrap()
+            .row
+            .clone()
+            .unwrap();
+        assert_eq!(recs[0].price_cents, Some(first_row.price_cents));
+        let pos = ranked.iter().position(|r| *r == first_row).unwrap();
+        assert_eq!(recs[0].rank, Some(pos as i64 + 1));
+    }
+
+    #[test]
+    fn status_fingerprint_ignores_capture_time_but_not_content() {
+        let screener = crate::commands::opportunity_projection_tests::fixture_state();
+        let a = OpportunitySnapshot::capture(&screener, "fixture");
+        let mut b = a.clone();
+        b.captured_at_epoch += 3600;
+        assert_eq!(snapshot_fingerprint(&a), snapshot_fingerprint(&b));
+        b.rows[0].row.market_price_cents += 1;
+        assert_ne!(snapshot_fingerprint(&a), snapshot_fingerprint(&b));
+    }
+
+    /// Deterministic synthetic Year-chart summary around `price` (cents).
+    fn synthetic_year(price: i64, k: usize) -> crate::android_chart::AndroidChartSummary {
+        let p = price.max(100);
+        let tilt = [-6i64, -2, 0, 3, 7][k % 5];
+        crate::android_chart::AndroidChartSummary {
+            candle_count: 252,
+            latest_close_cents: Some(p),
+            ema20_cents: Some(p * (100 - tilt) / 100),
+            ema50_cents: Some(p * (100 - 2 * tilt) / 100),
+            ema200_cents: Some(p * (100 - 3 * tilt) / 100),
+            macd_cents: Some(p * tilt / 200),
+            signal_cents: Some(p * tilt / 300),
+            histogram_cents: Some(p * tilt / 600),
+            histogram_raw_cents: None,
+            latest_wilder_rsi: Some(40.0 + (k % 7) as f64 * 5.0),
+            latest_rsi_slope: Some(tilt as f64 / 10.0),
+            volume_ratio_hundredths: Some(80 + (k % 6) as i32 * 10),
+        }
+    }
+
     fn sha_hex(b: &[u8]) -> String {
         use sha2::Digest;
         sha2::Sha256::digest(b)
@@ -2626,6 +2824,11 @@ mod full_universe_parity_tests {
         for k in 0..n - missing {
             let mut r = base.rows[k % base.rows.len()].clone();
             r.row.symbol = format!("SYN{k:04}");
+            // Synthetic 1y chart summary (varied trend/RSI) so T is computed; every
+            // 50th symbol has none, so the NULL-T reason path is exercised too.
+            if r.year.is_none() && k % 50 != 49 {
+                r.year = Some(synthetic_year(r.row.market_price_cents, k));
+            }
             snap.rows.push(r);
         }
         // A non-qualified row with price 0 is recorded as failed/invalid_price (a
@@ -2695,11 +2898,25 @@ mod full_universe_parity_tests {
                 })
             );
             assert_eq!(rows, n);
-            assert!(store
-                .evaluations(&id)
-                .unwrap()
+            let evs = store.evaluations(&id).unwrap();
+            assert!(evs
                 .iter()
                 .any(|e| e.status == "failed" && e.reason == "invalid_price"));
+            // Diagnostic T on ok AND excluded rows; NULL T always carries a reason;
+            // decision only on ok rows.
+            for st in ["ok", "excluded"] {
+                assert!(
+                    evs.iter().any(|e| e.status == st && e.technical.is_some()),
+                    "no {st} row with T"
+                );
+            }
+            assert!(evs
+                .iter()
+                .all(|e| e.technical.is_some() != e.technical_reason.is_some()));
+            assert!(evs
+                .iter()
+                .any(|e| e.technical_reason.as_deref() == Some("no_year_chart")));
+            assert!(evs.iter().all(|e| e.status == "ok" || e.decision.is_none()));
             assert!(rebuilt == original);
             assert_eq!(
                 serde_json::to_vec(&ranked).unwrap(),
