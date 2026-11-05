@@ -164,5 +164,27 @@ export, restore by name; older backups without them restore fine). Everything is
 the run's one transaction.
 
 `GET /history?all=1[&run=<id>][&profile=]` returns the latest (or given) run's evaluations
-and stats; `GET /history?all=1&symbol=X` one symbol's evaluations across runs.
-`/status.ranked_rows` is the real ranked count; `snapshot_rows` the loaded rows.
+and stats; `run` must be a valid `<profile>-<epoch>-<model>` id of an evaluated run of that
+profile, otherwise 400. `GET /history?all=1&symbol=X[&since=<epoch>][&limit=N]` returns one
+symbol's evaluations across runs (newest `limit`, default 500, max 10000, returned oldest
+first; one joined query). Duplicate snapshot symbols are ranked as on main; the stored record
+is the first evaluation, with the rank of its own row. Restore re-checks every
+`score_inputs` blob (sha256 and `raw_size`) before merging, and `RestoreReport` counts the
+rows added to every table.
+`/status.ranked_rows` is the real ranked count (cached per snapshot content, so V3 is not
+recomputed on every call); `snapshot_rows` the loaded rows; `score_panics` the symbols whose
+scoring panicked since start (each also logged).
+
+### Expected storage (synthetic RC, zstd, 4 runs/day incl. the post-close run)
+
+Measured with the RC driver (`rc_full_universe`, 8 runs = 2 days, SQLite page sizes incl.
+indexes). "Unchanged" = identical rows between runs (blobs deduplicate); "worst" = every row's
+price moves every run (non-material, so inputs are still stored about once a day).
+
+| Universe | evaluations / run | score_history / run | inputs per stored set | per day | per year |
+|---|---|---|---|---|---|
+| 501 (sp500) | ~90 KB | ~37 KB | ~0 (unchanged) – ~1.0 MB (worst) | ~0.6 – 1.6 MB | ~0.22 – 0.6 GB |
+| 1937 (r2k) | ~344 KB | ~136 KB | ~0 (unchanged) – ~3.9 MB (worst) | ~2.2 – 6.1 MB | ~0.8 – 2.2 GB |
+
+Material-change days add one extra input set each. Nothing is ever pruned, so growth is
+linear.
