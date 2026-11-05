@@ -2628,7 +2628,18 @@ mod full_universe_parity_tests {
             r.row.symbol = format!("SYN{k:04}");
             snap.rows.push(r);
         }
-        snap.rows[n - missing - 1].row.market_price_cents = 0;
+        // A non-qualified row with price 0 is recorded as failed/invalid_price (a
+        // qualified one keeps main's ranking, so it would stay `ok`).
+        let bad = (0..snap.rows.len())
+            .rev()
+            .find(|&i| {
+                !matches!(
+                    android_row(&snap.rows[i]).qualification,
+                    crate::engine::QualificationStatus::Qualified
+                )
+            })
+            .expect("a non-qualified row");
+        snap.rows[bad].row.market_price_cents = 0;
         let universe: Vec<String> = (0..n).map(|k| format!("SYN{k:04}")).collect();
         let store = ScoreHistoryStore::open(&db, None).unwrap();
         for run in 0..runs {
@@ -2684,6 +2695,11 @@ mod full_universe_parity_tests {
                 })
             );
             assert_eq!(rows, n);
+            assert!(store
+                .evaluations(&id)
+                .unwrap()
+                .iter()
+                .any(|e| e.status == "failed" && e.reason == "invalid_price"));
             assert!(rebuilt == original);
             assert_eq!(
                 serde_json::to_vec(&ranked).unwrap(),
