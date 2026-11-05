@@ -1552,7 +1552,12 @@ pub fn quote_age_summary(
             stale.push(r.row.symbol.clone());
             continue;
         };
-        let age = (now - ts).max(0);
+        // Future quote time (clock stepped back): no trustworthy age, so stale.
+        if *ts > now {
+            stale.push(r.row.symbol.clone());
+            continue;
+        }
+        let age = now - ts;
         oldest = Some(oldest.map_or(age, |o| o.max(age)));
         if age > stale_after {
             stale.push(r.row.symbol.clone());
@@ -1749,6 +1754,7 @@ pub fn snapshot_parts(snap: &OpportunitySnapshot) -> Result<SnapshotParts, Strin
 
 /// One history tick: gathers [`crate::score_history::DueInputs`] from `src`, asks
 /// `history_due`, and appends the run when due.
+#[cfg(test)]
 pub fn record_history_tick(
     src: &dyn HistorySource,
     store: &crate::score_history::ScoreHistoryStore,
@@ -1824,7 +1830,11 @@ pub fn record_history_tick_fresh(
         interval,
     });
     let trigger = match due {
-        Due::No(why) => return Ok(HistoryWrite::Skipped(why)),
+        Due::No(why) => {
+            // Not due is not a freshness deferral: drop any stale deferral episode.
+            clock.clear_deferred();
+            return Ok(HistoryWrite::Skipped(why));
+        }
         Due::Interval => "interval",
         Due::Close(_) => "close",
     };
@@ -2658,6 +2668,134 @@ mod history_tick_tests {
         );
     }
 
+    /// No-feed engine in a temp dir with the given gate limits (no port, no network).
+    fn engine_with(jump: i64, share: f64) -> (Arc<HeadlessEngine>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "ds-gate-eng-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let eng = HeadlessEngine::start(EngineConfig {
+            data_dir: dir.clone(),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: 0,
+            history_backup_dir: None,
+            no_feed: true,
+            quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+            clock_jump_secs: jump,
+            max_stale_share: share,
+        })
+        .unwrap();
+        (eng, dir)
+    }
+
+    #[test]
+    fn engine_status_reports_deferral_during_wake_race() {
+        use crate::score_history::{CLOCK_JUMP_SECS, MAX_STALE_SHARE};
+        let (eng, dir) = engine_with(CLOCK_JUMP_SECS, MAX_STALE_SHARE);
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let seen = Mutex::new(None);
+        let f = live_fake();
+        let frozen = 1_793_409_000;
+        f.pass.set(Some(frozen - 60));
+        set_quotes(&f, 0, frozen - 30, frozen - 30);
+        ftick(&f, &s, &seen, &eng.clock, frozen);
+        let st = eng.status();
+        assert_eq!((st.deferred_since_epoch, st.deferred_reason), (None, None));
+        let wake = 1_793_830_789;
+        let why = "clock jump: waiting for a quote pass after wake";
+        assert_eq!(
+            ftick(&f, &s, &seen, &eng.clock, wake),
+            HistoryWrite::Skipped(why)
+        );
+        ftick(&f, &s, &seen, &eng.clock, wake + 60);
+        let st = eng.status();
+        assert_eq!(st.deferred_since_epoch, Some(wake), "first deferral time");
+        assert_eq!(st.deferred_reason, Some(why));
+        f.pass.set(Some(wake + 90));
+        set_quotes(&f, 0, 0, wake + 150);
+        ftick(&f, &s, &seen, &eng.clock, wake + 180);
+        let st = eng.status();
+        assert_eq!((st.deferred_since_epoch, st.deferred_reason), (None, None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn engine_gate_limits_come_from_config() {
+        use crate::score_history::{CLOCK_JUMP_SECS, MAX_STALE_SHARE};
+        let t0 = 1_800_000_000;
+        // 600 s gap with no pass after it: default 300 defers, 1000 does not.
+        let jump_case = |jump: i64| {
+            let (eng, dir) = engine_with(jump, MAX_STALE_SHARE);
+            let (s, seen) = (
+                ScoreHistoryStore::open_in_memory().unwrap(),
+                Mutex::new(None),
+            );
+            let mut f = live_fake();
+            f.snap = wide_snap();
+            f.pass.set(Some(t0 - 60));
+            set_quotes(&f, 0, 0, t0 + 590);
+            eng.clock.tick(t0, Some(t0 - 60));
+            let w = ftick(&f, &s, &seen, &eng.clock, t0 + 600);
+            let _ = std::fs::remove_dir_all(dir);
+            w
+        };
+        assert_eq!(
+            jump_case(CLOCK_JUMP_SECS),
+            HistoryWrite::Skipped("clock jump: waiting for a quote pass after wake")
+        );
+        assert!(matches!(jump_case(1000), HistoryWrite::Recorded { .. }));
+        // 8/20 stale: default 10% defers, 0.5 records.
+        let share_case = |share: f64| {
+            let (eng, dir) = engine_with(CLOCK_JUMP_SECS, share);
+            let (s, seen) = (
+                ScoreHistoryStore::open_in_memory().unwrap(),
+                Mutex::new(None),
+            );
+            let mut f = live_fake();
+            f.snap = wide_snap();
+            let n = priced(&f).len();
+            f.pass.set(Some(t0 - 60));
+            set_quotes(&f, n * 2 / 5, t0 - 5_000, t0 - 10);
+            let w = ftick(&f, &s, &seen, &eng.clock, t0);
+            let _ = std::fs::remove_dir_all(dir);
+            w
+        };
+        assert_eq!(
+            share_case(MAX_STALE_SHARE),
+            HistoryWrite::Skipped("too many stale quotes")
+        );
+        assert!(matches!(share_case(0.5), HistoryWrite::Recorded { .. }));
+    }
+
+    #[test]
+    fn not_due_clears_a_deferral_episode() {
+        let clock = crate::score_history::TickClock::new(1800);
+        let (s, seen) = (
+            ScoreHistoryStore::open_in_memory().unwrap(),
+            Mutex::new(None),
+        );
+        let f = live_fake();
+        let t0 = 1_800_000_000;
+        f.pass.set(Some(t0 - 60));
+        set_quotes(&f, 0, t0 - 30, t0 - 30);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, t0),
+            HistoryWrite::Recorded { .. }
+        ));
+        clock.note_deferred(t0 + 10, "too many stale quotes");
+        let w = ftick(&f, &s, &seen, &clock, t0 + 60);
+        assert!(matches!(w, HistoryWrite::Skipped(_)), "{w:?}");
+        assert_eq!(clock.deferred(), None, "Due::No clears the deferral");
+    }
+
     #[test]
     fn status_quote_ages_boundary_and_unknown_is_stale() {
         let mut f = live_fake();
@@ -2679,6 +2817,11 @@ mod history_tick_tests {
         let mut want = vec![syms[1].clone(), syms[2].clone()];
         want.sort();
         assert_eq!(stale, want);
+        // A future quote time (clock stepped back) is stale and has no age.
+        t.insert(syms[0].clone(), now + 60);
+        let (oldest, stale) = quote_age_summary(&f.snap, &t, now, 1800);
+        assert_eq!(oldest, Some(1801));
+        assert!(stale.contains(&syms[0]), "future = stale");
     }
 
     #[test]

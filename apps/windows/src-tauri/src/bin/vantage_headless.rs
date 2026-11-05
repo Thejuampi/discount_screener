@@ -703,16 +703,8 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
             .ok_or_else(|| format!("bad --max-stale-share {v} (0 <= x < 1)"))?,
         None => discount_screener_windows_lib::score_history::MAX_STALE_SHARE,
     };
-    let defer_warn_secs: i64 = match o.flags.get("defer-warn-hours") {
-        Some(v) => {
-            v.parse::<i64>()
-                .ok()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| format!("bad --defer-warn-hours {v}"))?
-                * 3600
-        }
-        None => 6 * 3600,
-    };
+    let defer_warn_secs =
+        parse_defer_warn_secs(o.flags.get("defer-warn-hours").map(|v| v.as_str()))?;
     check_bind_addr(addr, allow_remote)?;
     // Held for the life of the process: a second serve or a restore on this data-dir refuses.
     let _lock = discount_screener_windows_lib::score_history::lock_data_dir(&data_dir)?;
@@ -873,6 +865,24 @@ struct Head {
 }
 
 /// Returns `Some(since)` once per deferral episode when it has lasted `warn_after` secs.
+/// Default for `--defer-warn-hours`: warn once a history deferral lasts this long.
+const DEFAULT_DEFER_WARN_HOURS: i64 = 6;
+
+/// `--defer-warn-hours H` -> seconds (H > 0, overflow-checked).
+fn parse_defer_warn_secs(v: Option<&str>) -> Result<i64, String> {
+    let hours = match v {
+        Some(v) => v
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("bad --defer-warn-hours {v}"))?,
+        None => DEFAULT_DEFER_WARN_HOURS,
+    };
+    hours
+        .checked_mul(3600)
+        .ok_or_else(|| format!("bad --defer-warn-hours {hours} (too large)"))
+}
+
 fn defer_warning(
     deferred: Option<(i64, &'static str)>,
     now: i64,
@@ -1461,6 +1471,20 @@ mod tests {
         assert!(send("X-Vantage-Cli: 1\r\n").starts_with("HTTP/1.0 200"));
         drop(engine);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn defer_warn_hours_default_and_overflow_checked() {
+        assert_eq!(
+            parse_defer_warn_secs(None),
+            Ok(DEFAULT_DEFER_WARN_HOURS * 3600)
+        );
+        assert_eq!(parse_defer_warn_secs(Some("2")), Ok(7200));
+        assert!(parse_defer_warn_secs(Some("0")).is_err());
+        assert!(parse_defer_warn_secs(Some("x")).is_err());
+        assert!(parse_defer_warn_secs(Some(&i64::MAX.to_string()))
+            .unwrap_err()
+            .contains("too large"));
     }
 
     #[test]

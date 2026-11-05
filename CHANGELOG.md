@@ -14,6 +14,8 @@
 - `/history?all=1` returns a boolean `stale` flag on every evaluation.
 - Append-only `run_annotations`, written only by the `history-annotate` CLI (no daemon write route).
 - `POST /persist` refuses requests with an `Origin` header and requires `X-Vantage-Cli: 1`.
+- A quote time in the future counts as stale (no age); Yahoo `regularMarketTime` is not stored (documented limit).
+- A not-due tick clears the deferral shown in `/status`.
 
 ### V3.1 decision rule — SHADOW MODE (Android core + headless)
 

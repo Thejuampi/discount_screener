@@ -301,8 +301,11 @@ impl QuoteFreshness {
     /// time is stale. Stale means `age > stale_after_secs` (age == threshold is fresh).
     pub fn of(&self, symbol: &str, at: i64) -> (Option<i64>, Option<i64>, bool) {
         match self.quote_ts.get(symbol) {
+            // A quote time in the future (wall clock stepped back) has no
+            // trustworthy age: treat it like an unknown time, i.e. stale.
+            Some(&ts) if ts > at => (Some(ts), None, true),
             Some(&ts) => {
-                let age = (at - ts).max(0);
+                let age = at - ts;
                 (Some(ts), Some(age), age > self.stale_after_secs)
             }
             None => (None, None, true),
@@ -5436,8 +5439,17 @@ mod tests {
             "per-row age"
         );
         assert_eq!(f.of("ZZZ", 10_000), (None, None, true), "unknown = stale");
-        // A quote stamped after `at` has age 0 (never negative).
-        assert_eq!(f.of("C", 9_990), (Some(9_995), Some(0), false));
+        // A quote stamped after `at` (clock stepped back) has no age and is stale.
+        assert_eq!(
+            f.of("C", 9_990),
+            (Some(9_995), None, true),
+            "future = stale"
+        );
+        assert_eq!(
+            f.of("C", 9_995),
+            (Some(9_995), Some(0), false),
+            "same second"
+        );
     }
 
     fn gate(
@@ -5668,6 +5680,34 @@ mod tests {
         assert!(annotate_file(&old, "sp500-1-v3", "x", 9)
             .unwrap_err()
             .contains("schema v4"));
+        // Each run_annotations trigger is required: a dropped one refuses the write.
+        for t in REQUIRED_TRIGGERS
+            .iter()
+            .filter(|t| t.starts_with(HISTORY_TABLES[8]))
+        {
+            let q = root.join(format!("{t}.sqlite"));
+            let st = ScoreHistoryStore::open(&q, None).unwrap();
+            st.record_run(&meta(100), &[row("ADSK", "Act", 30, 60, 0, 30)])
+                .unwrap();
+            drop(st);
+            let c = Connection::open(&q).unwrap();
+            c.execute_batch(&format!("DROP TRIGGER {t}")).unwrap();
+            drop(c);
+            let e = annotate_file(&q, &meta(100).run_id(), "stale", 9).unwrap_err();
+            assert!(
+                e.contains("missing append-only triggers") && e.contains(t),
+                "{e}"
+            );
+            let c = Connection::open(&q).unwrap();
+            let n: i64 = c
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {}", HISTORY_TABLES[8]),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "nothing written");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

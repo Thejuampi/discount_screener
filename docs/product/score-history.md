@@ -216,6 +216,14 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
 - **`quote_ts`** is the wall-clock epoch at which OUR feed fetched the quote (`MarketSnapshot.quote_fetched_at`,
   stamped on every priced ingest, including the chart-close fallback). It is **not** the exchange's quote or trade
   time. It is kept in memory only, so stored input bytes and hashes are unchanged.
+- **Known limit (no `market_ts`):** the price path (quoteSummary) does not give us Yahoo's `regularMarketTime`;
+  only the chart endpoint has it. Carrying it would add a field to the serialized snapshot rows and change input
+  bytes/hashes and official output, so it is not stored. A stale exchange quote fetched recently therefore looks
+  fresh; the gate only catches quotes WE have not refreshed.
+- **Future `quote_ts`** (wall clock stepped back below a fetch time): no age is computed (`quote_age_secs` NULL) and
+  the row counts as stale, in storage and in `/status`; ages are never clamped to 0.
+- **Deferral episode:** `deferred_since_epoch`/`deferred_reason` are set on a gate hit and cleared when a run is
+  recorded or when the tick is simply not due (`Due::No`).
 - **Full pass:** a refresh pass counts as full only if ≥ 90% of the universe received a fresh quote during it
   (`last_full_pass_at`, wall clock).
 - **v5 columns on `score_history`** (additive; pre-v5 rows read as `stale = 0`, `quote_ts` and `quote_age_secs` NULL):

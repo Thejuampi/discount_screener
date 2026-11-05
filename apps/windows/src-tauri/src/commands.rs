@@ -3166,6 +3166,111 @@ mod feed_coordinator_tests {
         assert_eq!(screener.lock().unwrap().scoring_model, "current");
     }
 
+    fn snap(sym: &str, price: i64, ts: Option<i64>) -> MarketSnapshot {
+        MarketSnapshot {
+            symbol: sym.into(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: price,
+            intrinsic_value_cents: 0,
+            previous_close_cents: 0,
+            next_earnings_epoch: None,
+            quote_fetched_at: ts,
+        }
+    }
+
+    #[test]
+    fn coordinator_marks_full_pass_only_at_90pct_and_current_generation() {
+        use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+        use std::sync::Mutex;
+        let syms: Vec<String> = (0..10).map(|k| format!("S{k}")).collect();
+        let screener = Mutex::new(ScreenerState::new());
+        // Only 8/10 refreshed after pass_start = 1_000.
+        for (k, s) in syms.iter().enumerate() {
+            let ts = if k < 8 { 1_000 + k as i64 } else { 500 };
+            screener
+                .lock()
+                .unwrap()
+                .ingest_snapshot(snap(s, 100, Some(ts)));
+        }
+        let gen = AtomicU64::new(3);
+        let last = AtomicI64::new(42);
+        super::mark_full_pass_if_current(&gen, 3, &last, &syms, &screener, 1_000);
+        assert_eq!(last.load(Ordering::SeqCst), 42, "8/10 is not a full pass");
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S8", 100, Some(1_100)));
+        super::mark_full_pass_if_current(&gen, 2, &last, &syms, &screener, 1_000);
+        assert_eq!(last.load(Ordering::SeqCst), 42, "stale generation");
+        super::mark_full_pass_if_current(&gen, 3, &last, &syms, &screener, 1_000);
+        assert!(last.load(Ordering::SeqCst) > 42, "9/10 marks the pass");
+    }
+
+    #[test]
+    fn chart_and_fetch_ingest_stamp_quote_fetched_at() {
+        use crate::engine::HistoricalCandle;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Mutex;
+        let before = super::wall_epoch();
+        let candles = || {
+            (0..3)
+                .map(|d| HistoricalCandle {
+                    epoch_seconds: 1_700_000_000 + d * 86_400,
+                    open_cents: 100,
+                    high_cents: 110,
+                    low_cents: 90,
+                    close_cents: 105,
+                    volume: 1,
+                })
+                .collect::<Vec<_>>()
+        };
+        let active = AtomicU64::new(1);
+        let rig = AtomicU64::new(0);
+        let screener = Mutex::new(ScreenerState::new());
+        // Unknown symbol: chart close creates the snapshot.
+        super::apply_refresh_chart_if_current(
+            &active,
+            1,
+            &screener,
+            "NEWC",
+            candles(),
+            Default::default(),
+            &rig,
+        );
+        // Known symbol with no price: chart close fills the price.
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("OLDC", 0, None));
+        super::apply_refresh_chart_if_current(
+            &active,
+            1,
+            &screener,
+            "OLDC",
+            candles(),
+            Default::default(),
+            &rig,
+        );
+        // Quote fetch.
+        let r = FetchResult {
+            symbol: "FQ".into(),
+            snapshot: Some(snap("FQ", 500, None)),
+            signal: None,
+            fundamentals: None,
+        };
+        super::apply_refresh_quote_if_current(&active, 1, &screener, r, false, false, &rig);
+        let st = screener.lock().unwrap();
+        for s in ["NEWC", "OLDC", "FQ"] {
+            let x = st.snapshots.get(s).unwrap_or_else(|| panic!("{s} missing"));
+            assert!(x.market_price_cents > 0, "{s} priced");
+            assert!(
+                x.quote_fetched_at.is_some_and(|t| t >= before),
+                "{s} quote_fetched_at stamped"
+            );
+        }
+    }
+
     #[test]
     fn stale_bulk_quote_and_chart_cannot_repopulate_new_profile() {
         use std::sync::atomic::{AtomicU64, Ordering};
