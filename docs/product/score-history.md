@@ -223,9 +223,11 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
 10% stale share, and the 90% full-pass rule.
 
 - **`quote_ts`** is the wall-clock epoch at which OUR feed fetched the quote (`MarketSnapshot.quote_fetched_at`,
-  stamped on every priced ingest). Chart-close fallbacks use the last candle's market time (Yahoo daily bar),
-  falling back to wall clock only when that is missing, so an old close does not look fresh toward the 90%
-  full-pass rule. It is **not** Yahoo's trade time from the quoteSummary path. It is kept in memory only, so stored input bytes and hashes are unchanged.
+  stamped on every priced ingest). Chart-close fallbacks prefer Yahoo chart `meta.regularMarketTime`, then the
+  last candle epoch (only if not more than 120 s in the future), then wall clock. A Yahoo equity daily bar is
+  stamped at the session open (~09:30 ET) and crypto at 00:00 UTC, so the bar time alone must not be preferred
+  over `regularMarketTime` or chart-path closes would never count toward the 90% full-pass rule after the open.
+  QuoteSummary has no trade time; that limit is unchanged. It is kept in memory only, so stored input bytes and hashes are unchanged.
 - **Known limit (no `market_ts`):** the price path (quoteSummary) does not give us Yahoo's `regularMarketTime`;
   only the chart endpoint has it. Carrying it would add a field to the serialized snapshot rows and change input
   bytes/hashes and official output, so it is not stored. A stale exchange quote fetched recently therefore looks

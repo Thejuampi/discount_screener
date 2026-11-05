@@ -1234,7 +1234,11 @@ fn spawn_year_worker(
             let _ = c.warm_session();
             client = Some(c);
         }
-        client.as_ref()?.fetch_candles(sym, "1y", "1wk").ok()
+        client
+            .as_ref()?
+            .fetch_candles(sym, "1y", "1wk")
+            .ok()
+            .map(|f| f.candles)
     });
 }
 

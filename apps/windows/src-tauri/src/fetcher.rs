@@ -691,7 +691,7 @@ impl YahooClient {
         symbol: &str,
         range: &str,
         interval: &str,
-    ) -> io::Result<Vec<HistoricalCandle>> {
+    ) -> io::Result<CandleFetch> {
         // Share-class dots must be Yahoo path form (`BRK.B` → `BRK-B`); Stooq still
         // receives the display ticker and applies its own dash mapping.
         let request_symbol = yahoo_request_symbol(symbol);
@@ -699,7 +699,7 @@ impl YahooClient {
             "{}{}?range={}&interval={}&includePrePost=false",
             CHART_API_URL, request_symbol, range, interval
         );
-        let yahoo: io::Result<Vec<HistoricalCandle>> = self
+        let yahoo: io::Result<CandleFetch> = self
             .client
             .get(&url)
             .header("Accept", "application/json")
@@ -714,12 +714,15 @@ impl YahooClient {
         // Stooq fallback — only for daily resolution (Stooq has no intraday and
         // returning daily where weekly/monthly was asked would corrupt indicators).
         match yahoo {
-            Ok(c) if !c.is_empty() => Ok(c),
+            Ok(c) if !c.candles.is_empty() => Ok(c),
             other => {
                 if interval == "1d" {
                     if let Some(c) = crate::stooq::fetch_daily_candles(symbol) {
                         if !c.is_empty() {
-                            return Ok(c);
+                            return Ok(CandleFetch {
+                                candles: c,
+                                regular_market_time: None,
+                            });
                         }
                     }
                 }
@@ -1018,7 +1021,15 @@ fn parse_chart_regular_market_price_cents(root: &Value) -> Option<i64> {
 
 // ── Candle parsing ─────────────────────────────────────────────────────────────
 
-fn parse_candles(resp: &Value) -> io::Result<Vec<HistoricalCandle>> {
+/// Candles from a chart fetch, plus Yahoo `meta.regularMarketTime` when present.
+/// The market time is for in-memory freshness stamping only (never in input bytes).
+#[derive(Clone, Debug, Default)]
+pub struct CandleFetch {
+    pub candles: Vec<HistoricalCandle>,
+    pub regular_market_time: Option<i64>,
+}
+
+fn parse_candles(resp: &Value) -> io::Result<CandleFetch> {
     let result = resp
         .get("chart")
         .and_then(|c| c.get("result"))
@@ -1097,7 +1108,14 @@ fn parse_candles(resp: &Value) -> io::Result<Vec<HistoricalCandle>> {
         });
     }
 
-    Ok(candles)
+    let regular_market_time = resp
+        .pointer("/chart/result/0/meta/regularMarketTime")
+        .and_then(|v| v.as_i64())
+        .filter(|&t| t > 0);
+    Ok(CandleFetch {
+        candles,
+        regular_market_time,
+    })
 }
 
 fn is_not_found(error: &io::Error) -> bool {
