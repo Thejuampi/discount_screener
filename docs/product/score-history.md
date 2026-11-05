@@ -64,23 +64,14 @@ production on the box: `/workspace/vh-data/history.sqlite`.
   not take this lock — close it before restoring.)
 - **A manual `rm -rf` of the data-dir is covered only by the off-dir backups.** Restore with `history-restore`.
 
-## Storage (measured on the RC binary)
-| | per run (94 ranked rows, sp500 today) | per run (501 rows, worst case) |
-|---|---|---|
-| app DB growth | ~12 KB | ~67 KB |
-| gzip backup | ~3–3.7 KB | ~20 KB |
+## Storage (pre-v4 ranked-only; kept for history)
 
-About 1,700 runs/year (4 interval runs/day + ≤252 close snapshots): **~20 MB/yr in the DB** at 94 rows/run
-(~115 MB/yr at 501 rows). Each backup holds the full history: ~6 MB after one year at 94 rows (~33 MB at the
-~20 KB/run worst case), ~29 MB / ~166 MB after five years.
-
-Projected backup dir (all retained copies: 7 daily + 11 more month heads + one per past year; the second figure
-adds the worst case of all 30 pre-migration/pre-restore/manual slots full at current size):
-
-| | year 1 | year 5 |
-|---|---|---|
-| ~20 KB/run gz (501 rows, reviewer basis) | ~0.4 GB (≤ 1.4 GB) | ~3.1 GB (≤ 8.1 GB) |
-| ~3.5 KB/run gz (94 rows, today) | ~73 MB (≤ 0.25 GB) | ~0.55 GB (≤ 1.4 GB) |
+Before migration v4 the backups held only the ranked `score_history` rows (~12–67 KB of
+DB growth per run). Those figures are obsolete once full-universe evaluations and zstd
+inputs are stored — see **Expected storage** below for current numbers. The structural
+rule is unchanged: **every retained backup is a full copy of the never-pruned DB**, so
+backup-dir size scales with (live DB size × number of retained copies), not with one day's
+delta.
 
 ## Box daemon start command
 ```
@@ -171,9 +162,10 @@ first; one joined query). Duplicate snapshot symbols are ranked as on main; the 
 is the first evaluation, with the rank of its own row. Restore re-checks every
 `score_inputs` blob (sha256 and `raw_size`) before merging, and `RestoreReport` counts the
 rows added to every table.
-`/status.ranked_rows` is the real ranked count (cached per snapshot content, so V3 is not
-recomputed on every call); `snapshot_rows` the loaded rows; `score_panics` the symbols whose
-scoring panicked since start (each also logged).
+`/status.ranked_rows` is the real ranked count (cached per feed/pass generation, so V3 is not
+recomputed on every call and the snapshot is not re-serialized for the cache key);
+`snapshot_rows` the loaded rows; `score_panics` the number of scoring panics caught since
+start (one per panicked evaluation, not unique symbols; each also logged).
 
 ### Expected storage (synthetic RC, zstd, 4 runs/day incl. the post-close run)
 
@@ -189,6 +181,21 @@ price moves every run (non-material, so inputs are still stored about once a day
 Material-change days add one extra input set each. Nothing is ever pruned, so growth is
 linear.
 
+**Backup directory size (never-prune):** each daily / monthly / yearly gzip copy holds the
+**whole** score-history DB at that moment (evaluations + inputs + history), not a delta.
+With never-prune the live file grows without bound, so every retained copy does too. At the
+r2k high end (~2.2 GB of live DB after one year of daily input sets) the rotated set alone is
+already tens of GB:
+
+| | live DB (approx) | backup dir (7 daily + 12 monthly + 1 yearly/year, each a full copy) |
+|---|---|---|
+| sp500 year 1 (~0.6 GB live, worst) | ~0.6 GB | ~7×0.6 + 12×~0.3 + 1×0.6 ≈ **~8 GB** |
+| r2k year 1 (~2.2 GB live, worst) | ~2.2 GB | ~7×2.2 + 12×~1.1 + 1×2.2 ≈ **~31 GB** |
+| r2k year 5 (~11 GB live, worst) | ~11 GB | mid-tens of GB of month/day heads + ~11 GB per yearly → **~80–120 GB** |
+
+Pre-migration / pre-restore / manual slots (newest 10 of each) add up to another ~30 full
+copies at current size on top of that. Plan disk for the backup dir separately from the
+live data-dir; rotation never shrinks a kept copy.
 ## Quote freshness (migration v5)
 
 Fix for the 11/04 wake race: the box was frozen 10/29 ~21:10 EDT → 11/04 ~17:18 EST and the

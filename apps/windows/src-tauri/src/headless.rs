@@ -1117,7 +1117,8 @@ pub struct EngineStatus {
     pub ranked_rows: usize,
     /// Rows in the snapshot the ranking was computed from (loaded symbols).
     pub snapshot_rows: usize,
-    /// Symbols whose scoring panicked since start (recorded as failed `score_error`).
+    /// Scoring panics caught since start (one per evaluation that panicked;
+    /// recorded as failed `score_error`). Not a unique-symbol count.
     pub score_panics: u64,
     pub source: &'static str,
     pub snapshot_captured_at_epoch: Option<i64>,
@@ -1153,30 +1154,11 @@ pub struct HeadlessEngine {
     history: Option<crate::score_history::ScoreHistoryStore>,
     /// When the current generation's initial pass was first seen complete.
     pass_seen: Mutex<Option<(u64, i64)>>,
-    /// Recorder wall-clock ticks (suspend / clock-jump detection).
+    /// Recorder wall-clock ticks (suspend / clock-jump detection). In-memory only:
+    /// reset on restart, never persisted.
     clock: crate::score_history::TickClock,
-    /// `/status` ranked-row count, cached per snapshot content fingerprint.
-    status_rank: Mutex<Option<(u64, usize)>>,
-}
-
-/// Content fingerprint of a snapshot (profile + rows; not the capture time), so
-/// `/status` recomputes V3 only when the scoring input changes.
-fn snapshot_fingerprint(snap: &OpportunitySnapshot) -> u64 {
-    use std::hash::Hasher;
-    struct W(std::collections::hash_map::DefaultHasher);
-    impl std::io::Write for W {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.write(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut w = W(Default::default());
-    w.0.write(snap.profile.as_bytes());
-    let _ = serde_json::to_writer(&mut w, &snap.rows);
-    w.0.finish()
+    /// `/status` ranked-row count, cached per `(feed_generation, pass_generation)`.
+    status_rank: Mutex<Option<(u64, u64, usize)>>,
 }
 
 pub use crate::score_history::{HISTORY_YEAR_COVERAGE, HISTORY_YEAR_WAIT_SECS};
@@ -1448,16 +1430,21 @@ impl HeadlessEngine {
         history_all_json(store, symbol, run, &profile, since, limit)
     }
 
-    /// Ranked-row count for `/status`, recomputed only when the snapshot content changes.
+    /// Ranked-row count for `/status`, recomputed when the feed or pass generation changes
+    /// (avoids serializing the whole snapshot on every call).
     fn status_ranked_rows(&self, snap: &OpportunitySnapshot) -> usize {
-        let fp = snapshot_fingerprint(snap);
-        if let Some((f, n)) = *self.status_rank.lock().unwrap() {
-            if f == fp {
+        let feed = self.state.feed_generation.load(Ordering::Relaxed);
+        let pass = self
+            .state
+            .initial_pass_completed_generation
+            .load(Ordering::Relaxed);
+        if let Some((f, p, n)) = *self.status_rank.lock().unwrap() {
+            if f == feed && p == pass {
                 return n;
             }
         }
         let n = rank_android_v3(snap, android_universe(&snap.profile).as_deref()).len();
-        *self.status_rank.lock().unwrap() = Some((fp, n));
+        *self.status_rank.lock().unwrap() = Some((feed, pass, n));
         n
     }
 
@@ -1663,7 +1650,8 @@ pub fn run_evaluation(
     ))
 }
 
-/// Scoring panics caught by `evaluate_android_v3` since start (logged; in `/status`).
+/// Scoring panics caught by `evaluate_android_v3` since start (one increment per
+/// panicked evaluation, not per unique symbol; logged and exposed in `/status`).
 pub static SCORE_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Why an evaluation's diagnostic T is NULL (`None` when it was computed).
@@ -3113,14 +3101,13 @@ mod full_universe_parity_tests {
     }
 
     #[test]
-    fn status_fingerprint_ignores_capture_time_but_not_content() {
-        let screener = crate::commands::opportunity_projection_tests::fixture_state();
-        let a = OpportunitySnapshot::capture(&screener, "fixture");
-        let mut b = a.clone();
-        b.captured_at_epoch += 3600;
-        assert_eq!(snapshot_fingerprint(&a), snapshot_fingerprint(&b));
-        b.rows[0].row.market_price_cents += 1;
-        assert_ne!(snapshot_fingerprint(&a), snapshot_fingerprint(&b));
+    fn status_rank_cache_key_is_generation_pair() {
+        // /status caches ranked_rows on (feed_generation, pass_generation), not a
+        // full snapshot fingerprint — so either counter bumping must miss the cache.
+        let key = |feed: u64, pass: u64| (feed, pass);
+        assert_eq!(key(1, 2), key(1, 2));
+        assert_ne!(key(1, 2), key(2, 2));
+        assert_ne!(key(1, 2), key(1, 3));
     }
 
     /// Deterministic synthetic Year-chart summary around `price` (cents).
