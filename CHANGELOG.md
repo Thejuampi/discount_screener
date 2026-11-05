@@ -15,7 +15,10 @@
 - Append-only `run_annotations`, written only by the `history-annotate` CLI (no daemon write route).
 - `POST /persist` refuses requests with an `Origin` header and requires `X-Vantage-Cli: 1`.
 - A quote time in the future counts as stale (no age). Chart-close prefers `meta.regularMarketTime`, then a
-  non-future candle time, then wall. QuoteSummary still has no trade time.
+  non-future candle time; wall only when both are missing (absent/`<=0`). A present timestamp beyond the 120 s
+  skew is left unknown (not wall) so it stays stale and out of the 90% full-pass count. After hours,
+  `regularMarketTime` ≈ 16:00 ET, so a post-close pass fails safe. `--defer-warn-hours` warns once per
+  deferral episode. QuoteSummary still has no trade time.
 - A not-due tick clears the deferral shown in `/status`.
 
 ### V3.1 decision rule — SHADOW MODE (Android core + headless)

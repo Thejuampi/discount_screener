@@ -1153,6 +1153,84 @@ mod quote_html_recovery_tests {
 }
 
 #[cfg(test)]
+mod parse_candles_regular_market_time_tests {
+    use super::{parse_candles, CandleFetch};
+    use serde_json::json;
+
+    fn chart_json(rmt: Option<i64>) -> serde_json::Value {
+        let mut meta = json!({ "symbol": "TEST" });
+        if let Some(t) = rmt {
+            meta["regularMarketTime"] = json!(t);
+        }
+        json!({
+            "chart": {
+                "result": [{
+                    "meta": meta,
+                    "timestamp": [1_700_000_000i64],
+                    "indicators": {
+                        "quote": [{
+                            "open": [10.0],
+                            "high": [11.0],
+                            "low": [9.0],
+                            "close": [10.5],
+                            "volume": [1000]
+                        }]
+                    }
+                }]
+            }
+        })
+    }
+
+    #[test]
+    fn regular_market_time_present() {
+        let fetch = parse_candles(&chart_json(Some(1_700_000_123))).unwrap();
+        assert_eq!(fetch.regular_market_time, Some(1_700_000_123));
+        assert_eq!(fetch.candles.len(), 1);
+    }
+
+    #[test]
+    fn regular_market_time_absent() {
+        let fetch = parse_candles(&chart_json(None)).unwrap();
+        assert_eq!(fetch.regular_market_time, None);
+    }
+
+    #[test]
+    fn regular_market_time_zero_and_negative_filtered() {
+        assert_eq!(
+            parse_candles(&chart_json(Some(0)))
+                .unwrap()
+                .regular_market_time,
+            None,
+            "0 is not a real trade time"
+        );
+        assert_eq!(
+            parse_candles(&chart_json(Some(-1)))
+                .unwrap()
+                .regular_market_time,
+            None
+        );
+    }
+
+    #[test]
+    fn regular_market_time_wrong_json_key_ignored() {
+        // S4: must read meta.regularMarketTime, not a sibling / misspelled key.
+        let mut v = chart_json(None);
+        v["chart"]["result"][0]["meta"]["regularMarketTimestamp"] = json!(1_700_000_999i64);
+        v["chart"]["result"][0]["meta"]["regular_market_time"] = json!(1_700_000_998i64);
+        let fetch = parse_candles(&v).unwrap();
+        assert_eq!(
+            fetch.regular_market_time, None,
+            "wrong key must not be accepted"
+        );
+        v["chart"]["result"][0]["meta"]["regularMarketTime"] = json!(1_700_000_777i64);
+        assert_eq!(
+            parse_candles(&v).unwrap().regular_market_time,
+            Some(1_700_000_777)
+        );
+    }
+}
+
+#[cfg(test)]
 mod compact_quote_tests {
     use super::*;
     use std::path::PathBuf;

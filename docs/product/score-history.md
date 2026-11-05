@@ -224,9 +224,15 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
 
 - **`quote_ts`** is the wall-clock epoch at which OUR feed fetched the quote (`MarketSnapshot.quote_fetched_at`,
   stamped on every priced ingest). Chart-close fallbacks prefer Yahoo chart `meta.regularMarketTime`, then the
-  last candle epoch (only if not more than 120 s in the future), then wall clock. A Yahoo equity daily bar is
-  stamped at the session open (~09:30 ET) and crypto at 00:00 UTC, so the bar time alone must not be preferred
-  over `regularMarketTime` or chart-path closes would never count toward the 90% full-pass rule after the open.
+  last candle epoch, each only when present, `> 0`, and not more than 120 s ahead of wall; wall is used **only**
+  when both are genuinely missing (absent or `<= 0`). A present timestamp beyond that skew is left unknown
+  (`quote_fetched_at = None`) so the row is stale and does **not** count toward the 90% full-pass rule
+  (fail-closed — never substitute wall for a future stamp). A Yahoo equity daily bar is stamped at the session
+  open (~09:30 ET) and crypto at 00:00 UTC, so the bar time alone must not be preferred over
+  `regularMarketTime` or chart-path closes would never count toward full-pass after the open. After the regular
+  session, `regularMarketTime` sits near the 16:00 ET close, so a pass started after hours also fails safe
+  (that stamp is before `pass_start` and does not count). `/status` deferral warnings via `--defer-warn-hours`
+  fire **once per deferral episode** (tracked by `deferred_since`), not on every tick.
   QuoteSummary has no trade time; that limit is unchanged. It is kept in memory only, so stored input bytes and hashes are unchanged.
 - **Known limit (no `market_ts`):** the price path (quoteSummary) does not give us Yahoo's `regularMarketTime`;
   only the chart endpoint has it. Carrying it would add a field to the serialized snapshot rows and change input

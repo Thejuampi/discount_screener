@@ -2020,32 +2020,63 @@ pub fn full_pass_succeeded(
 }
 
 /// How far ahead of wall clock a chart timestamp may be and still count as usable
-/// (clock skew / exchange clock). Beyond this it is treated as missing.
+/// (clock skew / exchange clock). Beyond this a *present* time is unknown/stale —
+/// never substituted with wall (fail-closed).
 const CHART_TS_FUTURE_SKEW_SECS: i64 = 120;
 
 /// Quote time for a chart-close ingest (in memory only, `#[serde(skip)]`).
 /// Fallback chain:
-/// 1. Yahoo chart `meta.regularMarketTime` (real last-trade / fetch time);
-/// 2. last candle epoch, if it is not a future bar beyond [`CHART_TS_FUTURE_SKEW_SECS`];
-/// 3. wall clock.
-/// Daily bar opens (~09:30 ET / 00:00 UTC crypto) must NOT be preferred over
-/// `regularMarketTime`, or chart-path closes would never count toward the 90%
-/// full-pass rule after the open.
+/// 1. Yahoo chart `meta.regularMarketTime` when present, `> 0`, and not more than
+///    [`CHART_TS_FUTURE_SKEW_SECS`] ahead of `now`;
+/// 2. last candle epoch under the same rules;
+/// 3. wall clock ONLY when both candidates are genuinely missing (absent or `<= 0`).
+///
+/// A present timestamp beyond the skew returns `None` (unknown → stale, does **not**
+/// count toward the 90% full-pass rule). Daily bar opens (~09:30 ET / 00:00 UTC crypto)
+/// must NOT be preferred over `regularMarketTime`, or chart-path closes would never
+/// count toward full-pass after the open. After the regular session, Yahoo's
+/// `regularMarketTime` sits near the 16:00 ET close, so a pass started after hours
+/// also fails safe (that stamp is before `pass_start`).
 fn chart_quote_ts(
     regular_market_time: Option<i64>,
     candles: &[crate::engine::HistoricalCandle],
-) -> i64 {
-    let now = wall_epoch();
-    let usable = |t: i64| t > 0 && t <= now + CHART_TS_FUTURE_SKEW_SECS;
-    regular_market_time
-        .filter(|&t| usable(t))
-        .or_else(|| {
-            candles
-                .last()
-                .map(|c| c.epoch_seconds)
-                .filter(|&t| usable(t))
-        })
-        .unwrap_or(now)
+) -> Option<i64> {
+    chart_quote_ts_at(wall_epoch(), regular_market_time, candles)
+}
+
+/// Testable form of [`chart_quote_ts`] with an injected `now` (skew boundary).
+fn chart_quote_ts_at(
+    now: i64,
+    regular_market_time: Option<i64>,
+    candles: &[crate::engine::HistoricalCandle],
+) -> Option<i64> {
+    // Present+usable / missing (<=0) / present+future-beyond-skew.
+    let mut saw_future = false;
+    let consider = |t: i64, saw_future: &mut bool| -> Option<i64> {
+        if t <= 0 {
+            None
+        } else if t <= now + CHART_TS_FUTURE_SKEW_SECS {
+            Some(t)
+        } else {
+            *saw_future = true;
+            None
+        }
+    };
+    if let Some(t) = regular_market_time {
+        if let Some(ok) = consider(t, &mut saw_future) {
+            return Some(ok);
+        }
+    }
+    if let Some(t) = candles.last().map(|c| c.epoch_seconds) {
+        if let Some(ok) = consider(t, &mut saw_future) {
+            return Some(ok);
+        }
+    }
+    if saw_future {
+        None
+    } else {
+        Some(now)
+    }
 }
 
 /// Stamps the wall-clock end of a full quote pass for the current generation, only
@@ -2058,11 +2089,33 @@ fn mark_full_pass_if_current(
     screener: &std::sync::Mutex<crate::engine::ScreenerState>,
     pass_start: i64,
 ) {
+    // `pass_start` is the wall epoch when the coordinator pass began (never `0`).
+    debug_assert!(pass_start > 0, "pass_start must be the wall time when the pass began");
     if generation_is_current(feed_gen, generation)
         && full_pass_succeeded(symbols, &screener.lock().unwrap(), pass_start)
     {
         last_full_pass_at.store(wall_epoch(), Ordering::SeqCst);
     }
+}
+
+/// Coordinator refresh-loop seam: ends a quote pass with the `pass_start` captured
+/// when the pass began. Keeps the worker from hard-coding `0` (kills that mutant).
+fn complete_coordinator_quote_pass(
+    feed_gen: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    last_full_pass_at: &std::sync::atomic::AtomicI64,
+    symbols: &[String],
+    screener: &std::sync::Mutex<crate::engine::ScreenerState>,
+    pass_start: i64,
+) {
+    mark_full_pass_if_current(
+        feed_gen,
+        generation,
+        last_full_pass_at,
+        symbols,
+        screener,
+        pass_start,
+    );
 }
 
 fn ingest_fetch_result(
@@ -4075,7 +4128,7 @@ mod feed_coordinator_tests {
     }
 
     #[test]
-    fn chart_close_uses_candle_time_not_wall_for_full_pass() {
+    fn chart_close_prefers_regular_market_time_for_full_pass() {
         use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
         use std::sync::Mutex;
         // 8 symbols already fresh; S8/S9 still need a quote.
@@ -4150,7 +4203,7 @@ mod feed_coordinator_tests {
             "regularMarketTime during the pass counts toward 90%"
         );
 
-        // Future candle time (beyond skew) is ignored → wall fallback.
+        // Future rmt + future candle (beyond skew) → None (fail-closed, no wall).
         last.store(0, Ordering::SeqCst);
         screener
             .lock()
@@ -4166,12 +4219,159 @@ mod feed_coordinator_tests {
             Some(future), // also future → both rejected
             Default::default(),
         );
+        assert_eq!(
+            screener.lock().unwrap().snapshots["S9"].quote_fetched_at,
+            None,
+            "present-but-future stamp must be unknown, not wall"
+        );
+        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, pass_start);
+        assert_eq!(
+            last.load(Ordering::SeqCst),
+            0,
+            "future stamp must not count toward 90% full pass"
+        );
+
+        // Genuinely missing times (no rmt, non-positive candle) still fall back to wall.
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S9", 0, None));
+        let before_wall = super::wall_epoch();
+        super::apply_refresh_chart_if_current(
+            &gate,
+            1,
+            "S9",
+            candles_at(0),
+            None,
+            Default::default(),
+        );
         let ts = screener.lock().unwrap().snapshots["S9"]
             .quote_fetched_at
-            .unwrap();
+            .expect("missing → wall");
         assert!(
-            ts >= before && ts <= before + 5,
-            "future ts falls back to wall, got {ts}"
+            ts >= before_wall && ts <= before_wall + 5,
+            "absent/non-positive times fall back to wall, got {ts}"
+        );
+    }
+
+    #[test]
+    fn chart_quote_ts_skew_boundary_accepts_plus_120_rejects_plus_121() {
+        let now = 2_000_000_000i64;
+        let candle = |epoch| {
+            vec![crate::engine::HistoricalCandle {
+                epoch_seconds: epoch,
+                open_cents: 100,
+                high_cents: 100,
+                low_cents: 100,
+                close_cents: 100,
+                volume: 1,
+            }]
+        };
+        assert_eq!(
+            super::chart_quote_ts_at(now, Some(now + 120), &candle(0)),
+            Some(now + 120),
+            "now+120 accepted"
+        );
+        assert_eq!(
+            super::chart_quote_ts_at(now, Some(now + 121), &candle(0)),
+            None,
+            "now+121 rejected (present future → unknown, not wall)"
+        );
+        assert_eq!(
+            super::chart_quote_ts_at(now, None, &candle(now + 120)),
+            Some(now + 120),
+            "candle now+120 accepted"
+        );
+        assert_eq!(
+            super::chart_quote_ts_at(now, None, &candle(now + 121)),
+            None,
+            "candle now+121 rejected"
+        );
+        // Missing (None / <=0) → wall.
+        assert_eq!(
+            super::chart_quote_ts_at(now, None, &candle(0)),
+            Some(now)
+        );
+        assert_eq!(
+            super::chart_quote_ts_at(now, Some(0), &[]),
+            Some(now)
+        );
+        assert_eq!(
+            super::chart_quote_ts_at(now, Some(-5), &[]),
+            Some(now)
+        );
+    }
+
+    /// S6: quotes stamped before `pass_start` must not make a full pass (kills
+    /// a worker mutant that passes `0` instead of the captured pass_start).
+    #[test]
+    fn complete_coordinator_quote_pass_ignores_quotes_before_pass_start() {
+        use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+        use std::sync::Mutex;
+        let pass_start = 5_000i64;
+        let syms: Vec<String> = (0..10).map(|k| format!("P{k}")).collect();
+        let screener = Mutex::new(ScreenerState::new());
+        // All ten stamped *before* the pass began.
+        for s in &syms {
+            screener
+                .lock()
+                .unwrap()
+                .ingest_snapshot(snap(s, 100, Some(pass_start - 1)));
+        }
+        let feed_gen = AtomicU64::new(1);
+        let last = AtomicI64::new(0);
+        super::complete_coordinator_quote_pass(
+            &feed_gen, 1, &last, &syms, &screener, pass_start,
+        );
+        assert_eq!(
+            last.load(Ordering::SeqCst),
+            0,
+            "pre-pass stamps must not count (pass_start must not be replaced with 0)"
+        );
+        // Control: same stamps with pass_start=1 would count; keep pass_start honest.
+        for s in &syms {
+            screener
+                .lock()
+                .unwrap()
+                .ingest_snapshot(snap(s, 100, Some(pass_start + 1)));
+        }
+        super::complete_coordinator_quote_pass(
+            &feed_gen, 1, &last, &syms, &screener, pass_start,
+        );
+        assert!(last.load(Ordering::SeqCst) > 0, "fresh-during-pass stamps count");
+    }
+
+    /// S3: production chart-fetch seam must forward regular_market_time.
+    #[test]
+    fn apply_candle_fetch_forwards_regular_market_time() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Mutex;
+        let active = AtomicU64::new(1);
+        let rank = AtomicU64::new(0);
+        let screener = Mutex::new(ScreenerState::new());
+        let gate = EnrichmentGate::new(&active, &screener, &rank);
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("RMT", 0, None));
+        let bar_open = 1_000_000_000i64;
+        let rmt = bar_open + 60;
+        let fetch = crate::fetcher::CandleFetch {
+            candles: candles_at(bar_open),
+            regular_market_time: Some(rmt),
+        };
+        assert!(super::apply_candle_fetch_if_current(
+            &gate,
+            1,
+            "RMT",
+            fetch,
+            Default::default(),
+        )
+        .is_some());
+        assert_eq!(
+            screener.lock().unwrap().snapshots["RMT"].quote_fetched_at,
+            Some(rmt),
+            "rmt must reach the stamp (kills None at the call site)"
         );
     }
 
@@ -5338,12 +5538,19 @@ fn apply_refresh_chart_if_current(
                             .map(|x| x.previous_close_cents)
                             .unwrap_or(0),
                         next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
-                        quote_fetched_at: Some(quote_ts),
+                        quote_fetched_at: quote_ts,
                     });
+                    // `ingest_snapshot` preserves a prior stamp when the new value is
+                    // `None`; chart-close must still clear it for present-but-future
+                    // (unknown → stale, fail-closed).
+                    if let Some(s) = state.snapshots.get_mut(sym) {
+                        s.quote_fetched_at = quote_ts;
+                    }
                 }
                 outcome.visible = true;
             } else {
                 use crate::engine::{FundamentalSnapshot, MarketSnapshot};
+                let stamped = quote_ts.filter(|_| close > 0);
                 state.ingest_partial_snapshot(MarketSnapshot {
                     symbol: sym.to_string(),
                     company_name: None,
@@ -5352,8 +5559,11 @@ fn apply_refresh_chart_if_current(
                     intrinsic_value_cents: 0,
                     previous_close_cents: 0,
                     next_earnings_epoch: None,
-                    quote_fetched_at: (close > 0).then_some(quote_ts),
+                    quote_fetched_at: stamped,
                 });
+                if let Some(s) = state.snapshots.get_mut(sym) {
+                    s.quote_fetched_at = stamped;
+                }
                 let sector = if crypto {
                     Some("Cryptocurrency".to_string())
                 } else {
@@ -5370,6 +5580,25 @@ fn apply_refresh_chart_if_current(
             }
         })
     .then_some(outcome)
+}
+
+/// Production chart-fetch → stamp seam (passes `fetch.regular_market_time` through).
+/// Kills a mutant that drops rmt to `None` at the refresh_one_symbol call site.
+fn apply_candle_fetch_if_current(
+    gate: &EnrichmentGate<'_>,
+    generation: u64,
+    sym: &str,
+    fetch: crate::fetcher::CandleFetch,
+    outcome: RefreshOutcome,
+) -> Option<RefreshOutcome> {
+    apply_refresh_chart_if_current(
+        gate,
+        generation,
+        sym,
+        fetch.candles,
+        fetch.regular_market_time,
+        outcome,
+    )
 }
 
 /// Fetch one symbol progressively: price/name makes it visible immediately, while
@@ -5433,14 +5662,7 @@ fn refresh_one_symbol(
     // Year chart for spark/technicals — only attach to symbols already in the list,
     // or create crypto/ETF rows that can stand without analyst columns.
     if let Ok(fetch) = client.fetch_candles(sym, "1y", "1d") {
-        outcome = apply_refresh_chart_if_current(
-            &gate,
-            generation,
-            sym,
-            fetch.candles,
-            fetch.regular_market_time,
-            outcome,
-        )?;
+        outcome = apply_candle_fetch_if_current(&gate, generation, sym, fetch, outcome)?;
     }
 
     generation_is_current(active_generation, generation).then_some(outcome)
@@ -5728,7 +5950,7 @@ fn spawn_feed_workers(
                     for h in handles {
                         let _ = h.join();
                     }
-                    mark_full_pass_if_current(
+                    complete_coordinator_quote_pass(
                         &feed_gen,
                         generation,
                         &last_full_pass_at,
