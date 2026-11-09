@@ -351,10 +351,13 @@ pub enum SkipReason {
     /// The slot came due while the process was not running (written at startup by
     /// [`ScoreHistoryStore::backfill_process_down`], never by a tick).
     ProcessDown,
+    /// The slot was due but evaluating or writing the run failed with an error
+    /// (best-effort row written by the recorder after the error).
+    RecordFailed,
 }
 
 impl SkipReason {
-    pub const ALL: [SkipReason; 8] = [
+    pub const ALL: [SkipReason; 9] = [
         SkipReason::InitialPassInProgress,
         SkipReason::YearChartsPending,
         SkipReason::NoLiveRanking,
@@ -363,6 +366,7 @@ impl SkipReason {
         SkipReason::NoFreshFullPass,
         SkipReason::StaleShareTooHigh,
         SkipReason::ProcessDown,
+        SkipReason::RecordFailed,
     ];
 
     /// Stored code (the `run_deferrals.reason` CHECK lists exactly these).
@@ -376,6 +380,7 @@ impl SkipReason {
             SkipReason::NoFreshFullPass => "no_fresh_full_pass",
             SkipReason::StaleShareTooHigh => "stale_share_too_high",
             SkipReason::ProcessDown => "process_down",
+            SkipReason::RecordFailed => "record_failed",
         }
     }
 
@@ -7162,6 +7167,9 @@ mod tests {
         // process_down has no tick message: it is written only by the startup backfill.
         assert!(codes.insert(SkipReason::ProcessDown.code()));
         assert_eq!(SkipReason::from_message("process_down"), None);
+        // record_failed has no message either: written after a run-path error.
+        assert!(codes.insert(SkipReason::RecordFailed.code()));
+        assert_eq!(SkipReason::from_message("record_failed"), None);
         assert_eq!(
             codes.len(),
             SkipReason::ALL.len(),

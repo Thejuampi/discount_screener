@@ -1882,8 +1882,20 @@ pub fn record_history_tick(
     record_history_tick_fresh(src, store, pass_seen, &clock, interval, market_context, now)
 }
 
+/// Why a recorder tick failed: writing its deferral row (`Note`) or anything on the
+/// run path (evaluation, `last_run_at`, the run write).
+enum TickError {
+    Note(String),
+    Run(String),
+}
+
 /// [`record_history_tick`] with quote-freshness gating: `clock` tracks recorder ticks
 /// across calls (suspend / clock-jump detection) and carries the stale threshold.
+///
+/// A run-path error on a scheduled slot leaves a best-effort `record_failed` deferral
+/// row for that slot (first wins, so a failure repeating inside one slot adds nothing).
+/// If that row cannot be written either, both errors are returned (the serve loop logs
+/// them, rate-limited); there is no retry and the next tick proceeds normally.
 pub fn record_history_tick_fresh(
     src: &dyn HistorySource,
     store: &crate::score_history::ScoreHistoryStore,
@@ -1893,6 +1905,52 @@ pub fn record_history_tick_fresh(
     market_context: bool,
     now: i64,
 ) -> Result<HistoryWrite, String> {
+    match record_history_tick_inner(src, store, pass_seen, clock, interval, market_context, now) {
+        Ok(w) => Ok(w),
+        Err(TickError::Note(e)) => Err(e),
+        Err(TickError::Run(e)) => Err(match note_record_failed(src, store, interval, now) {
+            Ok(true) => format!("{e} (slot recorded as record_failed)"),
+            Ok(false) => e,
+            Err(e2) => format!("{e}; the record_failed deferral row could not be written: {e2}"),
+        }),
+    }
+}
+
+/// Best-effort `record_failed` row for the slot due at `now` (`Ok(false)`: no slot is
+/// scheduled, or that slot already has a row).
+fn note_record_failed(
+    src: &dyn HistorySource,
+    store: &crate::score_history::ScoreHistoryStore,
+    interval: i64,
+    now: i64,
+) -> Result<bool, String> {
+    let profile = src.history_profile();
+    let last_run = store.last_run_at(&profile, HISTORY_MODEL)?;
+    let Some((slot, trigger)) = crate::score_history::due_slot(now, last_run, interval) else {
+        return Ok(false);
+    };
+    store.record_deferral(&crate::score_history::RunDeferral {
+        profile,
+        slot,
+        trigger: trigger.into(),
+        observed_at: now,
+        reason: crate::score_history::SkipReason::RecordFailed.code().into(),
+        stale_count: 0,
+        total: 0,
+        covers: 1,
+        covers_from: None,
+    })
+}
+
+fn record_history_tick_inner(
+    src: &dyn HistorySource,
+    store: &crate::score_history::ScoreHistoryStore,
+    pass_seen: &Mutex<Option<(u64, i64)>>,
+    clock: &crate::score_history::TickClock,
+    interval: i64,
+    market_context: bool,
+    now: i64,
+) -> Result<HistoryWrite, TickError> {
     use crate::score_history::{
         freshness_gate, history_due, Due, DueInputs, FreshInputs, QuoteFreshness, RecordOutcome,
         RunMeta,
@@ -1931,9 +1989,12 @@ pub fn record_history_tick_fresh(
             None,
         )
     };
-    let (android, eval) = run_evaluation(&snap, rank_universe.as_deref(), &universe)?;
+    let (android, eval) =
+        run_evaluation(&snap, rank_universe.as_deref(), &universe).map_err(TickError::Run)?;
     let ranked = android_to_ranked(&android);
-    let last_run = store.last_run_at(&profile, HISTORY_MODEL)?;
+    let last_run = store
+        .last_run_at(&profile, HISTORY_MODEL)
+        .map_err(TickError::Run)?;
     let due = history_due(&DueInputs {
         now,
         pass_completed,
@@ -1982,7 +2043,7 @@ pub fn record_history_tick_fresh(
         Due::No(why) => {
             // Not due is not a freshness deferral: drop any stale deferral episode.
             clock.clear_deferred();
-            note_slot(why)?;
+            note_slot(why).map_err(TickError::Note)?;
             return Ok(HistoryWrite::Skipped(why));
         }
         Due::Interval => "interval",
@@ -1998,7 +2059,7 @@ pub fn record_history_tick_fresh(
         max_stale_share: clock.max_stale_share,
     }) {
         clock.note_deferred(now, why);
-        note_slot(why)?;
+        note_slot(why).map_err(TickError::Note)?;
         return Ok(HistoryWrite::Skipped(why));
     }
     clock.clear_deferred();
@@ -2021,7 +2082,10 @@ pub fn record_history_tick_fresh(
         incomplete_symbols: incomplete,
     };
     Ok(
-        match store.record_run_quotes(&meta, &ranked, Some(&eval), fresh.as_ref())? {
+        match store
+            .record_run_quotes(&meta, &ranked, Some(&eval), fresh.as_ref())
+            .map_err(TickError::Run)?
+        {
             RecordOutcome::Recorded { rows, skipped } => HistoryWrite::Recorded {
                 trigger,
                 rows,
@@ -3063,6 +3127,89 @@ mod history_tick_tests {
         let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t + 10);
         assert_eq!(w, HistoryWrite::Skipped("waiting for a fresh quote pass"));
         assert_eq!(defs(&s).len(), 1);
+    }
+
+    fn fresh_due_tick(f: &Fake, s: &ScoreHistoryStore, t: i64) -> Result<HistoryWrite, String> {
+        use crate::score_history::TickClock;
+        f.pass.set(Some(t - 10));
+        set_quotes(f, 0, t - 5, t - 5);
+        record_history_tick_fresh(f, s, &Mutex::new(None), &TickClock::new(1800), H6, false, t)
+    }
+
+    #[test]
+    fn a_failed_due_run_leaves_one_record_failed_row_then_recovers() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "score_runs");
+        let t = NOW + H6 + 60;
+        let e = fresh_due_tick(&f, &s, t).unwrap_err();
+        assert!(e.contains("injected score_runs failure"), "{e}");
+        assert!(e.contains("record_failed"), "{e}");
+        let d = defs(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            (d[0].slot, d[0].trigger.as_str(), d[0].reason.as_str()),
+            (NOW + H6, "interval", "record_failed")
+        );
+        assert_eq!((d[0].observed_at, d[0].stale_count, d[0].total), (t, 0, 0));
+        // The same failure on the next tick of that slot: no second row.
+        let e = fresh_due_tick(&f, &s, t + 60).unwrap_err();
+        assert!(e.contains("injected score_runs failure"), "{e}");
+        assert_eq!(defs(&s).len(), 1);
+        // Fixed: the next tick records normally.
+        heal(&s, "score_runs");
+        assert!(matches!(
+            fresh_due_tick(&f, &s, t + 120).unwrap(),
+            HistoryWrite::Recorded { .. }
+        ));
+        assert_eq!(
+            defs(&s).len(),
+            1,
+            "the record_failed row stays (append-only)"
+        );
+    }
+
+    #[test]
+    fn a_failed_due_run_whose_record_failed_row_also_fails_is_an_error_only() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "score_runs");
+        fail_inserts(&s, "run_deferrals");
+        let t = NOW + H6 + 60;
+        for k in 0..3 {
+            // No panic, no retry loop: one error per tick, naming both failures.
+            let e = fresh_due_tick(&f, &s, t + k * 60).unwrap_err();
+            assert!(e.contains("injected score_runs failure"), "{e}");
+            assert!(
+                e.contains("record_failed deferral row could not be written")
+                    && e.contains("injected run_deferrals failure"),
+                "{e}"
+            );
+        }
+        assert!(defs(&s).is_empty());
+        heal(&s, "score_runs");
+        heal(&s, "run_deferrals");
+        assert!(matches!(
+            fresh_due_tick(&f, &s, t + 300).unwrap(),
+            HistoryWrite::Recorded { .. }
+        ));
+        assert!(defs(&s).is_empty());
+    }
+
+    #[test]
+    fn a_run_error_off_schedule_writes_no_record_failed_row() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "score_runs");
+        // Interval not elapsed: no slot is scheduled, so nothing to record as failed.
+        assert_eq!(
+            fresh_due_tick(&f, &s, NOW + 600).unwrap(),
+            HistoryWrite::Skipped("interval not elapsed")
+        );
+        assert!(defs(&s).is_empty());
     }
 
     #[test]
