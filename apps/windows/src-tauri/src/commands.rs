@@ -2896,8 +2896,9 @@ mod rank_input_seal {
 use rank_input_seal::RankInputCounter;
 
 /// Owned enrichment bump context. Cloned into workers. Construction is sealed:
-/// production uses `from_app` / `from_arcs(..., RankInputCounter)`; tests use
-/// `for_test`. There is **no** `new(..., &AtomicU64)` in production builds.
+/// production mints **only** via `from_app(&state)` (feed workers clone one gate
+/// built once in `spawn_feed_workers`); tests use `for_test`. There is no
+/// `new(..., &AtomicU64)` and no arc-wise constructor in production builds.
 #[derive(Clone)]
 struct EnrichmentGate {
     active_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -2914,31 +2915,17 @@ impl EnrichmentGate {
         }
     }
 
-    /// Build from already-cloned feed/screener arcs plus a sealed rank token
-    /// (minted via `RankInputCounter::from_app`). No free `&AtomicU64` rank arg.
-    fn from_arcs(
-        active_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
-        screener: std::sync::Arc<Mutex<crate::engine::ScreenerState>>,
-        rank_input: RankInputCounter,
-    ) -> Self {
-        Self {
-            active_generation,
-            screener,
-            rank_input,
-        }
-    }
-
     #[cfg(test)]
     fn for_test(
         active_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
         screener: std::sync::Arc<Mutex<crate::engine::ScreenerState>>,
         rank_input: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
-        Self::from_arcs(
+        Self {
             active_generation,
             screener,
-            RankInputCounter::for_test(rank_input),
-        )
+            rank_input: RankInputCounter::for_test(rank_input),
+        }
     }
 
     fn mutate(
@@ -2954,6 +2941,23 @@ impl EnrichmentGate {
             mutate,
         )
     }
+}
+
+/// Test-only record of the gate each long-lived feed worker actually holds,
+/// keyed by generation, so a path test can prove ptr identity with AppState.
+#[cfg(test)]
+static FEED_WORKER_GATE_PROBE: std::sync::Mutex<Vec<(u64, &'static str, EnrichmentGate)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[inline]
+fn probe_feed_worker_gate(generation: u64, worker: &'static str, gate: &EnrichmentGate) {
+    #[cfg(test)]
+    FEED_WORKER_GATE_PROBE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((generation, worker, gate.clone()));
+    #[cfg(not(test))]
+    let _ = (generation, worker, gate);
 }
 
 /// Universe EDGAR worker + demand financial publish seam.
@@ -3809,6 +3813,78 @@ mod feed_coordinator_tests {
             std::sync::Arc::ptr_eq(&state.rank_input_generation, gate.rank_input.as_arc()),
             "from_app must share AppState.rank_input_generation Arc"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Path test for the feed workers themselves (not just `from_app`): every
+    /// long-lived worker spawned by `spawn_feed_workers` must hold a gate whose
+    /// rank-input counter (and feed generation / screener) is ptr-identical to
+    /// the AppState it was spawned from. Minting the gate from any other
+    /// AppState (e.g. a throwaway one) fails here. Uses a stale generation so
+    /// no worker reaches the network.
+    #[test]
+    fn spawn_feed_workers_gate_shares_state_rank_input_generation() {
+        use std::sync::atomic::Ordering;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ds_feed_gate_arc_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let state =
+            AppState::new_with_forced_profile(dir.join("history.sqlite"), None).expect("state");
+        // Unique, non-current generation: workers record their gate and exit.
+        let generation = state
+            .feed_generation
+            .load(Ordering::SeqCst)
+            .wrapping_add(0x5EED_0000_0000 + u64::from(std::process::id()));
+        assert!(!super::generation_is_current(
+            &state.feed_generation,
+            generation
+        ));
+
+        super::spawn_feed_workers(&state, std::sync::Arc::new(Vec::new()), generation)
+            .expect("spawn feed workers");
+
+        let expected = 1 + super::ENRICHMENT_CONCURRENCY + 1; // feed-refresh + enrich-* + edgar-dcf
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let seen = loop {
+            let seen: Vec<(&'static str, EnrichmentGate)> = super::FEED_WORKER_GATE_PROBE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(g, _, _)| *g == generation)
+                .map(|(_, w, gate)| (*w, gate.clone()))
+                .collect();
+            if seen.len() >= expected || std::time::Instant::now() > deadline {
+                break seen;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let mut names: Vec<&str> = seen.iter().map(|(w, _)| *w).collect();
+        names.sort_unstable();
+        let mut want = vec!["edgar-dcf", "feed-refresh"];
+        want.extend(std::iter::repeat_n("enrich", super::ENRICHMENT_CONCURRENCY));
+        want.sort_unstable();
+        assert_eq!(names, want, "every feed worker must report its gate");
+        for (worker, gate) in &seen {
+            assert!(
+                std::sync::Arc::ptr_eq(&state.rank_input_generation, gate.rank_input.as_arc()),
+                "{worker}: gate rank_input must be state.rank_input_generation"
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&state.feed_generation, &gate.active_generation),
+                "{worker}: gate feed generation must be state.feed_generation"
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&state.screener, &gate.screener),
+                "{worker}: gate screener must be state.screener"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5166,7 +5242,9 @@ fn spawn_feed_workers(
 ) -> Result<(), String> {
     let total = symbols.len();
     let feed_gen = state.feed_generation_arc();
-    let rank_input = RankInputCounter::from_app(&state);
+    // The single enrichment gate for this generation, minted from `state` so its
+    // rank-input counter IS `state.rank_input_generation`. Workers only clone it.
+    let gate = EnrichmentGate::from_app(state);
 
     // One shared client + session (Android: single YahooSession / OkHttp client).
     let shared_client = match YahooClient::new() {
@@ -5197,13 +5275,14 @@ fn spawn_feed_workers(
         let completed = Arc::clone(&completed);
         let enrichment_senders = Arc::clone(&enrichment_senders);
         let feed_gen = Arc::clone(&feed_gen);
-        let rank_input = rank_input.clone();
+        let gate = gate.clone();
         let initial_pass_completed_generation =
             Arc::clone(&state.initial_pass_completed_generation);
 
         thread::Builder::new()
             .name("feed-refresh".into())
             .spawn(move || {
+                probe_feed_worker_gate(generation, "feed-refresh", &gate);
                 if !generation_is_current(&feed_gen, generation) {
                     return;
                 }
@@ -5257,11 +5336,7 @@ fn spawn_feed_workers(
                         let completed = Arc::clone(&completed);
                         let enrichment_senders = Arc::clone(&enrichment_senders);
                         let feed_gen = Arc::clone(&feed_gen);
-                        let gate = EnrichmentGate::from_arcs(
-                            Arc::clone(&feed_gen),
-                            Arc::clone(&screener),
-                            rank_input.clone(),
-                        );
+                        let gate = gate.clone();
 
                         handles.push(
                             thread::Builder::new()
@@ -5365,17 +5440,12 @@ fn spawn_feed_workers(
                         let symbols = Arc::clone(&symbols);
                         let cursor = Arc::clone(&cursor);
                         let client = Arc::clone(&client);
-                        let screener = Arc::clone(&screener);
                         let feed_status = Arc::clone(&feed_status);
                         let loaded = Arc::clone(&loaded);
                         let completed = Arc::clone(&completed);
                         let enrichment_senders = Arc::clone(&enrichment_senders);
                         let feed_gen = Arc::clone(&feed_gen);
-                        let gate = EnrichmentGate::from_arcs(
-                            Arc::clone(&feed_gen),
-                            Arc::clone(&screener),
-                            rank_input.clone(),
-                        );
+                        let gate = gate.clone();
                         handles.push(
                             thread::Builder::new()
                                 .name(format!("refresh-loop-{w}"))
@@ -5432,24 +5502,22 @@ fn spawn_feed_workers(
     // ── Enrichment ──────────────────────────────────────────────────────────
     {
         let client = Arc::clone(&shared_client);
-        let screener = Arc::clone(&state.screener);
         let fng_cache = Arc::clone(&state.fng_cache);
         let feed_log = Arc::clone(&state.feed_log);
         let feed_gen = Arc::clone(&feed_gen);
-        let rank_input = rank_input.clone();
+        let gate = gate.clone();
 
         for (w, receiver) in enrichment_receivers.into_iter().enumerate() {
             let client = Arc::clone(&client);
-            let screener = Arc::clone(&screener);
             let fng_cache = Arc::clone(&fng_cache);
             let feed_log = Arc::clone(&feed_log);
             let feed_gen = Arc::clone(&feed_gen);
-            let rank_input = rank_input.clone();
+            let gate = gate.clone();
 
             if let Err(e) = thread::Builder::new()
                 .name(format!("enrich-{w}"))
                 .spawn(move || {
-                    let gate = EnrichmentGate::from_arcs(feed_gen.clone(), screener.clone(), rank_input);
+                    probe_feed_worker_gate(generation, "enrich", &gate);
                     let mut delayed = DelayedEnrichmentQueue::default();
                     loop {
                         if !generation_is_current(&feed_gen, generation) {
@@ -5606,12 +5674,17 @@ fn spawn_feed_workers(
         let screener = Arc::clone(&state.screener);
         let feed_status = Arc::clone(&state.feed_status);
         let feed_gen = Arc::clone(&feed_gen);
-        let rank_input = rank_input.clone();
+        let gate = gate.clone();
 
         thread::Builder::new()
             .name("edgar-dcf".to_string())
             .spawn(move || {
-                let gate = EnrichmentGate::from_arcs(feed_gen.clone(), screener.clone(), rank_input);
+                probe_feed_worker_gate(generation, "edgar-dcf", &gate);
+                // Stale generation: skip the CIK-map fetch (the loop below would
+                // return on its first check anyway).
+                if !generation_is_current(&feed_gen, generation) {
+                    return;
+                }
                 let edgar_client = edgar::edgar_client();
                 let mut insider_schedule = InsiderRefreshSchedule::default();
                 let mut financial_dcf_schedule = FinancialDcfSchedule::default();

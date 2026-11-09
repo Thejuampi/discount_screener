@@ -861,13 +861,23 @@ const BAD_QUARANTINE_RENAME_ATTEMPTS: usize = 8;
 /// Move `path` aside to a unique `*.bad*` name. Check-or-retry before rename so
 /// a concurrent quarantine cannot clobber an existing `.bad` (capped attempts).
 fn quarantine_input_blob_aside(path: &Path, kind: &str) -> Result<(), String> {
+    quarantine_input_blob_aside_with(path, kind, unique_bad_quarantine_path)
+}
+
+/// [`quarantine_input_blob_aside`] with an injectable destination proposer, so
+/// tests can simulate a destination that appears between proposal and rename.
+fn quarantine_input_blob_aside_with(
+    path: &Path,
+    kind: &str,
+    mut propose: impl FnMut(&Path, &str) -> PathBuf,
+) -> Result<(), String> {
     let base = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("blob");
     let mut last = String::new();
     for _ in 0..BAD_QUARANTINE_RENAME_ATTEMPTS {
-        let bad = unique_bad_quarantine_path(path, base);
+        let bad = propose(path, base);
         // Re-check immediately before rename (TOCTOU window with unique_*).
         if std::fs::symlink_metadata(&bad).is_ok() {
             last = format!("{} already exists", bad.display());
@@ -4426,6 +4436,73 @@ mod tests {
         slash.replace_range(5..6, "/");
         assert!(validate_input_hash(&slash).unwrap_err().contains("64 lowercase hex"));
         assert!(inputs_blob_path(Path::new("/tmp"), &slash).is_err());
+    }
+
+    /// Re-check before rename: if the proposed `.bad` appeared after it was
+    /// proposed (lost race), it must be skipped, never clobbered (a plain
+    /// `rename` of a symlink onto an existing file would silently replace it).
+    #[test]
+    fn quarantine_recheck_skips_destination_that_appeared() {
+        let dir = tmpdir("quarantine-recheck");
+        let path = dir.join("blob");
+        std::os::unix::fs::symlink(dir.join("missing-target"), &path).unwrap();
+        let raced = dir.join("blob.bad.raced");
+        std::fs::write(&raced, b"keep").unwrap();
+        let fresh = dir.join("blob.bad.fresh");
+        let mut calls = 0usize;
+        quarantine_input_blob_aside_with(&path, "symlink", |_, _| {
+            calls += 1;
+            if calls == 1 {
+                raced.clone()
+            } else {
+                fresh.clone()
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2, "raced destination skipped, then retried");
+        assert_eq!(std::fs::read(&raced).unwrap(), b"keep", "existing .bad untouched");
+        assert!(fresh.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(path.symlink_metadata().is_err(), "original moved aside");
+    }
+
+    /// Retries are capped at BAD_QUARANTINE_RENAME_ATTEMPTS: succeeds on the
+    /// last allowed attempt, and gives up (without clobbering) after it.
+    #[test]
+    fn quarantine_retry_count_is_capped() {
+        let dir = tmpdir("quarantine-cap");
+        let taken = dir.join("blob.bad.taken");
+        std::fs::write(&taken, b"keep").unwrap();
+
+        // Every proposal but the last allowed one is taken -> Ok on attempt N.
+        let path = dir.join("blob");
+        std::fs::create_dir(&path).unwrap();
+        let last = dir.join("blob.bad.last");
+        let mut calls = 0usize;
+        quarantine_input_blob_aside_with(&path, "directory", |_, _| {
+            calls += 1;
+            if calls < BAD_QUARANTINE_RENAME_ATTEMPTS {
+                taken.clone()
+            } else {
+                last.clone()
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, BAD_QUARANTINE_RENAME_ATTEMPTS);
+        assert!(last.is_dir());
+
+        // Every proposal taken -> Err after exactly N attempts, source intact.
+        let path2 = dir.join("blob2");
+        std::os::unix::fs::symlink(dir.join("missing-target"), &path2).unwrap();
+        let mut calls2 = 0usize;
+        let err = quarantine_input_blob_aside_with(&path2, "symlink", |_, _| {
+            calls2 += 1;
+            taken.clone()
+        })
+        .unwrap_err();
+        assert_eq!(calls2, BAD_QUARANTINE_RENAME_ATTEMPTS);
+        assert!(err.contains("quarantine exhausted"), "{err}");
+        assert!(path2.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&taken).unwrap(), b"keep");
     }
 
     #[test]
