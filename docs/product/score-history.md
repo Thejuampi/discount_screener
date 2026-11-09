@@ -279,7 +279,7 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
   backed by the startup check, backups and the restore merge.
   - Writing is **CLI-only**: `vantage-headless history-annotate RUN_ID --reason TEXT [--data-dir DIR]` writes
     straight to `history.sqlite`. It is safe while `serve` runs (SQLite locking), never creates or migrates the file,
-    and refuses a store that is not at v5 or is missing any trigger.
+    and refuses a store that is not at the current schema (v6) or is missing any trigger.
   - The daemon has no write route. Read annotations with `GET /history/annotations?run=`.
   - **Machine-readable for validation.** Every annotated run's notes appear as `annotations`, a JSON array of the
     reason strings, oldest first, and `[]` when there are none (the field is always present):
@@ -289,12 +289,25 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
     Annotated runs are not hidden or filtered. A forward-return validation that wants to drop them filters
     `annotations != []`. Example (run export, trimmed):
     `{"run_id":"sp500-1793538000-v3","annotations":["made-up note"],"evaluations":[{"symbol":"S01","annotations":["made-up note"],"stale":false,...}],...}`
-- **`run_deferrals` (no silent gaps).** Every scheduled slot that does not record leaves one durable, append-only
-  row in `history.sqlite`. The in-memory `TickClock` deferral is only what `/status` shows.
+- **`run_deferrals` (no silent gaps; migration v6).** Every scheduled slot that does not record leaves one durable,
+  append-only row in `history.sqlite`. The in-memory `TickClock` deferral is only what `/status` shows.
+  - **Migration v6** holds the table, its 3 triggers and the `score_runs_profile_model_at` index on
+    `score_runs (profile, model, captured_at)`. v5 is frozen exactly as released at 3c2e275, and a test pins its
+    hash. A v4 or older store migrates straight to v6 in one open, with one pre-migration backup
+    (`history.pre-score-history-v4-to-v6-*.sqlite.gz`).
+  - **Pre-release v5 is refused.** A store at v5 that already has `run_deferrals` was migrated by a pre-release #74
+    build (271df3b-era v5). It is refused untouched (no migration, no backup, no write) with:
+    `score history store is at schema v5 but already has a run_deferrals table: it was migrated by a pre-release
+    build of PR #74 (271df3b-era v5), whose v5 differs from the released v5. Refusing to open or migrate it; nothing
+    was changed. Move this history.sqlite aside and restore the pre-migration backup
+    (history.pre-score-history-v4-to-v5-*.sqlite.gz), then start again.`
+  - **No `model` column.** The recorder schedules one model (`HISTORY_MODEL`, v3) per profile, so a slot belongs to
+    a profile. `next_run` (below) is filtered on that model.
   - Columns: `profile`, `slot` (UTC epoch of the scheduled due time), `trigger` (`interval` or `close`),
     `observed_at` (UTC epoch of the first tick that did not record it), `reason`, `stale_count` and `total` (priced
-    rows at that tick). The stale share is derived as `stale_count / total` (none when `total = 0`); it is not
-    stored. A CHECK refuses free text, an unknown trigger and `stale_count > total`.
+    rows at that tick), `covers` and `covers_from` (see `process_down`). The stale share is derived as
+    `stale_count / total` (none when `total = 0`); it is not stored. A CHECK refuses free text, an unknown trigger
+    and `stale_count > total`.
   - `reason` codes, one per existing skip or defer message:
 
     | code | message |
@@ -307,6 +320,13 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
     | `no_fresh_full_pass` | `waiting for a fresh quote pass` |
     | `stale_share_too_high` | `too many stale quotes` |
     | `process_down` | no tick message: written at startup for slots missed while the process was down (below) |
+    | `record_failed` | no tick message: the slot was due but evaluating or writing the run failed with an error |
+
+    **`record_failed`** is best effort. A run-path error on a scheduled slot writes one row for the slot that
+    `due_slot` gives (first wins, so a failure that repeats inside one slot adds nothing), with
+    `stale_count = total = 0`. If that row cannot be written either, the tick returns both errors and nothing else
+    happens: no retry, no loop, and the next tick proceeds normally. `serve` logs each distinct tick error once
+    until a tick succeeds. An error on a tick that has no scheduled slot (`interval not elapsed`) writes nothing.
 
     `interval not elapsed` is not a scheduled slot and writes nothing. A test fails if `history_due` or
     `freshness_gate` gains a message without a code.
@@ -322,11 +342,18 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
     nothing.
   - **Append-only.** `BEFORE DELETE`, `BEFORE UPDATE` and `BEFORE INSERT` (existing key) triggers
     `RAISE(ABORT)`. They are required at open, covered by the behavioural self-check and the backups, and merged by
-    restore (key `profile, slot`; 0 rows from a pre-v5 backup).
-  - **A slot recorded later keeps its deferral row.** Join on `score_runs` to see whether the gap closed.
-    `GET /history/deferrals?profile=&since=&limit=` (and `vantage-headless history-deferrals [--profile P]
-    [--since EPOCH] [--limit N]`) returns the rows newest first, each with `recorded_run`: the first run at or after
-    the slot, or `null` while it is still a gap. This is read-only, and the daemon has no write route.
+    restore (key `profile, slot`; 0 rows from a pre-v6 backup).
+  - **A slot never records late, and it keeps its deferral row.**
+    - `GET /history/deferrals?profile=&since=&before=&limit=` returns the rows newest first, with
+      `since <= slot < before`. The default limit is 100 and the maximum is 10 000.
+    - The CLI is `vantage-headless history-deferrals [--profile P] [--since EPOCH] [--before EPOCH] [--limit N]`. It
+      refuses unknown flags and value flags given without a value.
+    - To page back, pass `before` = the oldest slot shown.
+    - Each row has `next_run`: the first v3 run of the same profile captured at or after the slot, or `null` while
+      no run has happened since. It is not "the run that recorded the slot".
+    - `next_run` is computed only for the returned page, on the v6 index: 10k deferrals and 3k runs, limit 100,
+      take about 5 ms, against about 2.7 s for the first version of the query.
+    - This is read-only, and the daemon has no write route.
   - **Downtime gap (`process_down`).** At `serve` startup (`backfill_process_down`, in one transaction), every
     scheduled slot that came due while the process was not running gets one `process_down` row:
     - **Since when.** The anchor is the later of the profile's last recorded run and its latest `run_deferrals` slot.
