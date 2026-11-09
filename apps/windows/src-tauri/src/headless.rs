@@ -3609,6 +3609,203 @@ mod full_universe_parity_tests {
             .collect()
     }
 
+    /// Release-candidate driver for #74 (ignored; run by the RC's try.sh): ranking
+    /// parity against main's verbatim `rank_android_v3_main` when the stale-quote gate
+    /// is in play. Synthetic universe (RC_N symbols, default 501), in-memory store, the
+    /// real recorder (`record_history_tick_fresh`). Scenarios (RC_STALE_PCTS, default
+    /// "0,5,9,10,11,50", % of priced symbols with a 2 h old quote). Prints one
+    /// `RC_STALE {json}` line per scenario and asserts:
+    /// - the live ranking is byte-identical to main in every scenario;
+    /// - a recorded run stores exactly main's ranking (symbols, order, ranks, scores),
+    ///   stale rows included and flagged; only the stale rows are hidden from /history;
+    /// - a deferred run (> 10% stale) stores nothing.
+    #[test]
+    #[ignore]
+    fn rc_stale_ranking_parity() {
+        use crate::score_history::{ScoreHistoryStore, TickClock, DEFAULT_QUOTE_STALE_SECS};
+        use std::collections::{HashMap, HashSet};
+        struct RcSrc {
+            snap: Arc<OpportunitySnapshot>,
+            universe: Vec<String>,
+            quotes: HashMap<String, i64>,
+            pass: i64,
+        }
+        impl HistorySource for RcSrc {
+            fn pass_generation(&self) -> u64 {
+                1
+            }
+            fn year_charts_loaded(&self) -> usize {
+                self.universe.len()
+            }
+            fn history_universe(&self) -> Vec<String> {
+                self.universe.clone()
+            }
+            fn history_profile(&self) -> String {
+                "sp500".into()
+            }
+            fn history_snapshot(
+                &self,
+            ) -> (Arc<OpportunitySnapshot>, &'static str, Option<Vec<String>>) {
+                (self.snap.clone(), "live", Some(self.universe.clone()))
+            }
+            fn quote_times(&self) -> Option<HashMap<String, i64>> {
+                Some(self.quotes.clone())
+            }
+            fn last_full_pass_at(&self) -> Option<i64> {
+                Some(self.pass)
+            }
+        }
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let n: usize = env("RC_N").map_or(501, |v| v.parse().unwrap());
+        let pcts: Vec<usize> = env("RC_STALE_PCTS")
+            .unwrap_or_else(|| "0,5,9,10,11,50".into())
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        let base = OpportunitySnapshot::capture(
+            &crate::commands::opportunity_projection_tests::fixture_state(),
+            "sp500",
+        );
+        let now: i64 = 1_793_538_000; // Sun 13:00 UTC: no close slot nearby.
+        let missing = (n / 100).max(1);
+        let mut snap = OpportunitySnapshot {
+            profile: "sp500".into(),
+            captured_at_epoch: now,
+            rows: Vec::new(),
+        };
+        for k in 0..n - missing {
+            let mut r = base.rows[k % base.rows.len()].clone();
+            r.row.symbol = format!("SYN{k:04}");
+            if r.year.is_none() && k % 50 != 49 {
+                r.year = Some(synthetic_year(r.row.market_price_cents, k));
+            }
+            snap.rows.push(r);
+        }
+        let universe: Vec<String> = (0..n).map(|k| format!("SYN{k:04}")).collect();
+        let snap = Arc::new(snap);
+        let main = rank_android_v3_main(&snap, Some(&universe));
+        let main_sha = sha_hex(&serde_json::to_vec(&main).unwrap());
+        // Priced rows are the ones the recorder stores (and gates on), in main's order.
+        let priced: Vec<String> = main
+            .iter()
+            .filter(|r| r.price_cents > 0)
+            .map(|r| r.symbol.clone())
+            .collect();
+        for pct in pcts {
+            let k_stale = priced.len() * pct / 100;
+            // Spread the stale quotes over the ranking (every j-th priced symbol).
+            let stale: HashSet<String> = if k_stale == 0 {
+                HashSet::new()
+            } else {
+                let step = priced.len() as f64 / k_stale as f64;
+                (0..k_stale)
+                    .map(|i| priced[(i as f64 * step) as usize].clone())
+                    .collect()
+            };
+            assert_eq!(stale.len(), k_stale);
+            let quotes: HashMap<String, i64> = snap
+                .rows
+                .iter()
+                .map(|r| {
+                    let s = r.row.symbol.clone();
+                    let ts = if stale.contains(&s) {
+                        now - 7_200
+                    } else {
+                        now - 60
+                    };
+                    (s, ts)
+                })
+                .collect();
+            let src = RcSrc {
+                snap: snap.clone(),
+                universe: universe.clone(),
+                quotes,
+                pass: now - 30,
+            };
+            let store = ScoreHistoryStore::open_in_memory().unwrap();
+            let seen = Mutex::new(Some((1, now - 3_600)));
+            let clock = TickClock::new(DEFAULT_QUOTE_STALE_SECS);
+            let (live, _) = run_evaluation(&snap, Some(&universe), &universe).unwrap();
+            let live_sha = sha_hex(&serde_json::to_vec(&live).unwrap());
+            let w = record_history_tick_fresh(&src, &store, &seen, &clock, 6 * 3600, false, now)
+                .unwrap();
+            let run_id = format!("sp500-{now}-v3");
+            let recorded = matches!(w, HistoryWrite::Recorded { .. });
+            let mut line = serde_json::json!({
+                "stale_pct": pct, "stale_quotes": k_stale, "priced": priced.len(),
+                "ranked_rows": main.len(), "outcome": format!("{w:?}"),
+                "ranking_sha256_branch": live_sha, "ranking_sha256_main": main_sha,
+            });
+            assert_eq!(
+                live_sha, main_sha,
+                "live ranking must equal main ({pct}% stale)"
+            );
+            let over = k_stale as f64 > priced.len() as f64 * crate::score_history::MAX_STALE_SHARE;
+            if over {
+                assert!(
+                    matches!(w, HistoryWrite::Skipped("too many stale quotes")),
+                    "{pct}%: {w:?}"
+                );
+                assert_eq!(store.counts().unwrap().0, 0, "deferred run stores nothing");
+            } else {
+                assert!(recorded, "{pct}%: {w:?}");
+                let (stored, stored_stale) = store.stale_counts(&run_id).unwrap();
+                // Stored ranking == main: ok evaluations in rank order.
+                let ok: Vec<_> = store
+                    .evaluations(&run_id)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|e| e.status == "ok")
+                    .collect();
+                let got: Vec<(String, Option<i64>, Option<i64>, Option<String>)> = ok
+                    .iter()
+                    .map(|e| (e.symbol.clone(), e.rank, e.composite, e.decision.clone()))
+                    .collect();
+                let want: Vec<(String, Option<i64>, Option<i64>, Option<String>)> = main
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        (
+                            r.symbol.clone(),
+                            Some(i as i64 + 1),
+                            Some(r.composite_score as i64),
+                            r.decision.clone(),
+                        )
+                    })
+                    .collect();
+                let flagged: HashSet<String> = store
+                    .stale_pairs(Some(&run_id), None)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, s)| s)
+                    .collect();
+                let hidden: HashSet<String> = priced
+                    .iter()
+                    .filter(|s| {
+                        store
+                            .history(s, None, now, Some(HISTORY_MODEL), Some("sp500"))
+                            .unwrap()
+                            .is_empty()
+                    })
+                    .cloned()
+                    .collect();
+                line["stored_rows"] = stored.into();
+                line["stored_stale"] = stored_stale.into();
+                line["stored_ranking_equals_main"] = (got == want).into();
+                line["flagged_equals_stale_set"] = (flagged == stale).into();
+                line["hidden_from_history_equals_stale_set"] = (hidden == stale).into();
+                println!("RC_STALE {line}");
+                assert_eq!(got, want, "stored ranking must equal main ({pct}% stale)");
+                assert_eq!(stored as usize, priced.len());
+                assert_eq!(stored_stale as usize, k_stale);
+                assert_eq!(flagged, stale);
+                assert_eq!(hidden, stale);
+                continue;
+            }
+            println!("RC_STALE {line}");
+        }
+    }
+
     /// Release-candidate driver (ignored; run by the RC's try.sh). Env:
     /// RC_SNAPSHOT (optional snapshot copy, else the test fixture), RC_N (symbols),
     /// RC_DB (history.sqlite to create), RC_RUNS (runs), RC_CHANGE (fraction of rows whose
