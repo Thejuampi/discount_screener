@@ -15,6 +15,10 @@
   See `docs/architecture/decision-rule-v3-1.md`.
 
 ### Added
+- `vantage-headless --version` / `-V` (#75): prints `vantage-headless <crate-version> (<full-git-sha>[-dirty]|unknown)`.
+  `build.rs` stamps `DS_BUILD_SHA` via git (no PowerShell required on Linux); `VANTAGE_BUILD_SHA`
+  overrides it; `/status` exposes `build_sha`. `-dirty` may lag clean↔dirty flips until a watched
+  git path changes (Cargo limitation; see `HEADLESS.md`).
 - Score history (headless, #67): append-only `score_runs` / `score_history` tables in `<data-dir>/history.sqlite`,
   written every `--history-interval-hours` (default 6) and after each US weekday close (~16:10 America/New_York).
   `GET /history` (UTC, ISO-8601, `profile=`) and `vantage-headless history` (local time, `--tz`, default

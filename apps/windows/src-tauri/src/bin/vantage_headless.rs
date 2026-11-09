@@ -39,6 +39,16 @@ const DEFAULT_ADDR: &str = "127.0.0.1:7979";
 const MAX_CONNECTIONS: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// One-line identity for `--version` / `-V`.
+/// Shape: `vantage-headless <CARGO_PKG_VERSION> (<full-sha|unknown>[-dirty])`.
+fn version_line() -> String {
+    format!(
+        "vantage-headless {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("DS_BUILD_SHA")
+    )
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match run(args) {
@@ -70,6 +80,7 @@ fn parse_opts(args: &[String]) -> Opts {
                 "json"
                     | "market-context"
                     | "help"
+                    | "version"
                     | "allow-remote"
                     | "changes"
                     | "no-feed"
@@ -83,6 +94,8 @@ fn parse_opts(args: &[String]) -> Opts {
             }
         } else if a == "-h" {
             flags.insert("help".into(), "1".into());
+        } else if a == "-V" {
+            flags.insert("version".into(), "1".into());
         } else {
             positional.push(a.clone());
         }
@@ -92,7 +105,8 @@ fn parse_opts(args: &[String]) -> Opts {
 }
 
 fn usage() -> &'static str {
-    "usage: vantage-headless <serve|rank|status|parity|persist|rank-snapshot|history> [options]\n\
+    "usage: vantage-headless <serve|rank|status|parity|persist|rank-snapshot|history|version> [options]\n\
+     \x20       --version | -V   print version and build SHA\n\
      common: --addr HOST:PORT   (default 127.0.0.1:7979)\n\
      serve:  --profile sp500|dow|merval|... --semantics android|tauri (feed universe; default android)\n\
      \x20       --data-dir DIR [--market-context] [--allow-remote]\n\
@@ -113,10 +127,18 @@ serve:  --history-interval-hours H (default 6; 0 disables score history)\n\
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
+    run_out(args, &mut std::io::stdout())
+}
+
+fn run_out(args: Vec<String>, out: &mut dyn std::io::Write) -> Result<(), String> {
     let o = parse_opts(&args);
     let cmd = o.positional.first().map(String::as_str).unwrap_or("help");
+    if o.flags.contains_key("version") || cmd == "version" {
+        writeln!(out, "{}", version_line()).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     if o.flags.contains_key("help") || cmd == "help" {
-        println!("{}", usage());
+        writeln!(out, "{}", usage()).map_err(|e| e.to_string())?;
         return Ok(());
     }
     let addr = o
@@ -1184,6 +1206,72 @@ mod tests {
         assert!(run(vec!["rank".into(), "--help".into()]).is_ok());
         assert!(run(vec!["--help".into()]).is_ok());
         assert!(run(vec!["help".into()]).is_ok());
+    }
+
+    #[test]
+    fn version_line_has_sha_or_unknown() {
+        let line = version_line();
+        // "vantage-headless 0.1.0 (<40-hex>[-dirty]|unknown)"
+        assert!(
+            line.starts_with("vantage-headless "),
+            "unexpected version line: {line}"
+        );
+        let start = line.find('(').expect("missing ( in version line");
+        let end = line.rfind(')').expect("missing ) in version line");
+        let inner = &line[start + 1..end];
+        let sha = inner.strip_suffix("-dirty").unwrap_or(inner);
+        let ok = sha == "unknown"
+            || (sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(ok, "build SHA must be 40-hex or unknown, got {inner:?} in {line}");
+
+        // Without an override, when git is available the stamped SHA must equal
+        // `git rev-parse HEAD` (40-hex). Mutation: forcing build_sha="unknown"
+        // (or any non-HEAD value) fails this equality. `unknown` is only
+        // legitimate when git is absent or VANTAGE_BUILD_SHA is set.
+        if std::env::var_os("VANTAGE_BUILD_SHA").is_none() {
+            let head = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()));
+            if let Some(head) = head {
+                assert_eq!(
+                    sha, head,
+                    "DS_BUILD_SHA must equal git rev-parse HEAD when not overridden"
+                );
+            }
+        }
+
+        // stdout of --version / -V / version must equal version_line() exactly
+        // (plus a trailing newline from writeln!). Mutation: dropping "version"
+        // from the boolean-flag list makes `--version` a no-op flag, so run_out
+        // falls through to usage and this equality fails.
+        for args in [
+            vec!["--version".into()],
+            vec!["-V".into()],
+            vec!["version".into()],
+        ] {
+            let mut buf = Vec::new();
+            run_out(args.clone(), &mut buf).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            let got = String::from_utf8(buf).unwrap();
+            assert_eq!(
+                got.trim_end_matches(['\n', '\r']),
+                line,
+                "stdout for {args:?} must equal version_line()"
+            );
+        }
+
+        // Usage text still works and lists version.
+        let mut help_buf = Vec::new();
+        run_out(vec!["--help".into()], &mut help_buf).unwrap();
+        let help = String::from_utf8(help_buf).unwrap();
+        assert!(help.contains("--version"), "usage must mention --version");
+        assert!(
+            usage().contains("<serve|rank|status|parity|persist|rank-snapshot|history|version>"),
+            "usage must list the version command"
+        );
     }
 
     #[test]
