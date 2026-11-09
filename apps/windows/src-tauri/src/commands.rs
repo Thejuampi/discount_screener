@@ -1982,7 +1982,11 @@ pub fn wall_epoch() -> i64 {
 /// tests use `PassStart::at` (`cfg(test)`, rejects `<= 0`).
 mod pass_start_seal {
     /// Epoch seconds at which a quote pass began. See the module docs.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    ///
+    /// Deliberately **not** `Copy`: each pass consumes its own start, so reusing the
+    /// first pass's start for a later pass (fail-open: old quotes would count toward
+    /// that pass's 90% rule) is a use-of-moved-value compile error.
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct PassStart(i64);
 
     impl PassStart {
@@ -2022,6 +2026,20 @@ mod pass_start_seal {
             assert_eq!(PassStart::from_wall(-7).epoch(), i64::MAX);
             assert_eq!(PassStart::from_wall(42).epoch(), 42);
             assert!(PassStart::now().epoch() > 0);
+        }
+
+        /// `now()` must read the wall clock (not a constant like `Self(1)`, which would
+        /// let every quote since 1970 count toward the pass).
+        #[test]
+        fn pass_start_now_reads_wall_clock() {
+            let before = super::super::wall_epoch();
+            let got = PassStart::now().epoch();
+            let after = super::super::wall_epoch();
+            assert!(before > 0, "test needs a working clock");
+            assert!(
+                (before..=after).contains(&got),
+                "PassStart::now() = {got}, wall clock was {before}..={after}"
+            );
         }
 
         #[test]
@@ -4504,10 +4522,10 @@ mod feed_coordinator_tests {
         rmt: i64,
     ) -> impl Fn() -> std::io::Result<crate::fetcher::CandleFetch> + Send + Sync {
         move || {
-            Ok(crate::fetcher::CandleFetch {
-                candles: candles_at(rmt - 3_600),
-                regular_market_time: Some(rmt),
-            })
+            Ok(crate::fetcher::CandleFetch::for_test(
+                candles_at(rmt - 3_600),
+                Some(rmt),
+            ))
         }
     }
 
@@ -4731,10 +4749,7 @@ mod feed_coordinator_tests {
             .ingest_snapshot(snap("RMT", 0, None));
         let bar_open = 1_000_000_000i64;
         let rmt = bar_open + 60;
-        let fetch = crate::fetcher::CandleFetch {
-            candles: candles_at(bar_open),
-            regular_market_time: Some(rmt),
-        };
+        let fetch = crate::fetcher::CandleFetch::for_test(candles_at(bar_open), Some(rmt));
         assert!(super::apply_candle_fetch_if_current(
             &gate,
             1,
@@ -5936,7 +5951,7 @@ fn apply_refresh_chart_if_current(
                 outcome.visible = true;
             } else {
                 use crate::engine::{FundamentalSnapshot, MarketSnapshot};
-                let stamped = quote_ts.filter(|_| close > 0);
+                // New symbol: no prior stamp to keep, and `close > 0` is checked above.
                 state.ingest_partial_snapshot(MarketSnapshot {
                     symbol: sym.to_string(),
                     company_name: None,
@@ -5945,11 +5960,8 @@ fn apply_refresh_chart_if_current(
                     intrinsic_value_cents: 0,
                     previous_close_cents: 0,
                     next_earnings_epoch: None,
-                    quote_fetched_at: stamped,
+                    quote_fetched_at: quote_ts,
                 });
-                if let Some(s) = state.snapshots.get_mut(sym) {
-                    s.quote_fetched_at = stamped;
-                }
                 let sector = if crypto {
                     Some("Cryptocurrency".to_string())
                 } else {
@@ -5977,12 +5989,13 @@ fn apply_candle_fetch_if_current(
     fetch: crate::fetcher::CandleFetch,
     outcome: RefreshOutcome,
 ) -> Option<RefreshOutcome> {
+    let regular_market_time = fetch.regular_market_time();
     apply_refresh_chart_if_current(
         gate,
         generation,
         sym,
         fetch.candles,
-        fetch.regular_market_time,
+        regular_market_time,
         outcome,
     )
 }

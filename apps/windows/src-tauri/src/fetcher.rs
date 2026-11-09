@@ -710,25 +710,9 @@ impl YahooClient {
             .and_then(|r| r.json::<Value>())
             .map_err(io::Error::other)
             .and_then(|resp| parse_candles(&resp));
-
-        // Stooq fallback — only for daily resolution (Stooq has no intraday and
-        // returning daily where weekly/monthly was asked would corrupt indicators).
-        match yahoo {
-            Ok(c) if !c.candles.is_empty() => Ok(c),
-            other => {
-                if interval == "1d" {
-                    if let Some(c) = crate::stooq::fetch_daily_candles(symbol) {
-                        if !c.is_empty() {
-                            return Ok(CandleFetch {
-                                candles: c,
-                                regular_market_time: None,
-                            });
-                        }
-                    }
-                }
-                other
-            }
-        }
+        candle_fetch_or_stooq(yahoo, interval, || {
+            crate::stooq::fetch_daily_candles(symbol)
+        })
     }
 }
 
@@ -1023,10 +1007,61 @@ fn parse_chart_regular_market_price_cents(root: &Value) -> Option<i64> {
 
 /// Candles from a chart fetch, plus Yahoo `meta.regularMarketTime` when present.
 /// The market time is for in-memory freshness stamping only (never in input bytes).
-#[derive(Clone, Debug, Default)]
+///
+/// `regular_market_time` is private and there is no `Default`: outside this module a
+/// `CandleFetch` can only come from [`YahooClient::fetch_candles`] (tests: `for_test`),
+/// so no adapter between the fetch and the stamp (e.g. the refresh `RefreshSource`
+/// impl) can rewrite or drop the market time.
+#[derive(Clone, Debug)]
 pub struct CandleFetch {
     pub candles: Vec<HistoricalCandle>,
-    pub regular_market_time: Option<i64>,
+    regular_market_time: Option<i64>,
+}
+
+impl CandleFetch {
+    /// Yahoo `meta.regularMarketTime` (`> 0`) when the chart carried one.
+    pub fn regular_market_time(&self) -> Option<i64> {
+        self.regular_market_time
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        candles: Vec<HistoricalCandle>,
+        regular_market_time: Option<i64>,
+    ) -> Self {
+        Self {
+            candles,
+            regular_market_time,
+        }
+    }
+}
+
+/// Post-network half of [`YahooClient::fetch_candles`]: a non-empty Yahoo result is
+/// returned as is (market time included); otherwise daily requests fall back to Stooq
+/// (no market time). Pure, so the market-time pass-through is unit-tested.
+fn candle_fetch_or_stooq(
+    yahoo: io::Result<CandleFetch>,
+    interval: &str,
+    stooq: impl FnOnce() -> Option<Vec<HistoricalCandle>>,
+) -> io::Result<CandleFetch> {
+    match yahoo {
+        Ok(c) if !c.candles.is_empty() => Ok(c),
+        other => {
+            // Stooq fallback — only for daily resolution (Stooq has no intraday and
+            // returning daily where weekly/monthly was asked would corrupt indicators).
+            if interval == "1d" {
+                if let Some(c) = stooq() {
+                    if !c.is_empty() {
+                        return Ok(CandleFetch {
+                            candles: c,
+                            regular_market_time: None,
+                        });
+                    }
+                }
+            }
+            other
+        }
+    }
 }
 
 fn parse_candles(resp: &Value) -> io::Result<CandleFetch> {
@@ -1153,6 +1188,53 @@ mod quote_html_recovery_tests {
 }
 
 #[cfg(test)]
+mod candle_fetch_or_stooq_tests {
+    use super::{candle_fetch_or_stooq, parse_candles, CandleFetch, HistoricalCandle};
+    use serde_json::json;
+
+    fn candle(epoch: i64) -> HistoricalCandle {
+        HistoricalCandle {
+            epoch_seconds: epoch,
+            open_cents: 100,
+            high_cents: 100,
+            low_cents: 100,
+            close_cents: 100,
+            volume: 1,
+        }
+    }
+
+    fn yahoo(rmt: i64) -> std::io::Result<CandleFetch> {
+        parse_candles(&json!({ "chart": { "result": [{
+            "meta": { "regularMarketTime": rmt },
+            "timestamp": [rmt - 60],
+            "indicators": { "quote": [{ "close": [1.0] }] }
+        }]}}))
+    }
+
+    #[test]
+    fn yahoo_result_keeps_market_time_and_skips_stooq() {
+        let got = candle_fetch_or_stooq(yahoo(1_700_000_123), "1d", || {
+            panic!("stooq must not be called for a non-empty Yahoo result")
+        })
+        .unwrap();
+        assert_eq!(got.regular_market_time(), Some(1_700_000_123));
+        assert_eq!(got.candles.len(), 1);
+    }
+
+    #[test]
+    fn stooq_fallback_has_no_market_time() {
+        let err = || Err(std::io::Error::other("HTTP 500"));
+        let got = candle_fetch_or_stooq(err(), "1d", || Some(vec![candle(1)])).unwrap();
+        assert_eq!(got.regular_market_time(), None, "Stooq has no trade time");
+        assert_eq!(got.candles.len(), 1);
+        // Non-daily never falls back; the Yahoo error is returned.
+        assert!(candle_fetch_or_stooq(err(), "1wk", || Some(vec![candle(1)])).is_err());
+        // Empty Stooq: the Yahoo error is returned.
+        assert!(candle_fetch_or_stooq(err(), "1d", || Some(vec![])).is_err());
+    }
+}
+
+#[cfg(test)]
 mod parse_candles_regular_market_time_tests {
     use super::parse_candles;
     use serde_json::json;
@@ -1184,14 +1266,14 @@ mod parse_candles_regular_market_time_tests {
     #[test]
     fn regular_market_time_present() {
         let fetch = parse_candles(&chart_json(Some(1_700_000_123))).unwrap();
-        assert_eq!(fetch.regular_market_time, Some(1_700_000_123));
+        assert_eq!(fetch.regular_market_time(), Some(1_700_000_123));
         assert_eq!(fetch.candles.len(), 1);
     }
 
     #[test]
     fn regular_market_time_absent() {
         let fetch = parse_candles(&chart_json(None)).unwrap();
-        assert_eq!(fetch.regular_market_time, None);
+        assert_eq!(fetch.regular_market_time(), None);
     }
 
     #[test]
@@ -1199,14 +1281,14 @@ mod parse_candles_regular_market_time_tests {
         assert_eq!(
             parse_candles(&chart_json(Some(0)))
                 .unwrap()
-                .regular_market_time,
+                .regular_market_time(),
             None,
             "0 is not a real trade time"
         );
         assert_eq!(
             parse_candles(&chart_json(Some(-1)))
                 .unwrap()
-                .regular_market_time,
+                .regular_market_time(),
             None
         );
     }
@@ -1219,12 +1301,13 @@ mod parse_candles_regular_market_time_tests {
         v["chart"]["result"][0]["meta"]["regular_market_time"] = json!(1_700_000_998i64);
         let fetch = parse_candles(&v).unwrap();
         assert_eq!(
-            fetch.regular_market_time, None,
+            fetch.regular_market_time(),
+            None,
             "wrong key must not be accepted"
         );
         v["chart"]["result"][0]["meta"]["regularMarketTime"] = json!(1_700_000_777i64);
         assert_eq!(
-            parse_candles(&v).unwrap().regular_market_time,
+            parse_candles(&v).unwrap().regular_market_time(),
             Some(1_700_000_777)
         );
     }
