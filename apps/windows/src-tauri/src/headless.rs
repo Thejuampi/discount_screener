@@ -3137,6 +3137,35 @@ mod history_tick_tests {
     }
 
     #[test]
+    fn a_failed_deferral_write_on_a_scheduler_skip_is_an_error() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "run_deferrals");
+        // Due by interval, but the ranking is not live: Due::No("no live ranking").
+        f.source.set("persisted");
+        let t = NOW + H6 + 60;
+        let e = record_history_tick_fresh(
+            &f,
+            &s,
+            &Mutex::new(None),
+            &TickClock::new(1800),
+            H6,
+            false,
+            t,
+        )
+        .unwrap_err();
+        assert!(e.contains("injected run_deferrals failure"), "{e}");
+        heal(&s, "run_deferrals");
+        assert_eq!(
+            ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t + 10),
+            HistoryWrite::Skipped("no live ranking")
+        );
+        assert_eq!(defs(&s).len(), 1);
+    }
+
+    #[test]
     fn a_failed_due_run_leaves_one_record_failed_row_then_recovers() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
         let f = live_fake();

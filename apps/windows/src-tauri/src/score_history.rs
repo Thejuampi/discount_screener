@@ -7804,6 +7804,11 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
         assert_eq!(next(50), Some(meta(200).run_id()));
         assert_eq!(next(150), Some(meta(200).run_id()));
         assert_eq!(next(250), None);
+        // A run exactly at the slot is its next run ("at or after").
+        s.record_run(&meta(250), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(next(250), Some(meta(250).run_id()));
+        assert_eq!(next(150), Some(meta(200).run_id()), "earliest, not latest");
         // The v2 run is the next v2 run of slot 50 (model is a real filter, not ignored).
         assert_eq!(
             s.deferrals(Some("sp500"), "v2", None, None, 10).unwrap()[2].1,
