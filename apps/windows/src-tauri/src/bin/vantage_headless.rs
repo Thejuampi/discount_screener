@@ -852,7 +852,26 @@ fn check_bind_addr(addr: &str, allow_remote: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn respond(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
+/// A client connection the HTTP handler can serve: TCP in production; tests also use
+/// an in-process socket pair, so the handler runs with no network at all.
+trait Conn: Read + Write {
+    fn set_read_timeout(&self, d: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl Conn for TcpStream {
+    fn set_read_timeout(&self, d: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_read_timeout(self, d)
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Conn for std::os::unix::net::UnixStream {
+    fn set_read_timeout(&self, d: Option<Duration>) -> std::io::Result<()> {
+        std::os::unix::net::UnixStream::set_read_timeout(self, d)
+    }
+}
+
+fn respond(stream: &mut impl Conn, status: &str, body: &str) -> std::io::Result<()> {
     write!(
         stream,
         "HTTP/1.0 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -932,7 +951,7 @@ fn mutation_guard(path: &str, origin: bool, cli: bool) -> Option<(&'static str, 
 
 /// Read the request line and headers under ONE deadline for the whole head
 /// (a slow client trickling bytes cannot hold a slot past `READ_TIMEOUT`).
-fn read_head(mut stream: &TcpStream) -> Result<Head, &'static str> {
+fn read_head(stream: &mut impl Conn) -> Result<Head, &'static str> {
     let deadline = std::time::Instant::now() + READ_TIMEOUT;
     let mut buf = Vec::with_capacity(512);
     let mut chunk = [0u8; 512];
@@ -1002,8 +1021,8 @@ fn host_allowed(host: Option<&str>, allow_remote: bool) -> bool {
     )
 }
 
-fn handle(mut stream: TcpStream, engine: &HeadlessEngine, allow_remote: bool) {
-    let head = match read_head(&stream) {
+fn handle(mut stream: impl Conn, engine: &HeadlessEngine, allow_remote: bool) {
+    let head = match read_head(&mut stream) {
         Ok(h) => h,
         Err("timeout") => {
             let _ = respond(&mut stream, "408 Request Timeout", "timeout");
@@ -1193,13 +1212,30 @@ mod tests {
         assert!(host_allowed(Some("evil.example"), true));
     }
 
+    /// Client/server ends of an in-process connection for the HTTP handler tests: a
+    /// unix socket pair (no network at all; passes under `unshare -rn`), else loopback.
+    #[cfg(unix)]
+    type TestConn = std::os::unix::net::UnixStream;
+    #[cfg(not(unix))]
+    type TestConn = TcpStream;
+
+    fn conn_pair() -> (TestConn, TestConn) {
+        #[cfg(unix)]
+        {
+            std::os::unix::net::UnixStream::pair().unwrap()
+        }
+        #[cfg(not(unix))]
+        {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let c = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+            (c, l.accept().unwrap().0)
+        }
+    }
+
     #[test]
     fn whole_head_shares_one_deadline() {
-        use std::net::TcpListener;
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
+        let (mut c, mut s) = conn_pair();
         let t = std::thread::spawn(move || {
-            let mut c = TcpStream::connect(addr).unwrap();
             // Trickle a header byte well inside each per-read timeout, never finishing.
             for _ in 0..40 {
                 if c.write_all(b"X").is_err() {
@@ -1208,9 +1244,8 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(200));
             }
         });
-        let (s, _) = l.accept().unwrap();
         let start = std::time::Instant::now();
-        assert!(read_head(&s).is_err());
+        assert!(read_head(&mut s).is_err());
         assert!(start.elapsed() < READ_TIMEOUT + Duration::from_secs(2));
         drop(s);
         t.join().unwrap();
@@ -1422,16 +1457,12 @@ mod tests {
     }
 
     fn head_of(raw: &'static [u8]) -> Head {
-        use std::net::TcpListener;
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
+        let (mut c, mut s) = conn_pair();
         let t = std::thread::spawn(move || {
-            let mut c = TcpStream::connect(addr).unwrap();
             c.write_all(raw).unwrap();
             std::thread::sleep(Duration::from_millis(200));
         });
-        let (s, _) = l.accept().unwrap();
-        let h = read_head(&s).unwrap();
+        let h = read_head(&mut s).unwrap();
         t.join().unwrap();
         h
     }
@@ -1493,16 +1524,14 @@ mod tests {
         assert!(route(&engine, "POST", "/history/deferrals")
             .0
             .starts_with("405"));
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
+        // The real handler over an in-process connection (no network; see conn_pair).
         let send = |extra: &str| -> String {
-            let mut c = TcpStream::connect(addr).unwrap();
+            let (mut c, s) = conn_pair();
             write!(
                 c,
                 "POST /persist HTTP/1.0\r\nHost: 127.0.0.1\r\n{extra}Content-Length: 0\r\n\r\n"
             )
             .unwrap();
-            let (s, _) = l.accept().unwrap();
             handle(s, &engine, false);
             let mut buf = String::new();
             c.read_to_string(&mut buf).unwrap();
