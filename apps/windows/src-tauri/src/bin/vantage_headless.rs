@@ -800,12 +800,23 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
         let engine = Arc::clone(&engine);
         let mut last_skip: &'static str = "";
         let mut warned_since: Option<i64> = None;
+        let mut last_err: Option<String> = None;
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(60));
             if let Err(e) = engine.persist() {
                 eprintln!("persist: {e}");
             }
-            match engine.record_history_if_due(now_epoch()) {
+            let tick = engine.record_history_if_due(now_epoch());
+            if let Err(e) = &tick {
+                // A failing tick (e.g. its deferral row cannot be written) repeats every
+                // 60 s: log each distinct error once until a tick succeeds.
+                if log_tick_error(&mut last_err, e) {
+                    eprintln!("score history: {e}");
+                }
+            } else {
+                last_err = None;
+            }
+            match tick {
                 Ok(HistoryWrite::Recorded {
                     trigger,
                     rows,
@@ -825,7 +836,7 @@ fn serve(o: &Opts, addr: &str) -> Result<(), String> {
                     }
                     last_skip = why;
                 }
-                Err(e) => eprintln!("score history: {e}"),
+                Err(_) => {}
             }
             if let Some(since) = defer_warning(
                 engine.history_deferred(),
@@ -1198,6 +1209,16 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         _ => Err(format!("not found: {path}")),
     })();
     to_http(result)
+}
+
+/// Rate limit for recorder tick errors: `true` (print) only when `e` differs from the
+/// last printed error since the last successful tick (the caller resets `last`).
+fn log_tick_error(last: &mut Option<String>, e: &str) -> bool {
+    if last.as_deref() == Some(e) {
+        return false;
+    }
+    *last = Some(e.to_string());
+    true
 }
 
 /// `GET /history/deferrals` without `limit=`.
@@ -1702,6 +1723,23 @@ mod tests {
             let e = path(bad).unwrap_err();
             assert!(e.contains(why), "{bad:?}: {e}");
         }
+    }
+
+    #[test]
+    fn tick_errors_are_logged_once_per_distinct_error() {
+        let mut last = None;
+        assert!(log_tick_error(&mut last, "a"));
+        assert!(
+            !log_tick_error(&mut last, "a"),
+            "same error every 60 s: once"
+        );
+        assert!(!log_tick_error(&mut last, "a"));
+        assert!(
+            log_tick_error(&mut last, "b"),
+            "a different error is logged"
+        );
+        last = None; // a successful tick resets
+        assert!(log_tick_error(&mut last, "b"));
     }
 
     #[test]

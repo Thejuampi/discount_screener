@@ -3024,6 +3024,47 @@ mod history_tick_tests {
         assert!(defs(&s5).is_empty());
     }
 
+    /// Fault injection: every INSERT into `table` aborts.
+    fn fail_inserts(s: &ScoreHistoryStore, table: &str) {
+        s.exec_for_test(&format!(
+            "CREATE TRIGGER inject_fail_{table} BEFORE INSERT ON {table} \
+             BEGIN SELECT RAISE(ABORT, 'injected {table} failure'); END;"
+        ));
+    }
+
+    fn heal(s: &ScoreHistoryStore, table: &str) {
+        s.exec_for_test(&format!("DROP TRIGGER inject_fail_{table};"));
+    }
+
+    #[test]
+    fn a_failed_deferral_write_is_an_error_not_a_silent_skip() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "run_deferrals");
+        // Due, but the last full pass is old: a freshness deferral whose row cannot be
+        // written. The tick must report the error (the serve loop logs it, rate-limited).
+        let t = NOW + H6 + 60;
+        f.pass.set(Some(t - 3600));
+        let e = record_history_tick_fresh(
+            &f,
+            &s,
+            &Mutex::new(None),
+            &TickClock::new(1800),
+            H6,
+            false,
+            t,
+        )
+        .unwrap_err();
+        assert!(e.contains("injected run_deferrals failure"), "{e}");
+        assert!(defs(&s).is_empty());
+        heal(&s, "run_deferrals");
+        let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t + 10);
+        assert_eq!(w, HistoryWrite::Skipped("waiting for a fresh quote pass"));
+        assert_eq!(defs(&s).len(), 1);
+    }
+
     #[test]
     fn deferral_record_survives_a_restart() {
         use crate::score_history::TickClock;

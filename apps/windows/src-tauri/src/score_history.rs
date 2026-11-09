@@ -2622,6 +2622,13 @@ impl ScoreHistoryStore {
         insert_deferral(&c, d).map_err(err)
     }
 
+    /// Test-only raw SQL on the store's connection (fault injection, e.g. a trigger
+    /// that makes one table's INSERT fail).
+    #[cfg(test)]
+    pub(crate) fn exec_for_test(&self, sql: &str) {
+        self.conn.lock().unwrap().execute_batch(sql).unwrap();
+    }
+
     /// Startup backfill of the downtime gap: one `process_down` row per scheduled slot
     /// that came due while the process was down ([`process_down_plan`]), plus at most
     /// one summary row for slots older than [`PROCESS_DOWN_DETAIL_DAYS`]. One
