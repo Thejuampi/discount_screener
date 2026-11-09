@@ -42,10 +42,13 @@ pub const SCORE_RULE_VERSION: &str = "V3";
 /// if another migration lands on main first (v3 is #68's score_shadow).
 pub const EVALUATIONS_MIGRATION: i64 = 4;
 /// Migration that adds per-row quote freshness (`quote_ts`, `quote_age_secs`, `stale`)
-/// and the append-only `run_annotations` and `run_deferrals` tables.
+/// and the append-only `run_annotations` table. Frozen as shipped at 3c2e275.
 pub const QUOTE_FRESHNESS_MIGRATION: i64 = 5;
+/// Migration that adds the append-only `run_deferrals` table (+ triggers) and the
+/// `score_runs (profile, model, captured_at)` index.
+pub const RUN_DEFERRALS_MIGRATION: i64 = 6;
 /// Highest score-history migration this binary knows.
-pub const SCHEMA_VERSION: i64 = QUOTE_FRESHNESS_MIGRATION;
+pub const SCHEMA_VERSION: i64 = RUN_DEFERRALS_MIGRATION;
 /// A row whose quote is older than this at record time is stored with `stale = 1`
 /// (kept, but excluded from valid history, decision changes and the shadow report).
 pub const DEFAULT_QUOTE_STALE_SECS: i64 = 1800;
@@ -251,6 +254,7 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
     ),
     (EVALUATIONS_MIGRATION, EVALUATIONS_DDL),
     (QUOTE_FRESHNESS_MIGRATION, QUOTE_FRESHNESS_DDL),
+    (RUN_DEFERRALS_MIGRATION, RUN_DEFERRALS_DDL),
 ];
 
 /// Quote freshness per stored row plus operator annotations (additive only).
@@ -260,14 +264,8 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 /// - `score_history.stale`: 1 when the age exceeded the threshold; such rows are stored but
 ///   excluded from valid history, decision changes and the shadow report.
 /// - `run_annotations`: append-only notes on a run (e.g. "stale quotes after wake").
-/// - `run_deferrals`: one append-only row per scheduled run slot that did NOT record
-///   (deferred by the freshness gate or skipped by the scheduler), keyed by
-///   `(profile, slot)` so retry ticks inside one slot add nothing. `slot` is the
-///   scheduled due time ([`due_slot`]); `reason` is a [`SkipReason::code`];
-///   stale share = `stale_count / total` (derived, `total = 0` → none).
-///   `process_down` rows are written at startup for slots missed while the process was
-///   down ([`process_down_plan`]); a summary row beyond [`PROCESS_DOWN_DETAIL_DAYS`]
-///   carries `covers` (slots it stands for) and `covers_from` (earliest of them).
+///
+/// FROZEN: byte-identical to v5 as shipped at 3c2e275 (a test pins its hash).
 const QUOTE_FRESHNESS_DDL: &str = "
 ALTER TABLE score_history ADD COLUMN quote_ts INTEGER;
 ALTER TABLE score_history ADD COLUMN quote_age_secs INTEGER
@@ -287,6 +285,22 @@ CREATE TRIGGER IF NOT EXISTS run_annotations_no_overwrite BEFORE INSERT ON run_a
 WHEN EXISTS (SELECT 1 FROM run_annotations WHERE run_id = NEW.run_id
              AND created_at = NEW.created_at AND reason = NEW.reason)
 BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+";
+
+/// v6 (everything about deferred / skipped slots lives here, nowhere else):
+/// - `run_deferrals`: one append-only row per scheduled run slot that did NOT record
+///   (deferred by the freshness gate, skipped by the scheduler, missed while the process
+///   was down, or failed with an error), keyed by `(profile, slot)` so retry ticks inside
+///   one slot add nothing. `slot` is the scheduled due time ([`due_slot`]); `reason` is a
+///   [`SkipReason::code`]; stale share = `stale_count / total` (derived, `total = 0` →
+///   none). There is no `model` column: the recorder schedules one model
+///   (`HISTORY_MODEL`) per profile, so a slot is per profile.
+///   `process_down` rows are written at startup for slots missed while the process was
+///   down ([`process_down_plan`]); a summary row beyond [`PROCESS_DOWN_DETAIL_DAYS`]
+///   carries `covers` (slots it stands for) and `covers_from` (earliest of them).
+/// - `score_runs_profile_model_at`: index for "first run of profile+model at or after a
+///   slot" (`next_run` on the deferrals read path) and `last_run_at`.
+const RUN_DEFERRALS_DDL: &str = "
 CREATE TABLE IF NOT EXISTS run_deferrals (
     profile      TEXT NOT NULL,
     slot         INTEGER NOT NULL,
@@ -295,7 +309,7 @@ CREATE TABLE IF NOT EXISTS run_deferrals (
     reason       TEXT NOT NULL CHECK (reason IN ('initial_pass_in_progress',
                  'year_charts_pending', 'no_live_ranking', 'close_snapshot_imminent',
                  'clock_jump', 'no_fresh_full_pass', 'stale_share_too_high',
-                 'process_down')),
+                 'process_down', 'record_failed')),
     stale_count  INTEGER NOT NULL CHECK (stale_count >= 0),
     total        INTEGER NOT NULL CHECK (total >= stale_count),
     covers       INTEGER NOT NULL DEFAULT 1 CHECK (covers >= 1),
@@ -311,6 +325,8 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS run_deferrals_no_overwrite BEFORE INSERT ON run_deferrals
 WHEN EXISTS (SELECT 1 FROM run_deferrals WHERE profile = NEW.profile AND slot = NEW.slot)
 BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+CREATE INDEX IF NOT EXISTS score_runs_profile_model_at
+    ON score_runs (profile, model, captured_at);
 ";
 
 /// Why a scheduled run slot did not record (`run_deferrals.reason`). One distinct code
@@ -2662,27 +2678,43 @@ impl ScoreHistoryStore {
         })
     }
 
-    /// Deferred / skipped slots, newest first (`profile` filter, `slot >= since`), each
-    /// with the first run recorded at or after its slot (`None` = still a gap).
+    /// Deferred / skipped slots, newest first: `profile` filter, `since <= slot <
+    /// before` (page backwards with `before` = the oldest slot of the previous page),
+    /// at most `limit` rows. Each comes with `next_run`: the first run of the same
+    /// profile AND `model` captured at or after the slot (`None` = no run since: the
+    /// gap is still open). `next_run` is computed only for the `limit` rows returned
+    /// (CTE first), on the `score_runs (profile, model, captured_at)` index.
     pub fn deferrals(
         &self,
         profile: Option<&str>,
+        model: &str,
         since: Option<i64>,
+        before: Option<i64>,
         limit: usize,
     ) -> Result<Vec<(RunDeferral, Option<String>)>, String> {
         let c = self.conn.lock().map_err(|_| "lock")?;
         let mut st = c
             .prepare(
-                "SELECT d.profile, d.slot, d.trigger, d.observed_at, d.reason, d.stale_count, \
-                 d.total, d.covers, d.covers_from, (SELECT r.run_id FROM score_runs r WHERE r.profile = d.profile \
-                 AND r.captured_at >= d.slot ORDER BY r.captured_at ASC, r.run_id ASC LIMIT 1) \
-                 FROM run_deferrals d WHERE (?1 IS NULL OR d.profile = ?1) AND d.slot >= ?2 \
-                 ORDER BY d.slot DESC, d.profile ASC LIMIT ?3",
+                "WITH d AS (SELECT profile, slot, trigger, observed_at, reason, stale_count, \
+                 total, covers, covers_from FROM run_deferrals \
+                 WHERE (?1 IS NULL OR profile = ?1) AND slot >= ?2 AND slot < ?3 \
+                 ORDER BY slot DESC, profile ASC LIMIT ?4) \
+                 SELECT d.profile, d.slot, d.trigger, d.observed_at, d.reason, d.stale_count, \
+                 d.total, d.covers, d.covers_from, (SELECT r.run_id FROM score_runs r \
+                 WHERE r.profile = d.profile AND r.model = ?5 AND r.captured_at >= d.slot \
+                 ORDER BY r.captured_at ASC, r.run_id ASC LIMIT 1) \
+                 FROM d ORDER BY d.slot DESC, d.profile ASC",
             )
             .map_err(err)?;
         let out = st
             .query_map(
-                params![profile, since.unwrap_or(i64::MIN), limit as i64],
+                params![
+                    profile,
+                    since.unwrap_or(i64::MIN),
+                    before.unwrap_or(i64::MAX),
+                    limit as i64,
+                    model
+                ],
                 |r| {
                     Ok((
                         RunDeferral {
@@ -2797,6 +2829,23 @@ impl ScoreHistoryStore {
                 table_count(&c, "score_history"),
                 table_count(&c, "score_shadow"),
             );
+            // Every history table must exist in the source (a store opened with an older
+            // migration set, or damaged): say which, instead of an SQL syntax error.
+            let missing: Vec<&str> = HISTORY_TABLES
+                .iter()
+                .copied()
+                .filter(|t| !has_table(&c, "main", t))
+                .collect();
+            if !missing.is_empty() {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!(
+                    "export: history table(s) {} missing from the store (schema v{}, need v{}); \
+                     nothing exported",
+                    missing.join(", "),
+                    current_version(&c).unwrap_or(0),
+                    SCHEMA_VERSION
+                ));
+            }
             c.execute("ATTACH DATABASE ?1 AS bk", params![tmp.to_string_lossy()])
                 .map_err(err)?;
             // Incremental `score_inputs`: payload bytes live under
@@ -2933,6 +2982,15 @@ fn current_version(c: &Connection) -> Result<i64, String> {
 
 /// Applies pending additive migrations, each with its log row in one `BEGIN IMMEDIATE`.
 /// A non-empty file is backed up first (whole file, `VACUUM INTO`, gzip, verified).
+/// A store at v5 that already has `run_deferrals` was migrated by a pre-release #74
+/// build (271df3b-era v5, before `run_deferrals` moved to v6). Its v5 is not the
+/// released v5, so it is refused untouched: no migration, no backup, no write.
+pub const PRE_RELEASE_V5_ERROR: &str = "score history store is at schema v5 but already has a \
+run_deferrals table: it was migrated by a pre-release build of PR #74 (271df3b-era v5), \
+whose v5 differs from the released v5. Refusing to open or migrate it; nothing was changed. \
+Move this history.sqlite aside and restore the pre-migration backup \
+(history.pre-score-history-v4-to-v5-*.sqlite.gz), then start again.";
+
 fn migrate(
     c: &Connection,
     backup_dir: Option<&Path>,
@@ -2940,6 +2998,9 @@ fn migrate(
 ) -> Result<Option<PathBuf>, String> {
     let has_log = has_table(c, "main", "score_history_migrations");
     let current = if has_log { current_version(c)? } else { 0 };
+    if current == QUOTE_FRESHNESS_MIGRATION && has_table(c, "main", "run_deferrals") {
+        return Err(PRE_RELEASE_V5_ERROR.into());
+    }
     let pending: Vec<&(i64, &str)> = migrations.iter().filter(|(v, _)| *v > current).collect();
     if pending.is_empty() {
         if !has_log {
@@ -3125,7 +3186,7 @@ const LATER_TABLES: &[(i64, &str)] = &[
     (EVALUATIONS_MIGRATION, "score_evaluations"),
     (EVALUATIONS_MIGRATION, "score_run_stats"),
     (QUOTE_FRESHNESS_MIGRATION, "run_annotations"),
-    (QUOTE_FRESHNESS_MIGRATION, "run_deferrals"),
+    (RUN_DEFERRALS_MIGRATION, "run_deferrals"),
 ];
 
 /// Columns introduced by migrations after v1, as (version, table, column). An older
@@ -4678,6 +4739,12 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             b.execute_batch(&tables).unwrap();
+        }
+        if version >= RUN_DEFERRALS_MIGRATION {
+            let t = RUN_DEFERRALS_DDL;
+            let i = t.find("CREATE TABLE").unwrap();
+            b.execute_batch(&t[i..i + t[i..].find(");").unwrap() + 2])
+                .unwrap();
         }
         let has = |t: &str, c: &str| {
             b.query_row(
@@ -6857,7 +6924,7 @@ mod tests {
         assert!(s
             .record_deferral(&deferral("dow", 100, SkipReason::ClockJump))
             .unwrap());
-        let d = s.deferrals(Some("sp500"), None, 10).unwrap();
+        let d = s.deferrals(Some("sp500"), "v3", None, None, 10).unwrap();
         assert_eq!(
             d.iter()
                 .map(|(x, _)| (x.slot, x.reason.as_str(), x.observed_at))
@@ -6866,8 +6933,11 @@ mod tests {
             "newest first; the first record of slot 100 is kept unchanged"
         );
         assert_eq!(d[0].0.stale_share(), Some(0.15));
-        assert_eq!(s.deferrals(None, Some(150), 10).unwrap().len(), 1);
-        assert_eq!(s.deferrals(None, None, 10).unwrap().len(), 3);
+        assert_eq!(
+            s.deferrals(None, "v3", Some(150), None, 10).unwrap().len(),
+            1
+        );
+        assert_eq!(s.deferrals(None, "v3", None, None, 10).unwrap().len(), 3);
     }
 
     #[test]
@@ -6942,7 +7012,7 @@ mod tests {
                 .unwrap_err();
             assert!(e.contains("triggers missing") && e.contains(t), "{e}");
             assert!(
-                s.deferrals(None, None, 10).unwrap().is_empty(),
+                s.deferrals(None, "v3", None, None, 10).unwrap().is_empty(),
                 "nothing written"
             );
         }
@@ -6967,7 +7037,7 @@ mod tests {
         // Restart: reopen re-runs init + migrations; the rows are still there.
         let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
-        let d = s.deferrals(None, None, 10).unwrap();
+        let d = s.deferrals(None, "v3", None, None, 10).unwrap();
         assert_eq!(d.len(), 2);
         // Slot 50 was later recorded (run at 100); slot 500 is still a gap.
         assert_eq!(
@@ -7003,7 +7073,7 @@ mod tests {
             0
         );
         let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
-        assert_eq!(t.deferrals(None, None, 10).unwrap(), d);
+        assert_eq!(t.deferrals(None, "v3", None, None, 10).unwrap(), d);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7100,7 +7170,7 @@ mod tests {
 
     fn pd_rows(s: &ScoreHistoryStore) -> Vec<RunDeferral> {
         let mut v: Vec<RunDeferral> = s
-            .deferrals(Some("sp500"), None, 100_000)
+            .deferrals(Some("sp500"), "v3", None, None, 100_000)
             .unwrap()
             .into_iter()
             .map(|(d, _)| d)
@@ -7197,7 +7267,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert!(s.deferrals(None, None, 10).unwrap().is_empty());
+        assert!(s.deferrals(None, "v3", None, None, 10).unwrap().is_empty());
         assert!(process_down_plan(None, None, HR, SAT_10).is_empty());
         // Disabled history (interval <= 0) never backfills.
         assert!(process_down_plan(Some(SAT_10), None, 0, SAT_10 + 9 * HR).is_empty());
@@ -7424,12 +7494,12 @@ mod tests {
             .backfill_process_down("sp500", "v3", 6 * HR, TUE_00)
             .unwrap();
         assert!(n > 10, "{n}");
-        let before = s.deferrals(None, None, 10_000).unwrap();
+        let before = s.deferrals(None, "v3", None, None, 10_000).unwrap();
         assert_eq!(before.len(), n);
         assert_eq!(before.iter().filter(|(d, _)| d.covers > 1).count(), 1);
         drop(s);
         let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
-        assert_eq!(s.deferrals(None, None, 10_000).unwrap(), before);
+        assert_eq!(s.deferrals(None, "v3", None, None, 10_000).unwrap(), before);
         assert_eq!(
             s.backfill_process_down("sp500", "v3", 6 * HR, TUE_00)
                 .unwrap(),
@@ -7454,7 +7524,7 @@ mod tests {
             0
         );
         let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
-        assert_eq!(t.deferrals(None, None, 10_000).unwrap(), before);
+        assert_eq!(t.deferrals(None, "v3", None, None, 10_000).unwrap(), before);
         // The restored rows stay append-only.
         let c = t.conn.lock().unwrap();
         let t_ = "run_deferrals";
@@ -7467,5 +7537,387 @@ mod tests {
         assert!(c.execute(&format!("{} FROM {t_}", "DELETE"), []).is_err());
         drop(c);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- v6: run_deferrals in its own migration; v5 frozen at 3c2e275 ----
+
+    /// v5 exactly as released at 3c2e275 (sha256 of the SQL text).
+    #[test]
+    fn v5_ddl_is_frozen_at_3c2e275() {
+        assert_eq!(
+            sha256_hex(QUOTE_FRESHNESS_DDL.as_bytes()),
+            "e969bc7afa33cbb702e191bf90597120ae6dbee2119a041109cb9129ce791cdb"
+        );
+        assert_eq!(
+            MIGRATIONS.iter().map(|m| m.0).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(MIGRATIONS[4], (5, QUOTE_FRESHNESS_DDL));
+        assert_eq!(MIGRATIONS[5], (6, RUN_DEFERRALS_DDL));
+        assert!(!QUOTE_FRESHNESS_DDL.contains("run_deferrals"));
+        assert_eq!(SCHEMA_VERSION, 6);
+    }
+
+    /// Model the binary that only knew `MIGRATIONS[..n]`: it required only its own
+    /// triggers and its probe covered only its own tables.
+    fn as_old_writer(s: &mut ScoreHistoryStore, n: usize) {
+        let sql: String = MIGRATIONS[..n].iter().map(|m| m.1).collect();
+        s.missing_triggers
+            .retain(|t| sql.contains(&format!("NOT EXISTS {t} ")));
+        assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        *s.selfcheck.lock().unwrap() = SelfCheck::Passed;
+    }
+
+    fn migrations_logged(p: &Path) -> Vec<(i64, Option<String>)> {
+        let c = Connection::open(p).unwrap();
+        let mut st = c
+            .prepare("SELECT version, backup_path FROM score_history_migrations ORDER BY version")
+            .unwrap();
+        let v = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        v
+    }
+
+    fn assert_v6_works(s: &ScoreHistoryStore, root: &Path, at: i64) {
+        assert_eq!(s.schema_version().unwrap(), 6);
+        assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        s.record_run(&meta(at), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        assert!(s
+            .record_deferral(&deferral("sp500", at + 100, SkipReason::ClockJump))
+            .unwrap());
+        let bk = root.join(format!("exp-{at}.sqlite.gz"));
+        s.export_to(&bk).unwrap();
+        let pl = plain(&bk).unwrap();
+        let b = Connection::open(&pl.path).unwrap();
+        assert!(table_count(&b, "run_deferrals") >= 1);
+        drop(b);
+        let c = s.conn.lock().unwrap();
+        let idx: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'score_runs_profile_model_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "v6 index");
+    }
+
+    #[test]
+    fn v4_store_migrates_to_v6_in_one_run_with_a_backup() {
+        let root = tmpdir("v4v6");
+        let (p, bdir) = (root.join("history.sqlite"), root.join("bk"));
+        {
+            let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..4]).unwrap();
+            assert_eq!(s.schema_version().unwrap(), 4);
+            as_old_writer(&mut s, 4);
+            s.record_run(&meta(100), &[row("ADSK", "Act", 1, 1, 1, 1)])
+                .unwrap();
+        }
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let b = s.migration_backup.clone().expect("pre-migration backup");
+        let name = b.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.starts_with("history.pre-score-history-v4-to-v6-"),
+            "{name}"
+        );
+        verify_file(&b, false).unwrap();
+        let log = migrations_logged(&p);
+        assert_eq!(
+            log.iter().map(|x| x.0).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        let bp = Some(b.to_string_lossy().to_string());
+        assert_eq!(
+            (&log[4].1, &log[5].1),
+            (&bp, &bp),
+            "one backup for v5 and v6"
+        );
+        assert_eq!(s.counts().unwrap().0, 1, "the v4 run is kept");
+        assert_v6_works(&s, &root, 1_000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v0_store_migrates_to_v6() {
+        let root = tmpdir("v0v6");
+        let (p, bdir) = (root.join("history.sqlite"), root.join("bk"));
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        assert!(
+            s.migration_backup.is_none(),
+            "nothing to back up on an empty file"
+        );
+        assert_eq!(
+            migrations_logged(&p)
+                .iter()
+                .map(|x| x.0)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert_v6_works(&s, &root, 2_000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn released_v5_store_migrates_to_v6_then_records_and_exports() {
+        let root = tmpdir("v5v6");
+        let (p, bdir) = (root.join("history.sqlite"), root.join("bk"));
+        {
+            // MIGRATIONS[..5] is 3c2e275's set (v5 frozen; see v5_ddl_is_frozen_at_3c2e275).
+            let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..5]).unwrap();
+            assert_eq!(s.schema_version().unwrap(), 5);
+            as_old_writer(&mut s, 5);
+            s.record_run(&meta(100), &[row("ADSK", "Act", 1, 1, 1, 1)])
+                .unwrap();
+            s.annotate_run(&meta(100).run_id(), "note", 150).unwrap();
+            // An export from a v5 store says what is missing (no SQL syntax error).
+            let e = s.export_to(&root.join("v5.sqlite.gz")).unwrap_err();
+            assert!(
+                e.contains("run_deferrals") && e.contains("missing") && e.contains("need v6"),
+                "{e}"
+            );
+            assert!(!root.join("v5.sqlite.gz").exists());
+        }
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let b = s.migration_backup.clone().expect("pre-migration backup");
+        assert!(b
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("history.pre-score-history-v5-to-v6-"));
+        assert_eq!(s.annotations(&meta(100).run_id()).unwrap().len(), 1);
+        assert_v6_works(&s, &root, 3_000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `run_deferrals` as a pre-release #74 build (271df3b) created it inside v5.
+    const PRE_RELEASE_V5_RUN_DEFERRALS: &str = "
+CREATE TABLE IF NOT EXISTS run_deferrals (
+    profile      TEXT NOT NULL,
+    slot         INTEGER NOT NULL,
+    trigger      TEXT NOT NULL CHECK (trigger IN ('interval', 'close')),
+    observed_at  INTEGER NOT NULL,
+    reason       TEXT NOT NULL CHECK (reason IN ('initial_pass_in_progress',
+                 'year_charts_pending', 'no_live_ranking', 'close_snapshot_imminent',
+                 'clock_jump', 'no_fresh_full_pass', 'stale_share_too_high')),
+    stale_count  INTEGER NOT NULL CHECK (stale_count >= 0),
+    total        INTEGER NOT NULL CHECK (total >= stale_count),
+    PRIMARY KEY (profile, slot)
+);
+CREATE TRIGGER IF NOT EXISTS run_deferrals_no_delete BEFORE DELETE ON run_deferrals
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+";
+
+    #[test]
+    fn pre_release_v5_store_with_run_deferrals_is_refused_untouched() {
+        let root = tmpdir("v5pre");
+        let (p, bdir) = (root.join("history.sqlite"), root.join("bk"));
+        {
+            let mut s = ScoreHistoryStore::open_with(&p, None, &MIGRATIONS[..5]).unwrap();
+            as_old_writer(&mut s, 5);
+            s.record_run(&meta(100), &[row("ADSK", "Act", 1, 1, 1, 1)])
+                .unwrap();
+            let c = s.conn.lock().unwrap();
+            c.execute_batch(PRE_RELEASE_V5_RUN_DEFERRALS).unwrap();
+            c.execute(
+                "INSERT INTO run_deferrals VALUES ('sp500', 50, 'interval', 60, 'clock_jump', 0, 0)",
+                [],
+            )
+            .unwrap();
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        }
+        let before = std::fs::read(&p).unwrap();
+        for _ in 0..2 {
+            let e = ScoreHistoryStore::open(&p, Some(&bdir))
+                .err()
+                .expect("refused");
+            assert_eq!(e, PRE_RELEASE_V5_ERROR);
+        }
+        assert!(
+            PRE_RELEASE_V5_ERROR.contains("schema v5")
+                && PRE_RELEASE_V5_ERROR.contains("run_deferrals")
+                && PRE_RELEASE_V5_ERROR.contains("nothing was changed")
+        );
+        assert!(!bdir.exists(), "no pre-migration backup written");
+        assert_eq!(std::fs::read(&p).unwrap(), before, "file untouched");
+        assert_eq!(
+            migrations_logged(&p).last().map(|x| x.0),
+            Some(5),
+            "still v5"
+        );
+        // The CLI annotate path refuses it too (it needs the current schema).
+        assert!(annotate_file(&p, &meta(100).run_id(), "x", 200).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deferrals_next_run_is_same_profile_and_model_and_since_before_filter() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        for slot in [50, 150, 250] {
+            assert!(s
+                .record_deferral(&deferral("sp500", slot, SkipReason::ClockJump))
+                .unwrap());
+        }
+        // A later run in ANOTHER profile, and one of ANOTHER model: neither closes the gap.
+        let mut other = meta(100);
+        other.profile = "nasdaq".into();
+        s.record_run(&other, &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        let mut v2 = meta(120);
+        v2.model = "v2".into();
+        s.record_run(&v2, &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        let next = |slot: i64| {
+            s.deferrals(Some("sp500"), "v3", None, None, 10)
+                .unwrap()
+                .into_iter()
+                .find(|(d, _)| d.slot == slot)
+                .unwrap()
+                .1
+        };
+        assert_eq!(
+            next(50),
+            None,
+            "other profile / other model is not a next run"
+        );
+        s.record_run(&meta(200), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(next(50), Some(meta(200).run_id()));
+        assert_eq!(next(150), Some(meta(200).run_id()));
+        assert_eq!(next(250), None);
+        // The v2 run is the next v2 run of slot 50 (model is a real filter, not ignored).
+        assert_eq!(
+            s.deferrals(Some("sp500"), "v2", None, None, 10).unwrap()[2].1,
+            Some(v2.run_id())
+        );
+        let slots = |since: Option<i64>, before: Option<i64>, limit: usize| {
+            s.deferrals(None, "v3", since, before, limit)
+                .unwrap()
+                .into_iter()
+                .map(|(d, _)| d.slot)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(slots(None, None, 10), [250, 150, 50]);
+        assert_eq!(slots(Some(150), None, 10), [250, 150], "since is inclusive");
+        assert_eq!(slots(Some(151), None, 10), [250]);
+        assert_eq!(slots(None, Some(250), 10), [150, 50], "before is exclusive");
+        assert_eq!(slots(None, None, 2), [250, 150]);
+        assert_eq!(slots(None, Some(150), 2), [50], "next page");
+    }
+
+    #[test]
+    fn restore_merges_deferrals_on_profile_and_slot() {
+        let root = tmpdir("defmerge");
+        let src = ScoreHistoryStore::open(&root.join("src.sqlite"), None).unwrap();
+        for slot in [50, 60] {
+            assert!(src
+                .record_deferral(&deferral("sp500", slot, SkipReason::ClockJump))
+                .unwrap());
+        }
+        let bk = root.join("m.sqlite.gz");
+        src.export_to(&bk).unwrap();
+        let data = root.join("d");
+        {
+            let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
+            // Overlapping (profile, slot) with different content, plus another profile.
+            let mut d = deferral("sp500", 50, SkipReason::StaleShareTooHigh);
+            d.observed_at = 999;
+            assert!(t.record_deferral(&d).unwrap());
+            assert!(t
+                .record_deferral(&deferral("nasdaq", 60, SkipReason::ClockJump))
+                .unwrap());
+        }
+        let r = restore(&bk, &data, &root.join("bk2")).unwrap();
+        assert_eq!(r.deferrals_added, 1, "only (sp500, 60) is new");
+        let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
+        let got: Vec<(String, i64, String)> = t
+            .deferrals(None, "v3", None, None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| (d.profile, d.slot, d.reason))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("nasdaq".into(), 60, "clock_jump".into()),
+                ("sp500".into(), 60, "clock_jump".into()),
+                ("sp500".into(), 50, "stale_share_too_high".into()),
+            ],
+            "existing row kept (first wins)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// m2 benchmark (ignored): 10k deferrals, 3k runs; the pre-fix query (correlated
+    /// subquery over every matching row before LIMIT, no index) vs the CTE + index.
+    #[test]
+    #[ignore]
+    fn bench_deferrals_read_path() {
+        const OLD: &str = "SELECT d.profile, d.slot, d.trigger, d.observed_at, d.reason, \
+             d.stale_count, d.total, (SELECT r.run_id FROM score_runs r WHERE r.profile = \
+             d.profile AND r.captured_at >= d.slot ORDER BY r.captured_at ASC, r.run_id ASC \
+             LIMIT 1) FROM run_deferrals d WHERE (?1 IS NULL OR d.profile = ?1) AND \
+             d.slot >= ?2 ORDER BY d.slot DESC, d.profile ASC LIMIT ?3";
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        {
+            let c = s.conn.lock().unwrap();
+            c.execute_batch("BEGIN").unwrap();
+            for k in 0..3_000i64 {
+                c.execute(
+                    "INSERT INTO score_runs (run_id, captured_at, profile, model, rule_version, \
+                     semantics, market_context, binary_version, trigger, symbols_total, \
+                     symbols_ranked) VALUES (?1, ?2, 'sp500', 'v3', 'r', 'android', 0, 't', \
+                     'interval', 1, 1)",
+                    params![format!("sp500-{}-v3", k * 21_600), k * 21_600],
+                )
+                .unwrap();
+            }
+            for k in 0..10_000i64 {
+                c.execute(
+                    "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
+                     stale_count, total) VALUES ('sp500', ?1, 'interval', ?1, 'clock_jump', 0, 0)",
+                    params![k * 6_480 + 1],
+                )
+                .unwrap();
+            }
+            c.execute_batch("COMMIT").unwrap();
+        }
+        let time = |label: &str, f: &dyn Fn() -> usize| {
+            let t = std::time::Instant::now();
+            let n = f();
+            println!(
+                "BENCH {label}: {n} rows in {:.1} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        };
+        let old = || {
+            let c = s.conn.lock().unwrap();
+            let mut st = c.prepare(OLD).unwrap();
+            let n = st
+                .query_map(params![None::<String>, i64::MIN, 100], |r| {
+                    r.get::<_, Option<String>>(7)
+                })
+                .unwrap()
+                .count();
+            n
+        };
+        let new = || {
+            s.deferrals(Some("sp500"), "v3", None, None, 100)
+                .unwrap()
+                .len()
+        };
+        time("before: old query, with v6 index", &old);
+        time("after: CTE + model filter, with v6 index", &new);
+        s.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP INDEX score_runs_profile_model_at")
+            .unwrap();
+        time("before: old query, no index (271df3b)", &old);
+        time("after: CTE, no index", &new);
     }
 }

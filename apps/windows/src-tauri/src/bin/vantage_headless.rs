@@ -54,11 +54,14 @@ fn main() {
 struct Opts {
     positional: Vec<String>,
     flags: HashMap<String, String>,
+    /// Value flags given without a value (`--limit` last, or followed by `--x`).
+    missing: Vec<String>,
 }
 
 fn parse_opts(args: &[String]) -> Opts {
     let mut positional = Vec::new();
     let mut flags = HashMap::new();
+    let mut missing = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -80,6 +83,8 @@ fn parse_opts(args: &[String]) -> Opts {
             } else if i + 1 < args.len() && !args[i + 1].starts_with("--") {
                 flags.insert(name.to_string(), args[i + 1].clone());
                 i += 1;
+            } else {
+                missing.push(name.to_string());
             }
         } else if a == "-h" {
             flags.insert("help".into(), "1".into());
@@ -88,7 +93,51 @@ fn parse_opts(args: &[String]) -> Opts {
         }
         i += 1;
     }
-    Opts { positional, flags }
+    Opts {
+        positional,
+        flags,
+        missing,
+    }
+}
+
+/// `history-deferrals` flags -> `GET /history/deferrals?...` (every given flag is
+/// forwarded; unknown flags and value flags without a value are refused).
+fn deferrals_path(o: &Opts) -> Result<String, String> {
+    const KEYS: [&str; 4] = ["profile", "since", "before", "limit"];
+    if let Some(m) = o.missing.first() {
+        return Err(format!("history-deferrals: --{m} needs a value"));
+    }
+    if let Some(k) = o
+        .flags
+        .keys()
+        .find(|k| !KEYS.contains(&k.as_str()) && k.as_str() != "addr")
+    {
+        return Err(format!(
+            "history-deferrals: unknown flag --{k} (use --profile, --since, --before, --limit)"
+        ));
+    }
+    if o.positional.len() > 1 {
+        return Err(format!(
+            "history-deferrals: unexpected argument {}",
+            o.positional[1]
+        ));
+    }
+    let mut q = Vec::new();
+    for k in KEYS {
+        if let Some(v) = o.flags.get(k) {
+            if k != "profile" && v.parse::<i64>().is_err() {
+                return Err(format!(
+                    "history-deferrals: --{k} must be an integer, got {v}"
+                ));
+            }
+            q.push(format!("{k}={}", pct(v)));
+        }
+    }
+    Ok(if q.is_empty() {
+        "/history/deferrals".into()
+    } else {
+        format!("/history/deferrals?{}", q.join("&"))
+    })
 }
 
 fn usage() -> &'static str {
@@ -107,7 +156,7 @@ history TICKER [--days N] [--changes] [--profile P] [--tz IANA] [--json]\n\
      history-backup --data-dir DIR [--history-backup-dir B] [--verify]   (verified backup now; --verify checks all)\n\
      history-restore FILE --data-dir DIR [--history-backup-dir B]   (append-only merge; refused while serve runs)\n\
      history-annotate RUN_ID --reason TEXT [--data-dir DIR]   (append-only run note; CLI-only, writes the store file, OK while serve runs)\n\
-     history-deferrals [--profile P] [--since EPOCH] [--limit N]   (read-only: scheduled runs that were deferred/skipped, via GET /history/deferrals)\n\
+     history-deferrals [--profile P] [--since EPOCH] [--before EPOCH] [--limit N]   (read-only: scheduled slots that did not record, newest first, via GET /history/deferrals; page back with --before = oldest slot shown)\n\
      history-shadow-report --data-dir DIR [--profile P] [--min-n N] [--json]   (V3.1 shadow: demoted vs kept, 5/20/60d)\n\
 serve:  --history-interval-hours H (default 6; 0 disables score history)\n\
      \x20       --history-backup-dir B (default $VANTAGE_HISTORY_BACKUP_DIR, else $XDG_DATA_HOME/vantage/backups\n\
@@ -333,16 +382,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "history-deferrals" => {
             // Read-only: scheduled slots that did not record (`run_deferrals`).
-            let mut path = "/history/deferrals?".to_string();
-            for k in ["profile", "since", "limit"] {
-                if let Some(v) = o.flags.get(k) {
-                    path.push_str(&format!("{k}={}&", pct(v)));
-                }
-            }
-            println!(
-                "{}",
-                http_req(&addr, "GET", path.trim_end_matches(['&', '?']))?
-            );
+            let path = deferrals_path(&o)?;
+            println!("{}", http_req(&addr, "GET", &path)?);
             Ok(())
         }
         "history-annotate" => {
@@ -1136,12 +1177,19 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
                         .map_err(|_| "bad since (epoch seconds)".to_string())
                 })
                 .transpose()?;
+            let before = q
+                .get("before")
+                .map(|v| {
+                    v.parse::<i64>()
+                        .map_err(|_| "bad before (epoch seconds)".to_string())
+                })
+                .transpose()?;
             let limit = q
                 .get("limit")
                 .map(|v| v.parse::<usize>().map_err(|_| "bad limit".to_string()))
                 .transpose()?
-                .unwrap_or(100);
-            engine.deferrals(profile.as_deref(), since, limit)
+                .unwrap_or(DEFERRALS_DEFAULT_LIMIT);
+            engine.deferrals(profile.as_deref(), since, before, limit)
         }
         "/history/annotations" => {
             let run = pct_decode(q.get("run").ok_or("annotations needs run=")?)?;
@@ -1151,6 +1199,9 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
     })();
     to_http(result)
 }
+
+/// `GET /history/deferrals` without `limit=`.
+const DEFERRALS_DEFAULT_LIMIT: usize = 100;
 
 fn to_http(result: Result<serde_json::Value, String>) -> (&'static str, String) {
     match result {
@@ -1544,6 +1595,113 @@ mod tests {
         assert!(send("X-Vantage-Cli: 1\r\n").starts_with("HTTP/1.0 200"));
         drop(engine);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deferrals_route_default_limit_max_limit_and_paging() {
+        use discount_screener_windows_lib::headless::{EngineConfig, HeadlessEngine};
+        use discount_screener_windows_lib::score_history::{RunDeferral, ScoreHistoryStore};
+        let root = std::env::temp_dir().join(format!("vh-defr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = HeadlessEngine::start(EngineConfig {
+            data_dir: root.join("data"),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: 6 * 3600,
+            history_backup_dir: None,
+            no_feed: true,
+            quote_stale_secs: 1800,
+            clock_jump_secs: 300,
+            max_stale_share: 0.10,
+        })
+        .unwrap();
+        let s = ScoreHistoryStore::open(&root.join("data").join("history.sqlite"), None).unwrap();
+        for slot in 1..=150 {
+            assert!(s
+                .record_deferral(&RunDeferral {
+                    profile: "sp500".into(),
+                    slot,
+                    trigger: "interval".into(),
+                    observed_at: slot,
+                    reason: "clock_jump".into(),
+                    stale_count: 0,
+                    total: 0,
+                    covers: 1,
+                    covers_from: None,
+                })
+                .unwrap());
+        }
+        let slots = |target: &str| -> Vec<i64> {
+            let (st, body) = route(&engine, "GET", target);
+            assert!(st.starts_with("200"), "{target}: {st} {body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            v["deferrals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["slot"].as_i64().unwrap())
+                .collect()
+        };
+        let all = slots("/history/deferrals");
+        assert_eq!(all.len(), DEFERRALS_DEFAULT_LIMIT);
+        assert_eq!(DEFERRALS_DEFAULT_LIMIT, 100);
+        assert_eq!((all[0], all[99]), (150, 51), "newest first");
+        assert_eq!(slots("/history/deferrals?limit=10000").len(), 150);
+        let (st, body) = route(&engine, "GET", "/history/deferrals?limit=10001");
+        assert!(st.starts_with("400"), "{st} {body}");
+        assert_eq!(slots("/history/deferrals?since=140").len(), 11);
+        // Page backwards: before = the oldest slot of the previous page.
+        let page2 = slots("/history/deferrals?before=51");
+        assert_eq!((page2.len(), page2[0], *page2.last().unwrap()), (50, 50, 1));
+        assert!(!route(&engine, "GET", "/history/deferrals?before=x")
+            .0
+            .starts_with("200"));
+        drop(s);
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn history_deferrals_cli_builds_the_query_and_rejects_bad_flags() {
+        let path = |a: &[&str]| {
+            let args: Vec<String> = std::iter::once("history-deferrals")
+                .chain(a.iter().copied())
+                .map(String::from)
+                .collect();
+            deferrals_path(&parse_opts(&args))
+        };
+        assert_eq!(path(&[]).unwrap(), "/history/deferrals");
+        assert_eq!(
+            path(&[
+                "--profile",
+                "sp500",
+                "--since",
+                "5",
+                "--before",
+                "9",
+                "--limit",
+                "7"
+            ])
+            .unwrap(),
+            "/history/deferrals?profile=sp500&since=5&before=9&limit=7"
+        );
+        assert_eq!(
+            path(&["--limit=3", "--addr", "127.0.0.1:1"]).unwrap(),
+            "/history/deferrals?limit=3"
+        );
+        for (bad, why) in [
+            (&["--limit"][..], "needs a value"),
+            (&["--limit", "--since", "5"][..], "needs a value"),
+            (&["--limt", "5"][..], "unknown flag"),
+            (&["--json"][..], "unknown flag"),
+            (&["--limit", "x"][..], "integer"),
+            (&["extra"][..], "unexpected argument"),
+        ] {
+            let e = path(bad).unwrap_err();
+            assert!(e.contains(why), "{bad:?}: {e}");
+        }
     }
 
     #[test]

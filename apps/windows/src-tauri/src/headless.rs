@@ -1451,11 +1451,14 @@ impl HeadlessEngine {
     }
 
     /// Deferred / skipped scheduled slots (`run_deferrals`), newest first, as JSON
-    /// (read-only). `recorded_run`: first run at or after the slot (`null` = still a gap).
+    /// (read-only), `since <= slot < before`. `next_run`: the first `HISTORY_MODEL` run of
+    /// the same profile captured at or after the slot (`null` = no run since; the gap is
+    /// still open). It is NOT "the run that recorded this slot": a slot never records late.
     pub fn deferrals(
         &self,
         profile: Option<&str>,
         since: Option<i64>,
+        before: Option<i64>,
         limit: usize,
     ) -> Result<serde_json::Value, String> {
         if limit == 0 || limit > HISTORY_ALL_MAX_LIMIT {
@@ -1465,7 +1468,7 @@ impl HeadlessEngine {
             .history
             .as_ref()
             .ok_or("score history disabled (--history-interval-hours 0)")?
-            .deferrals(profile, since, limit)?;
+            .deferrals(profile, HISTORY_MODEL, since, before, limit)?;
         let out: Vec<serde_json::Value> = rows
             .into_iter()
             .map(|(d, run)| {
@@ -1475,7 +1478,7 @@ impl HeadlessEngine {
                     "trigger": d.trigger, "observed_at": d.observed_at,
                     "observed_utc": crate::score_history::iso_utc(d.observed_at),
                     "reason": d.reason, "stale_count": d.stale_count, "total": d.total,
-                    "stale_share": d.stale_share(), "recorded_run": run,
+                    "stale_share": d.stale_share(), "next_run": run,
                     "covers": d.covers, "covers_from": d.covers_from,
                     "covers_from_utc": d.covers_from.map(crate::score_history::iso_utc),
                 })
@@ -2829,7 +2832,7 @@ mod history_tick_tests {
     }
 
     fn defs(s: &ScoreHistoryStore) -> Vec<crate::score_history::RunDeferral> {
-        s.deferrals(None, None, 100)
+        s.deferrals(None, HISTORY_MODEL, None, None, 100)
             .unwrap()
             .into_iter()
             .map(|(d, _)| d)
@@ -2894,7 +2897,7 @@ mod history_tick_tests {
         f.pass.set(Some(t3 - 10));
         let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t3);
         assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
-        let all = s.deferrals(None, None, 10).unwrap();
+        let all = s.deferrals(None, HISTORY_MODEL, None, None, 10).unwrap();
         assert_eq!(all.len(), 2);
         assert!(all
             .iter()
@@ -3093,7 +3096,7 @@ mod history_tick_tests {
         let before = crate::commands::wall_epoch();
         let eng = HeadlessEngine::start(cfg()).unwrap();
         let after = crate::commands::wall_epoch();
-        let rows = |e: &HeadlessEngine| e.deferrals(Some("sp500"), None, 1000).unwrap();
+        let rows = |e: &HeadlessEngine| e.deferrals(Some("sp500"), None, None, 1000).unwrap();
         let v = rows(&eng);
         let list = v["deferrals"].as_array().unwrap().clone();
         let want = process_down_plan(Some(t0), None, H6, before).slots.len();
@@ -3151,7 +3154,7 @@ mod history_tick_tests {
             max_stale_share: crate::score_history::MAX_STALE_SHARE,
         })
         .unwrap();
-        assert!(eng.deferrals(None, None, 10).unwrap()["deferrals"]
+        assert!(eng.deferrals(None, None, None, 10).unwrap()["deferrals"]
             .as_array()
             .unwrap()
             .is_empty());
@@ -3243,7 +3246,7 @@ mod history_tick_tests {
                 set_quotes(&f, n / 2, t1 - 7200, t1 - 5);
                 let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t1);
                 let d: Vec<_> = s
-                    .deferrals(None, None, 10)
+                    .deferrals(None, HISTORY_MODEL, None, None, 10)
                     .unwrap()
                     .into_iter()
                     .map(|(d, _)| d)
@@ -3273,11 +3276,11 @@ mod history_tick_tests {
                     max_stale_share: crate::score_history::MAX_STALE_SHARE,
                 };
                 let eng = HeadlessEngine::start(cfg()).unwrap();
-                let v = eng.deferrals(Some("sp500"), None, 10_000).unwrap();
+                let v = eng.deferrals(Some("sp500"), None, None, 10_000).unwrap();
                 let rows = v["deferrals"].as_array().unwrap().clone();
                 drop(eng);
                 let eng = HeadlessEngine::start(cfg()).unwrap();
-                let again = eng.deferrals(Some("sp500"), None, 10_000).unwrap()["deferrals"]
+                let again = eng.deferrals(Some("sp500"), None, None, 10_000).unwrap()["deferrals"]
                     .as_array()
                     .unwrap()
                     .len();
