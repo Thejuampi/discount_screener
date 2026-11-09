@@ -3216,6 +3216,111 @@ mod history_tick_tests {
         );
     }
 
+    /// RC demo driven by try.sh (ignored): made-up data in `RC_DEMO_DIR`, no port, no
+    /// network. `RC_DEMO_PHASE=setup` records a run 9 days ago, then a stale-share
+    /// deferral one interval later ("the box went down" after that).
+    /// `RC_DEMO_PHASE=restart` starts the real engine twice on that dir (the `serve`
+    /// startup path) and prints the deferral rows and the run's `annotations` fields.
+    #[test]
+    #[ignore]
+    fn rc_deferral_and_annotation_demo() {
+        use crate::score_history::TickClock;
+        let dir = std::path::PathBuf::from(std::env::var("RC_DEMO_DIR").expect("RC_DEMO_DIR"));
+        let wall = crate::commands::wall_epoch();
+        match std::env::var("RC_DEMO_PHASE").as_deref() {
+            Ok("setup") => {
+                let t0 = (wall - 9 * 86_400) / 3600 * 3600;
+                let s = ScoreHistoryStore::open(&dir.join("history.sqlite"), None).unwrap();
+                let mut f = live_fake();
+                f.snap = wide_snap();
+                f.pass.set(Some(t0 - 10));
+                set_quotes(&f, 0, t0 - 5, t0 - 5);
+                let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t0);
+                assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+                let t1 = t0 + H6 + 60;
+                f.pass.set(Some(t1 - 10));
+                let n = priced(&f).len();
+                set_quotes(&f, n / 2, t1 - 7200, t1 - 5);
+                let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t1);
+                let d: Vec<_> = s
+                    .deferrals(None, None, 10)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(d, _)| d)
+                    .collect();
+                println!(
+                    "RC_DEMO_SETUP {}",
+                    serde_json::json!({
+                        "run_id": format!("sp500-{t0}-v3"),
+                        "run_utc": crate::score_history::iso_utc(t0),
+                        "second_tick": format!("{w:?}"),
+                        "deferrals": d,
+                    })
+                );
+            }
+            Ok("restart") => {
+                let cfg = || EngineConfig {
+                    data_dir: dir.clone(),
+                    profile: "sp500".into(),
+                    market_context: false,
+                    fetch_year_charts: false,
+                    android_universe: true,
+                    history_interval_secs: H6,
+                    history_backup_dir: None,
+                    no_feed: true,
+                    quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+                    clock_jump_secs: crate::score_history::CLOCK_JUMP_SECS,
+                    max_stale_share: crate::score_history::MAX_STALE_SHARE,
+                };
+                let eng = HeadlessEngine::start(cfg()).unwrap();
+                let v = eng.deferrals(Some("sp500"), None, 10_000).unwrap();
+                let rows = v["deferrals"].as_array().unwrap().clone();
+                drop(eng);
+                let eng = HeadlessEngine::start(cfg()).unwrap();
+                let again = eng.deferrals(Some("sp500"), None, 10_000).unwrap()["deferrals"]
+                    .as_array()
+                    .unwrap()
+                    .len();
+                let mut by_reason: std::collections::BTreeMap<String, usize> = Default::default();
+                for r in &rows {
+                    *by_reason
+                        .entry(r["reason"].as_str().unwrap().to_string())
+                        .or_default() += 1;
+                }
+                let pd: Vec<&serde_json::Value> = rows
+                    .iter()
+                    .filter(|r| r["reason"] == "process_down")
+                    .collect();
+                let summary: Vec<&serde_json::Value> = pd
+                    .iter()
+                    .copied()
+                    .filter(|r| r["covers"].as_i64() > Some(1))
+                    .collect();
+                let export = eng.history_all_json(None, None, None, None, None).unwrap();
+                let hist = eng.history_json("S0", None, false, wall, None).unwrap();
+                println!(
+                    "RC_DEMO_RESTART {}",
+                    serde_json::json!({
+                        "rows_by_reason": by_reason,
+                        "rows_after_second_restart": again,
+                        "rows_after_first_restart": rows.len(),
+                        "process_down_summary": summary,
+                        "process_down_newest": pd.first(),
+                        "process_down_oldest_detail": pd.iter().rev().find(|r| r["covers"] == 1),
+                        "stale_share_row": rows.iter().find(|r| r["reason"] == "stale_share_too_high"),
+                        "export_run_id": export["run_id"],
+                        "export_annotations": export["annotations"],
+                        "export_first_evaluation_annotations": export["evaluations"][0]["annotations"],
+                        "history_points": hist["points"].as_array().unwrap().iter().map(|p| {
+                            serde_json::json!({"run_id": p["run_id"], "annotations": p["annotations"]})
+                        }).collect::<Vec<_>>(),
+                    })
+                );
+            }
+            other => panic!("RC_DEMO_PHASE must be setup or restart, got {other:?}"),
+        }
+    }
+
     /// No-feed engine in a temp dir with the given gate limits (no port, no network).
     fn engine_with(jump: i64, share: f64) -> (Arc<HeadlessEngine>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(

@@ -7359,9 +7359,16 @@ mod tests {
             1,
             "a later restart never adds a second summary"
         );
-        // Plan agrees with the brute force at a few phases.
-        for k in 0..12 {
-            let n = now + k * 4321;
+        // Plan agrees with the brute force at a few phases, and exactly on the cap
+        // boundary (a close / an interval slot at cutoff − 1 and at cutoff).
+        let c = next_close_snapshot(last + 2 * 86_400);
+        let sl = last + 10 * 6 * HR;
+        let cap = PROCESS_DOWN_DETAIL_DAYS * 86_400;
+        let phases: Vec<i64> = (0..12)
+            .map(|k| now + k * 4321)
+            .chain([c + cap, c + cap + 1, sl + cap, sl + cap + 1])
+            .collect();
+        for n in phases {
             let p = process_down_plan(Some(last), None, 6 * HR, n);
             let all = missed_brute(last, 6 * HR, n);
             let c = n - PROCESS_DOWN_DETAIL_DAYS * 86_400;
