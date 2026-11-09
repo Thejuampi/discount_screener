@@ -44,9 +44,11 @@ fn main() {
 /// `.git/refs/heads/<branch>` instead.
 ///
 /// After `git pack-refs --all --prune` the loose ref file is gone; watching
-/// `packed-refs` covers that. **Only existing paths are emitted**: Cargo
-/// treats a missing `rerun-if-changed` path as Dirty on every build
-/// (`the file … is missing`).
+/// `packed-refs` covers packs, and watching the ref's parent directory
+/// (e.g. `refs/heads`) covers the loose ref coming back on the next commit
+/// (HEAD itself is often unchanged: it still says `ref: refs/heads/…`).
+/// **Only existing paths are emitted**: Cargo treats a missing
+/// `rerun-if-changed` path as Dirty on every build (`the file … is missing`).
 fn emit_git_reruns() {
     let Some(head) = git_stdout(&[
         "rev-parse",
@@ -68,7 +70,15 @@ fn emit_git_reruns() {
                 if let Some(ref_path) =
                     git_stdout(&["rev-parse", "--path-format=absolute", "--git-path", r])
                 {
-                    emit_rerun_if_exists(Path::new(&ref_path));
+                    // Loose ref when present. After `pack-refs --prune` it is gone;
+                    // watching the parent dir (e.g. refs/heads) still sees it come
+                    // back on the next commit. Never emit a missing path: Cargo
+                    // treats those as Dirty on every build.
+                    let ref_path = PathBuf::from(ref_path);
+                    emit_rerun_if_exists(&ref_path);
+                    if let Some(parent) = ref_path.parent() {
+                        emit_rerun_if_exists(parent);
+                    }
                 }
             }
         }
