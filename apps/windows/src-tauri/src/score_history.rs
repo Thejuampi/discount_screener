@@ -265,6 +265,9 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 ///   `(profile, slot)` so retry ticks inside one slot add nothing. `slot` is the
 ///   scheduled due time ([`due_slot`]); `reason` is a [`SkipReason::code`];
 ///   stale share = `stale_count / total` (derived, `total = 0` → none).
+///   `process_down` rows are written at startup for slots missed while the process was
+///   down ([`process_down_plan`]); a summary row beyond [`PROCESS_DOWN_DETAIL_DAYS`]
+///   carries `covers` (slots it stands for) and `covers_from` (earliest of them).
 const QUOTE_FRESHNESS_DDL: &str = "
 ALTER TABLE score_history ADD COLUMN quote_ts INTEGER;
 ALTER TABLE score_history ADD COLUMN quote_age_secs INTEGER
@@ -291,9 +294,14 @@ CREATE TABLE IF NOT EXISTS run_deferrals (
     observed_at  INTEGER NOT NULL,
     reason       TEXT NOT NULL CHECK (reason IN ('initial_pass_in_progress',
                  'year_charts_pending', 'no_live_ranking', 'close_snapshot_imminent',
-                 'clock_jump', 'no_fresh_full_pass', 'stale_share_too_high')),
+                 'clock_jump', 'no_fresh_full_pass', 'stale_share_too_high',
+                 'process_down')),
     stale_count  INTEGER NOT NULL CHECK (stale_count >= 0),
     total        INTEGER NOT NULL CHECK (total >= stale_count),
+    covers       INTEGER NOT NULL DEFAULT 1 CHECK (covers >= 1),
+    covers_from  INTEGER CHECK (covers_from IS NULL OR covers_from <= slot),
+    CHECK (covers = 1 OR reason = 'process_down'),
+    CHECK (covers_from IS NULL OR reason = 'process_down'),
     PRIMARY KEY (profile, slot)
 );
 CREATE TRIGGER IF NOT EXISTS run_deferrals_no_delete BEFORE DELETE ON run_deferrals
@@ -324,10 +332,13 @@ pub enum SkipReason {
     NoFreshFullPass,
     /// More than `max_stale_share` of the priced rows are stale.
     StaleShareTooHigh,
+    /// The slot came due while the process was not running (written at startup by
+    /// [`ScoreHistoryStore::backfill_process_down`], never by a tick).
+    ProcessDown,
 }
 
 impl SkipReason {
-    pub const ALL: [SkipReason; 7] = [
+    pub const ALL: [SkipReason; 8] = [
         SkipReason::InitialPassInProgress,
         SkipReason::YearChartsPending,
         SkipReason::NoLiveRanking,
@@ -335,6 +346,7 @@ impl SkipReason {
         SkipReason::ClockJump,
         SkipReason::NoFreshFullPass,
         SkipReason::StaleShareTooHigh,
+        SkipReason::ProcessDown,
     ];
 
     /// Stored code (the `run_deferrals.reason` CHECK lists exactly these).
@@ -347,6 +359,7 @@ impl SkipReason {
             SkipReason::ClockJump => "clock_jump",
             SkipReason::NoFreshFullPass => "no_fresh_full_pass",
             SkipReason::StaleShareTooHigh => "stale_share_too_high",
+            SkipReason::ProcessDown => "process_down",
         }
     }
 
@@ -381,6 +394,18 @@ pub struct RunDeferral {
     pub reason: String,
     pub stale_count: i64,
     pub total: i64,
+    /// Slots this row stands for: 1, except a `process_down` summary row (see
+    /// [`PROCESS_DOWN_DETAIL_DAYS`]), which covers every missed slot in
+    /// `[covers_from, slot]`.
+    #[serde(default = "one")]
+    pub covers: i64,
+    /// Earliest slot a `process_down` summary row covers; `None` on every other row.
+    #[serde(default)]
+    pub covers_from: Option<i64>,
+}
+
+fn one() -> i64 {
+    1
 }
 
 impl RunDeferral {
@@ -1410,8 +1435,9 @@ pub struct HistoryPoint {
     pub price_cents: i64,
     pub target_cents: Option<i64>,
     pub upside_bps: Option<i64>,
-    /// Operator notes on this point's run (`run_annotations`); omitted when none.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Operator notes on this point's run (`run_annotations`), oldest first; always
+    /// present (`[]` = none) so a consumer can exclude annotated runs explicitly.
+    #[serde(default)]
     pub annotations: Vec<String>,
 }
 
@@ -1723,8 +1749,8 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Result<Vec<String>, String>
             "run_deferrals" => c
                 .execute(
                     "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
-                     stale_count, total) VALUES ('__selfcheck__', 0, 'interval', 0, \
-                     'clock_jump', 0, 0)",
+                     stale_count, total, covers, covers_from) VALUES ('__selfcheck__', 0, \
+                     'interval', 0, 'process_down', 0, 0, 1, NULL)",
                     [],
                 )
                 .map(|_| ()),
@@ -2577,23 +2603,63 @@ impl ScoreHistoryStore {
     pub fn record_deferral(&self, d: &RunDeferral) -> Result<bool, String> {
         self.check_writable()?;
         let c = self.conn.lock().map_err(|_| "lock")?;
-        let n = c
-            .execute(
-                "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
-                 stale_count, total) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 \
-                 WHERE NOT EXISTS (SELECT 1 FROM run_deferrals WHERE profile = ?1 AND slot = ?2)",
-                params![
-                    d.profile,
-                    d.slot,
-                    d.trigger,
-                    d.observed_at,
-                    d.reason,
-                    d.stale_count,
-                    d.total
-                ],
+        insert_deferral(&c, d).map_err(err)
+    }
+
+    /// Startup backfill of the downtime gap: one `process_down` row per scheduled slot
+    /// that came due while the process was down ([`process_down_plan`]), plus at most
+    /// one summary row for slots older than [`PROCESS_DOWN_DETAIL_DAYS`]. One
+    /// transaction; first record wins per `(profile, slot)`, so a second restart adds
+    /// nothing. Returns the rows added.
+    pub fn backfill_process_down(
+        &self,
+        profile: &str,
+        model: &str,
+        interval: i64,
+        now: i64,
+    ) -> Result<usize, String> {
+        let last_run = self.last_run_at(profile, model)?;
+        self.check_writable()?;
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let last_deferral: Option<i64> = c
+            .query_row(
+                "SELECT MAX(slot) FROM run_deferrals WHERE profile = ?1",
+                params![profile],
+                |r| r.get(0),
             )
             .map_err(err)?;
-        Ok(n == 1)
+        let plan = process_down_plan(last_run, last_deferral, interval, now);
+        if plan.is_empty() {
+            return Ok(0);
+        }
+        let row = |slot: i64, trigger: &str, covers: i64, covers_from: Option<i64>| RunDeferral {
+            profile: profile.to_string(),
+            slot,
+            trigger: trigger.to_string(),
+            observed_at: now,
+            reason: SkipReason::ProcessDown.code().into(),
+            stale_count: 0,
+            total: 0,
+            covers,
+            covers_from,
+        };
+        c.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
+        let res = (|| -> rusqlite::Result<usize> {
+            let mut added = 0;
+            if let Some(sm) = &plan.summary {
+                added += insert_deferral(&c, &row(sm.slot, sm.trigger, sm.covers, Some(sm.from)))?
+                    as usize;
+            }
+            for (slot, trigger) in &plan.slots {
+                added += insert_deferral(&c, &row(*slot, trigger, 1, None))? as usize;
+            }
+            c.execute_batch("COMMIT")?;
+            Ok(added)
+        })();
+        res.map_err(|e| {
+            let _ = c.execute_batch("ROLLBACK");
+            err(e)
+        })
     }
 
     /// Deferred / skipped slots, newest first (`profile` filter, `slot >= since`), each
@@ -2608,7 +2674,7 @@ impl ScoreHistoryStore {
         let mut st = c
             .prepare(
                 "SELECT d.profile, d.slot, d.trigger, d.observed_at, d.reason, d.stale_count, \
-                 d.total, (SELECT r.run_id FROM score_runs r WHERE r.profile = d.profile \
+                 d.total, d.covers, d.covers_from, (SELECT r.run_id FROM score_runs r WHERE r.profile = d.profile \
                  AND r.captured_at >= d.slot ORDER BY r.captured_at ASC, r.run_id ASC LIMIT 1) \
                  FROM run_deferrals d WHERE (?1 IS NULL OR d.profile = ?1) AND d.slot >= ?2 \
                  ORDER BY d.slot DESC, d.profile ASC LIMIT ?3",
@@ -2627,8 +2693,10 @@ impl ScoreHistoryStore {
                             reason: r.get(4)?,
                             stale_count: r.get(5)?,
                             total: r.get(6)?,
+                            covers: r.get(7)?,
+                            covers_from: r.get(8)?,
                         },
-                        r.get(7)?,
+                        r.get(9)?,
                     ))
                 },
             )
@@ -3423,6 +3491,166 @@ pub fn due_slot(now: i64, last_run: Option<i64>, interval: i64) -> Option<(i64, 
         return Some((last + (now - last) / interval * interval, "interval"));
     }
     None
+}
+
+/// First-record-wins INSERT of one `run_deferrals` row (`true` = added).
+fn insert_deferral(c: &Connection, d: &RunDeferral) -> rusqlite::Result<bool> {
+    let n = c.execute(
+        "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
+         stale_count, total, covers, covers_from) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 \
+         WHERE NOT EXISTS (SELECT 1 FROM run_deferrals WHERE profile = ?1 AND slot = ?2)",
+        params![
+            d.profile,
+            d.slot,
+            d.trigger,
+            d.observed_at,
+            d.reason,
+            d.stale_count,
+            d.total,
+            d.covers,
+            d.covers_from
+        ],
+    )?;
+    Ok(n == 1)
+}
+
+/// Missed slots are written one row each only this far back from startup; older
+/// missed slots collapse into ONE summary row (bounded write after a long outage).
+pub const PROCESS_DOWN_DETAIL_DAYS: i64 = 7;
+
+/// Summary of the missed slots older than [`PROCESS_DOWN_DETAIL_DAYS`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessDownSummary {
+    /// The NEWEST missed slot older than the cap (the row's key; keeps "latest
+    /// recorded slot" correct, so a restart never re-summarises the same span).
+    pub slot: i64,
+    pub trigger: &'static str,
+    /// Earliest missed slot covered (`covers_from`).
+    pub from: i64,
+    /// Number of missed slots in `[from, slot]` (interval and close).
+    pub covers: i64,
+}
+
+/// What [`ScoreHistoryStore::backfill_process_down`] writes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessDownPlan {
+    /// One row each, oldest first: missed slots within [`PROCESS_DOWN_DETAIL_DAYS`].
+    pub slots: Vec<(i64, &'static str)>,
+    pub summary: Option<ProcessDownSummary>,
+}
+
+impl ProcessDownPlan {
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty() && self.summary.is_none()
+    }
+}
+
+/// Slots missed while the process was down, by the same schedule as [`due_slot`]:
+/// - anchor = the later of the last recorded run and the latest `run_deferrals` slot of
+///   the profile; no run AND no deferral (fresh store) → nothing;
+/// - clock behind the last run (backwards jump) → nothing (no trustworthy "since");
+/// - `interval <= 0` (history disabled / dev) → nothing;
+/// - candidates in `(anchor, now]`: interval slots `base + k·interval` (`base` = last run,
+///   or 0 = the `now − now mod interval` buckets when only deferrals exist) and every
+///   weekday close snapshot (a running process gets `Due::Close` for each close);
+///   a close that coincides with an interval slot is one `close` slot;
+/// - minus the slot that is due NOW (`due_slot(now)`): the restarted process still
+///   records or defers it with its real reason;
+/// - slots `>= now − PROCESS_DOWN_DETAIL_DAYS` → one row each; older → one summary.
+pub fn process_down_plan(
+    last_run: Option<i64>,
+    last_deferral: Option<i64>,
+    interval: i64,
+    now: i64,
+) -> ProcessDownPlan {
+    let mut plan = ProcessDownPlan::default();
+    if interval <= 0 {
+        return plan;
+    }
+    let anchor = match (last_run, last_deferral) {
+        (None, None) => return plan,
+        (a, b) => a.max(b).unwrap(),
+    };
+    if last_run.is_some_and(|l| now < l) || now <= anchor {
+        return plan;
+    }
+    let base = last_run.unwrap_or(0);
+    let current = due_slot(now, last_run, interval).map(|(s, _)| s);
+    let cutoff = now - PROCESS_DOWN_DETAIL_DAYS * 86_400;
+    // Interval slots in (lo, hi] as k range of base + k·interval.
+    let k_range = |lo: i64, hi: i64| -> (i64, i64) {
+        (
+            (lo - base).div_euclid(interval) + 1,
+            (hi - base).div_euclid(interval),
+        )
+    };
+    let on_lattice = |s: i64| (s - base).rem_euclid(interval) == 0;
+    let closes_in = |lo: i64, hi: i64| -> Vec<i64> {
+        let mut v = Vec::new();
+        let mut c = next_close_snapshot(lo);
+        while c <= hi {
+            v.push(c);
+            c = next_close_snapshot(c);
+        }
+        v
+    };
+    // Detail span (max(anchor, cutoff − 1), now]: materialised (bounded by the cap).
+    let lo = anchor.max(cutoff - 1);
+    let mut detail: std::collections::BTreeMap<i64, &'static str> = Default::default();
+    let (k0, k1) = k_range(lo, now);
+    for k in k0..=k1 {
+        detail.insert(base + k * interval, "interval");
+    }
+    for c in closes_in(lo, now) {
+        detail.insert(c, "close");
+    }
+    if let Some(cur) = current {
+        detail.remove(&cur);
+    }
+    plan.slots = detail.into_iter().collect();
+    // Older span (anchor, cutoff − 1]: counted, not materialised.
+    if anchor < cutoff - 1 {
+        let hi = cutoff - 1;
+        let (k0, mut k1) = k_range(anchor, hi);
+        // The slot due now is never "missed". It can only fall in this span when
+        // interval > the cap, and then it is the newest interval slot (k1).
+        if k0 <= k1 && current == Some(base + k1 * interval) {
+            k1 -= 1;
+        }
+        let closes: Vec<i64> = closes_in(anchor, hi)
+            .into_iter()
+            .filter(|c| Some(*c) != current)
+            .collect();
+        let slots_n = (k1 - k0 + 1).max(0)
+            + closes
+                .iter()
+                .filter(|c| !(on_lattice(**c) && (k0..=k1).contains(&((**c - base) / interval))))
+                .count() as i64;
+        let first = (k0 <= k1)
+            .then(|| base + k0 * interval)
+            .into_iter()
+            .chain(closes.first().copied())
+            .min();
+        let last = (k0 <= k1)
+            .then(|| base + k1 * interval)
+            .into_iter()
+            .chain(closes.last().copied())
+            .max();
+        if let (Some(from), Some(slot), true) = (first, last, slots_n > 0) {
+            let trigger = if closes.contains(&slot) {
+                "close"
+            } else {
+                "interval"
+            };
+            plan.summary = Some(ProcessDownSummary {
+                slot,
+                trigger,
+                from,
+                covers: slots_n,
+            });
+        }
+    }
+    plan
 }
 
 /// Validated append-only INSERT of one run annotation (plain INSERT; triggers refuse
@@ -6605,6 +6833,8 @@ mod tests {
             reason: reason.code().into(),
             stale_count: 3,
             total: 20,
+            covers: 1,
+            covers_from: None,
         }
     }
 
@@ -6852,10 +7082,383 @@ mod tests {
             }
         }
         assert_eq!(n, 8, "history_due (5) + freshness_gate (3) messages");
+        // process_down has no tick message: it is written only by the startup backfill.
+        assert!(codes.insert(SkipReason::ProcessDown.code()));
+        assert_eq!(SkipReason::from_message("process_down"), None);
         assert_eq!(
             codes.len(),
             SkipReason::ALL.len(),
             "every code is reachable"
         );
+    }
+
+    // ---- process_down (downtime gap) ----
+
+    const SAT_10: i64 = 1_794_045_600; // Sat 2026-11-07 10:00 UTC (no close on weekends)
+    const TUE_00: i64 = 1_794_268_800; // Tue 2026-11-10 00:00 UTC (EST: close = 21:10 UTC)
+    const HR: i64 = 3600;
+
+    fn pd_rows(s: &ScoreHistoryStore) -> Vec<RunDeferral> {
+        let mut v: Vec<RunDeferral> = s
+            .deferrals(Some("sp500"), None, 100_000)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .filter(|d| d.reason == "process_down")
+            .collect();
+        v.sort_by_key(|d| d.slot);
+        v
+    }
+
+    fn store_with_run(at: i64) -> ScoreHistoryStore {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        s.record_run(&meta(at), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn process_down_three_missed_intervals_give_three_rows_and_restart_adds_none() {
+        let s = store_with_run(SAT_10);
+        // Down across the 11:00, 12:00 and 13:00 slots; restart just after 14:00 (the
+        // slot due now, left to the live process).
+        let now = SAT_10 + 4 * HR + 30;
+        assert_eq!(s.backfill_process_down("sp500", "v3", HR, now).unwrap(), 3);
+        let rows = pd_rows(&s);
+        assert_eq!(
+            rows.iter().map(|d| d.slot).collect::<Vec<_>>(),
+            [SAT_10 + HR, SAT_10 + 2 * HR, SAT_10 + 3 * HR]
+        );
+        for d in &rows {
+            assert_eq!(
+                (d.trigger.as_str(), d.observed_at, d.stale_count, d.total),
+                ("interval", now, 0, 0)
+            );
+            assert_eq!((d.covers, d.covers_from, d.stale_share()), (1, None, None));
+        }
+        // Restart again (same instant, later in the same slot): nothing new.
+        assert_eq!(s.backfill_process_down("sp500", "v3", HR, now).unwrap(), 0);
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, now + 600)
+                .unwrap(),
+            0
+        );
+        assert_eq!(pd_rows(&s).len(), 3);
+        // The current slot still takes its real reason from the live process.
+        let mut cur = deferral("sp500", SAT_10 + 4 * HR, SkipReason::StaleShareTooHigh);
+        cur.observed_at = now;
+        assert!(s.record_deferral(&cur).unwrap());
+        // Another outage later: only the new slots (anchor = latest deferral slot).
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, SAT_10 + 7 * HR + 5)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            pd_rows(&s).last().map(|d| d.slot),
+            Some(SAT_10 + 6 * HR),
+            "5:00 and 6:00 after the 4:00 deferral; 7:00 is due now"
+        );
+    }
+
+    #[test]
+    fn process_down_slot_count_has_no_off_by_one() {
+        for (now, want) in [
+            (SAT_10 + HR - 1, 0),
+            (SAT_10 + HR, 0), // 11:00 is due now, not missed
+            (SAT_10 + 2 * HR - 1, 0),
+            (SAT_10 + 2 * HR, 1), // 11:00 missed, 12:00 due now
+            (SAT_10 + 4 * HR - 1, 2),
+            (SAT_10 + 4 * HR, 3),
+        ] {
+            let s = store_with_run(SAT_10);
+            assert_eq!(
+                s.backfill_process_down("sp500", "v3", HR, now).unwrap(),
+                want,
+                "now = SAT_10 + {}",
+                now - SAT_10
+            );
+        }
+    }
+
+    #[test]
+    fn process_down_first_open_on_empty_store_writes_nothing() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, SAT_10 + 400 * HR)
+                .unwrap(),
+            0
+        );
+        // Another profile's run does not anchor this one.
+        s.record_run(&meta(SAT_10), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(
+            s.backfill_process_down("nasdaq", "v3", HR, SAT_10 + 400 * HR)
+                .unwrap(),
+            0
+        );
+        assert!(s.deferrals(None, None, 10).unwrap().is_empty());
+        assert!(process_down_plan(None, None, HR, SAT_10).is_empty());
+        // Disabled history (interval <= 0) never backfills.
+        assert!(process_down_plan(Some(SAT_10), None, 0, SAT_10 + 9 * HR).is_empty());
+    }
+
+    #[test]
+    fn process_down_anchors_on_a_deferral_when_there_is_no_run() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        // Only deferrals: slots are the `now − now mod interval` buckets.
+        let mut d = deferral("sp500", SAT_10, SkipReason::InitialPassInProgress);
+        d.observed_at = SAT_10 + 5;
+        assert!(s.record_deferral(&d).unwrap());
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, SAT_10 + 3 * HR + 9)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            pd_rows(&s).iter().map(|d| d.slot).collect::<Vec<_>>(),
+            [SAT_10 + HR, SAT_10 + 2 * HR]
+        );
+    }
+
+    #[test]
+    fn process_down_backwards_clock_writes_nothing() {
+        let s = store_with_run(SAT_10 + 10 * HR);
+        for now in [SAT_10 + 10 * HR - 1, SAT_10 + 5 * HR, SAT_10 - 30 * 86_400] {
+            assert_eq!(s.backfill_process_down("sp500", "v3", HR, now).unwrap(), 0);
+        }
+        assert!(pd_rows(&s).is_empty());
+        // Behind a deferral slot (but not the run): nothing either.
+        let mut d = deferral("sp500", SAT_10 + 12 * HR, SkipReason::ClockJump);
+        d.observed_at = SAT_10 + 12 * HR;
+        assert!(s.record_deferral(&d).unwrap());
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, SAT_10 + 11 * HR + 5)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn process_down_missed_closes_get_close_rows_and_a_pending_close_is_left_live() {
+        // Last run Tue 00:00 UTC, 6 h interval, restart Thu 00:00:30: missed Tue 06/12/18,
+        // Wed 00/06/12/18, Tue's 16:10 ET (21:10 UTC) close and Thu 00:00. Wed's close
+        // is still in catch-up, so due_slot targets it: it is left to the live process.
+        let s = store_with_run(TUE_00);
+        let now = TUE_00 + 2 * 86_400 + 30;
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, now).unwrap(),
+            9
+        );
+        let got: Vec<(i64, String)> = pd_rows(&s)
+            .into_iter()
+            .map(|d| (d.slot - TUE_00, d.trigger))
+            .collect();
+        let close = 21 * HR + 600;
+        let mut want: Vec<(i64, String)> = [6, 12, 18, 24, 30, 36, 42, 48]
+            .iter()
+            .map(|h| (h * HR, "interval".to_string()))
+            .collect();
+        want.push((close, "close".into()));
+        want.sort();
+        assert_eq!(
+            due_slot(now, Some(TUE_00), 6 * HR),
+            Some((TUE_00 + 86_400 + close, "close"))
+        );
+        assert_eq!(got, want);
+        // Restart while Tue's close is still in catch-up: due_slot targets that close,
+        // so it is left to the live process; only Tue 18:00 was missed.
+        let s = store_with_run(TUE_00 + 12 * HR);
+        let now = TUE_00 + 23 * HR;
+        assert_eq!(
+            due_slot(now, Some(TUE_00 + 12 * HR), 6 * HR),
+            Some((TUE_00 + close, "close"))
+        );
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, now).unwrap(),
+            1
+        );
+        assert_eq!(pd_rows(&s)[0].slot, TUE_00 + 18 * HR);
+    }
+
+    /// Brute-force schedule: every interval slot and close in `(anchor, now]` minus the
+    /// slot due now.
+    fn missed_brute(last: i64, interval: i64, now: i64) -> Vec<i64> {
+        let mut v: std::collections::BTreeSet<i64> = Default::default();
+        let mut t = last + interval;
+        while t <= now {
+            v.insert(t);
+            t += interval;
+        }
+        let mut c = next_close_snapshot(last);
+        while c <= now {
+            v.insert(c);
+            c = next_close_snapshot(c);
+        }
+        if let Some((cur, _)) = due_slot(now, Some(last), interval) {
+            v.remove(&cur);
+        }
+        v.into_iter().collect()
+    }
+
+    #[test]
+    fn process_down_beyond_the_cap_writes_one_summary_row() {
+        let last = TUE_00 - 20 * 86_400 + 7; // off-lattice with the closes
+        let now = TUE_00 + 5 * HR;
+        let cutoff = now - PROCESS_DOWN_DETAIL_DAYS * 86_400;
+        let s = store_with_run(last);
+        let all = missed_brute(last, 6 * HR, now);
+        let (old, recent): (Vec<i64>, Vec<i64>) = all.iter().partition(|t| **t < cutoff);
+        let added = s.backfill_process_down("sp500", "v3", 6 * HR, now).unwrap();
+        assert_eq!(added, recent.len() + 1);
+        let rows = pd_rows(&s);
+        let (sum, det): (Vec<&RunDeferral>, Vec<&RunDeferral>) =
+            rows.iter().partition(|d| d.covers_from.is_some());
+        assert_eq!(sum.len(), 1, "exactly one summary row");
+        let sm = sum[0];
+        assert_eq!(
+            sm.slot,
+            *old.last().unwrap(),
+            "keyed by the newest old slot"
+        );
+        assert_eq!(
+            sm.covers_from,
+            Some(old[0]),
+            "covers_from = earliest missed slot"
+        );
+        assert_eq!(sm.covers, old.len() as i64);
+        assert!(
+            sm.covers > 50,
+            "13 days of 6 h slots + closes: {}",
+            sm.covers
+        );
+        assert_eq!((sm.stale_count, sm.total, sm.observed_at), (0, 0, now));
+        assert_eq!(det.iter().map(|d| d.slot).collect::<Vec<_>>(), recent);
+        assert!(det.iter().all(|d| d.slot >= cutoff && d.covers == 1));
+        assert!(det.iter().any(|d| d.trigger == "close"));
+        // Every missed slot is accounted for exactly once.
+        assert_eq!(sm.covers as usize + det.len(), all.len());
+        // Idempotent across restarts.
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, now).unwrap(),
+            0
+        );
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, now + 3 * 86_400)
+                .unwrap(),
+            missed_brute(last, 6 * HR, now + 3 * 86_400)
+                .iter()
+                .filter(|t| **t > recent.last().copied().unwrap())
+                .count()
+        );
+        assert_eq!(
+            pd_rows(&s)
+                .iter()
+                .filter(|d| d.covers_from.is_some())
+                .count(),
+            1,
+            "a later restart never adds a second summary"
+        );
+        // Plan agrees with the brute force at a few phases.
+        for k in 0..12 {
+            let n = now + k * 4321;
+            let p = process_down_plan(Some(last), None, 6 * HR, n);
+            let all = missed_brute(last, 6 * HR, n);
+            let c = n - PROCESS_DOWN_DETAIL_DAYS * 86_400;
+            let old: Vec<i64> = all.iter().copied().filter(|t| *t < c).collect();
+            assert_eq!(
+                p.slots.iter().map(|x| x.0).collect::<Vec<_>>(),
+                all.iter().copied().filter(|t| *t >= c).collect::<Vec<_>>()
+            );
+            let sm = p.summary.unwrap();
+            assert_eq!(
+                (sm.from, sm.slot, sm.covers),
+                (old[0], *old.last().unwrap(), old.len() as i64)
+            );
+        }
+    }
+
+    #[test]
+    fn process_down_summary_columns_are_checked() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let mut d = deferral("sp500", 100, SkipReason::ClockJump);
+        d.covers = 2;
+        assert!(
+            s.record_deferral(&d).is_err(),
+            "covers > 1 only on process_down"
+        );
+        let mut d = deferral("sp500", 100, SkipReason::ClockJump);
+        d.covers_from = Some(50);
+        assert!(
+            s.record_deferral(&d).is_err(),
+            "covers_from only on process_down"
+        );
+        let mut d = deferral("sp500", 100, SkipReason::ProcessDown);
+        d.covers_from = Some(150);
+        d.covers = 2;
+        assert!(s.record_deferral(&d).is_err(), "covers_from <= slot");
+        d.covers = 0;
+        d.covers_from = Some(50);
+        assert!(s.record_deferral(&d).is_err(), "covers >= 1");
+        d.covers = 2;
+        assert!(s.record_deferral(&d).unwrap());
+    }
+
+    #[test]
+    fn process_down_rows_survive_reopen_and_are_in_backup_and_restore() {
+        let root = tmpdir("pdbk");
+        let bdir = root.join("bk");
+        let p = root.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let last = TUE_00 - 9 * 86_400;
+        s.record_run(&meta(last), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        let n = s
+            .backfill_process_down("sp500", "v3", 6 * HR, TUE_00)
+            .unwrap();
+        assert!(n > 10, "{n}");
+        let before = s.deferrals(None, None, 10_000).unwrap();
+        assert_eq!(before.len(), n);
+        assert_eq!(before.iter().filter(|(d, _)| d.covers > 1).count(), 1);
+        drop(s);
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        assert_eq!(s.deferrals(None, None, 10_000).unwrap(), before);
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, TUE_00)
+                .unwrap(),
+            0,
+            "restart after reopen adds nothing"
+        );
+        std::fs::create_dir_all(&bdir).unwrap();
+        let bk = bdir.join("pd.sqlite.gz");
+        s.export_to(&bk).unwrap();
+        let pl = plain(&bk).unwrap();
+        let b = Connection::open(&pl.path).unwrap();
+        assert_eq!(table_count(&b, "run_deferrals") as usize, n);
+        drop(b);
+        drop(pl);
+        let data = root.join("d");
+        let r = restore(&bk, &data, &root.join("bk2")).unwrap();
+        assert_eq!(r.deferrals_added, n);
+        assert_eq!(
+            restore(&bk, &data, &root.join("bk2"))
+                .unwrap()
+                .deferrals_added,
+            0
+        );
+        let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
+        assert_eq!(t.deferrals(None, None, 10_000).unwrap(), before);
+        // The restored rows stay append-only.
+        let c = t.conn.lock().unwrap();
+        let t_ = "run_deferrals";
+        assert!(c
+            .execute(
+                &format!("{} {t_} SET covers = 1 WHERE covers > 1", "UPDATE"),
+                []
+            )
+            .is_err());
+        assert!(c.execute(&format!("{} FROM {t_}", "DELETE"), []).is_err());
+        drop(c);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

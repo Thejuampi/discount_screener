@@ -1311,6 +1311,23 @@ impl HeadlessEngine {
         } else {
             None
         };
+        if let Some(store) = &history {
+            // Downtime gap: one `process_down` row per scheduled slot missed while the
+            // process was down (none on a fresh store or after a backwards clock jump).
+            let profile = canonical_profile(&cfg.profile);
+            match store.backfill_process_down(
+                &profile,
+                HISTORY_MODEL,
+                cfg.history_interval_secs,
+                crate::commands::wall_epoch(),
+            ) {
+                Ok(0) => {}
+                Ok(n) => eprintln!(
+                    "vantage-headless: recorded {n} process_down deferral row(s) for {profile}"
+                ),
+                Err(e) => eprintln!("vantage-headless: process_down backfill failed: {e}"),
+            }
+        }
         let clock = crate::score_history::TickClock::with_limits(
             cfg.quote_stale_secs,
             cfg.clock_jump_secs,
@@ -1459,6 +1476,8 @@ impl HeadlessEngine {
                     "observed_utc": crate::score_history::iso_utc(d.observed_at),
                     "reason": d.reason, "stale_count": d.stale_count, "total": d.total,
                     "stale_share": d.stale_share(), "recorded_run": run,
+                    "covers": d.covers, "covers_from": d.covers_from,
+                    "covers_from_utc": d.covers_from.map(crate::score_history::iso_utc),
                 })
             })
             .collect();
@@ -1951,6 +1970,8 @@ pub fn record_history_tick_fresh(
                 reason: reason.code().into(),
                 stale_count: stale_rows as i64,
                 total: priced.len() as i64,
+                covers: 1,
+                covers_from: None,
             })
             .map(|_| ())
     };
@@ -2056,8 +2077,14 @@ pub fn history_all_json(
         let mut ev = store.symbol_evaluations(&sym, profile, HISTORY_MODEL, since, limit)?;
         // `stale`: the stored row's quote was over the threshold (excluded from /history).
         let stale = store.stale_pairs(None, Some(&sym))?;
+        let mut notes: std::collections::HashMap<String, Vec<String>> = Default::default();
         for v in &mut ev {
             let run = v["run_id"].as_str().unwrap_or("").to_string();
+            if !notes.contains_key(&run) {
+                notes.insert(run.clone(), annotation_reasons(store, &run)?);
+            }
+            // `annotations`: operator notes on the row's run (always present; `[]` = none).
+            v["annotations"] = notes[&run].clone().into();
             v["stale"] = stale.contains(&(run, sym.clone())).into();
         }
         return Ok(serde_json::json!({
@@ -2083,6 +2110,9 @@ pub fn history_all_json(
         .run_stats(&run_id)?
         .ok_or_else(|| format!("run {run_id} has no evaluations"))?;
     let stale = store.stale_pairs(Some(&run_id), None)?;
+    // `annotations`: operator notes on this run (always present; `[]` = none), on the
+    // run and on every evaluation so a consumer can exclude annotated runs explicitly.
+    let notes = annotation_reasons(store, &run_id)?;
     let evals: Vec<serde_json::Value> = store
         .evaluations(&run_id)?
         .into_iter()
@@ -2090,13 +2120,27 @@ pub fn history_all_json(
             let key = (run_id.clone(), e.symbol.clone());
             let mut v = serde_json::to_value(e).unwrap();
             v["stale"] = stale.contains(&key).into();
+            v["annotations"] = notes.clone().into();
             v
         })
         .collect();
     Ok(serde_json::json!({
         "run_id": run_id, "profile": profile, "model": HISTORY_MODEL,
+        "annotations": notes,
         "stats": stats, "rows": evals.len(), "evaluations": evals
     }))
+}
+
+/// Reasons of a run's `run_annotations`, oldest first (same order as `/history`).
+fn annotation_reasons(
+    store: &crate::score_history::ScoreHistoryStore,
+    run_id: &str,
+) -> Result<Vec<String>, String> {
+    Ok(store
+        .annotations(run_id)?
+        .into_iter()
+        .map(|a| a.reason)
+        .collect())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3011,6 +3055,165 @@ mod history_tick_tests {
         );
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_start_backfills_process_down_once() {
+        use crate::score_history::{process_down_plan, TickClock};
+        let dir = std::env::temp_dir().join(format!(
+            "ds-pd-eng-{}-{}",
+            std::process::id(),
+            crate::commands::wall_epoch()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A run 3.5 intervals ago, then the process was down.
+        let t0 = crate::commands::wall_epoch() - 3 * H6 - H6 / 2;
+        {
+            let s = ScoreHistoryStore::open(&dir.join("history.sqlite"), None).unwrap();
+            let f = live_fake();
+            f.pass.set(Some(t0 - 10));
+            set_quotes(&f, 0, t0 - 5, t0 - 5);
+            let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t0);
+            assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+        }
+        let cfg = || EngineConfig {
+            data_dir: dir.clone(),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: H6,
+            history_backup_dir: None,
+            no_feed: true,
+            quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+            clock_jump_secs: crate::score_history::CLOCK_JUMP_SECS,
+            max_stale_share: crate::score_history::MAX_STALE_SHARE,
+        };
+        let before = crate::commands::wall_epoch();
+        let eng = HeadlessEngine::start(cfg()).unwrap();
+        let after = crate::commands::wall_epoch();
+        let rows = |e: &HeadlessEngine| e.deferrals(Some("sp500"), None, 1000).unwrap();
+        let v = rows(&eng);
+        let list = v["deferrals"].as_array().unwrap().clone();
+        let want = process_down_plan(Some(t0), None, H6, before).slots.len();
+        assert_eq!(
+            want,
+            process_down_plan(Some(t0), None, H6, after).slots.len()
+        );
+        assert!(want >= 2, "t0+6h and t0+12h at least: {want}");
+        assert_eq!(list.len(), want, "{v}");
+        for d in &list {
+            assert_eq!(d["reason"], "process_down");
+            assert_eq!(
+                (d["covers"].as_i64(), d["covers_from"].is_null()),
+                (Some(1), true)
+            );
+            assert_eq!(
+                (d["stale_count"].as_i64(), d["total"].as_i64()),
+                (Some(0), Some(0))
+            );
+            assert!(d["stale_share"].is_null());
+        }
+        assert!(list.iter().any(|d| d["slot"] == t0 + H6));
+        assert!(
+            !list.iter().any(|d| d["slot"] == t0 + 3 * H6),
+            "due now: left live"
+        );
+        drop(eng);
+        // Restart: nothing new.
+        let eng = HeadlessEngine::start(cfg()).unwrap();
+        assert_eq!(rows(&eng)["deferrals"].as_array().unwrap().len(), want);
+        drop(eng);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_start_on_an_empty_store_writes_no_process_down() {
+        let dir = std::env::temp_dir().join(format!(
+            "ds-pd-empty-{}-{}",
+            std::process::id(),
+            crate::commands::wall_epoch()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let eng = HeadlessEngine::start(EngineConfig {
+            data_dir: dir.clone(),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: H6,
+            history_backup_dir: None,
+            no_feed: true,
+            quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+            clock_jump_secs: crate::score_history::CLOCK_JUMP_SECS,
+            max_stale_share: crate::score_history::MAX_STALE_SHARE,
+        })
+        .unwrap();
+        assert!(eng.deferrals(None, None, 10).unwrap()["deferrals"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        drop(eng);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Run notes are machine-readable: `annotations` (reasons, oldest first) on every
+    /// `/history` point and in the `/history?all=1` export (run + each evaluation, and
+    /// per evaluation in the symbol form). Annotated runs are NOT hidden.
+    #[test]
+    fn annotations_are_machine_readable_in_history_and_export() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let mut f = live_fake();
+        f.snap = wide_snap();
+        let syms = priced(&f);
+        f.pass.set(Some(NOW - 10));
+        set_quotes(&f, 0, NOW - 5, NOW - 5);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, NOW),
+            HistoryWrite::Recorded { .. }
+        ));
+        let run = format!("sp500-{NOW}-v3");
+        let none = serde_json::json!([]);
+        let v = history_all_json(&s, None, Some(&run), "sp500", None, None).unwrap();
+        assert_eq!(v["annotations"], none, "always present");
+        let rows_before = v["rows"].clone();
+        let j = history_json(&s, &syms[0], None, false, NOW + 60, "sp500").unwrap();
+        assert_eq!(j["points"][0]["annotations"], none, "always present");
+        s.annotate_run(&run, "made-up note one", NOW + 60).unwrap();
+        s.annotate_run(&run, "made-up note two", NOW + 120).unwrap();
+        let want = serde_json::json!(["made-up note one", "made-up note two"]);
+        // /history?all=1&run= (and the latest-run form without run=).
+        for v in [
+            history_all_json(&s, None, Some(&run), "sp500", None, None).unwrap(),
+            history_all_json(&s, None, None, "sp500", None, None).unwrap(),
+        ] {
+            assert_eq!(v["run_id"], run.as_str());
+            assert_eq!(v["annotations"], want);
+            assert_eq!(v["rows"], rows_before, "annotated run is not filtered");
+            let ev = v["evaluations"].as_array().unwrap();
+            assert!(!ev.is_empty());
+            assert!(ev.iter().all(|e| e["annotations"] == want), "{}", ev[0]);
+        }
+        // /history?all=1&symbol=
+        let v = history_all_json(&s, Some(&syms[0]), None, "sp500", None, None).unwrap();
+        let ev = v["evaluations"].as_array().unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(
+            (&ev[0]["run_id"], &ev[0]["annotations"]),
+            (&run.as_str().into(), &want)
+        );
+        // /history?symbol=
+        let j = history_json(&s, &syms[0], None, true, NOW + 200, "sp500").unwrap();
+        let pts = j["points"].as_array().unwrap();
+        assert_eq!(pts.len(), 1, "annotated run still in /history");
+        assert_eq!(
+            (&pts[0]["run_id"], &pts[0]["annotations"]),
+            (&run.as_str().into(), &want)
+        );
     }
 
     /// No-feed engine in a temp dir with the given gate limits (no port, no network).

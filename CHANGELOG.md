@@ -23,6 +23,11 @@
 - Append-only `run_deferrals` (still migration v5) records each scheduled slot that does not record: one row per
   `(profile, slot)`, with a reason code, `stale_count` and `total`. It is covered by backups and restore. Read it with
   `GET /history/deferrals` or `history-deferrals`.
+- `run_deferrals` also covers downtime (still v5). At `serve` startup, every scheduled slot (interval or close) missed
+  while the process was down gets a `process_down` row. Slots older than `PROCESS_DOWN_DETAIL_DAYS` (7) collapse into
+  one summary row (`covers`, `covers_from`). A fresh store, a backwards clock and a restart write nothing.
+- Run annotations are machine-readable. `annotations` is always present (an array of reasons) on `/history` points
+  and in the `/history?all=1` export, on the run and on each evaluation. Annotated runs are not filtered.
 
 ### V3.1 decision rule — SHADOW MODE (Android core + headless)
 

@@ -280,8 +280,15 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
   - Writing is **CLI-only**: `vantage-headless history-annotate RUN_ID --reason TEXT [--data-dir DIR]` writes
     straight to `history.sqlite`. It is safe while `serve` runs (SQLite locking), never creates or migrates the file,
     and refuses a store that is not at v5 or is missing any trigger.
-  - The daemon has no write route. Read annotations with `GET /history/annotations?run=`; they also appear on that
-    run's `/history` points.
+  - The daemon has no write route. Read annotations with `GET /history/annotations?run=`.
+  - **Machine-readable for validation.** Every annotated run's notes appear as `annotations`, a JSON array of the
+    reason strings, oldest first, and `[]` when there are none (the field is always present):
+    - on every `/history?symbol=` point;
+    - in the `/history?all=1` run export, both at the top level and on each evaluation;
+    - on each evaluation of `/history?all=1&symbol=`.
+    Annotated runs are not hidden or filtered. A forward-return validation that wants to drop them filters
+    `annotations != []`. Example (run export, trimmed):
+    `{"run_id":"sp500-1793538000-v3","annotations":["made-up note"],"evaluations":[{"symbol":"S01","annotations":["made-up note"],"stale":false,...}],...}`
 - **`run_deferrals` (no silent gaps).** Every scheduled slot that does not record leaves one durable, append-only
   row in `history.sqlite`. The in-memory `TickClock` deferral is only what `/status` shows.
   - Columns: `profile`, `slot` (UTC epoch of the scheduled due time), `trigger` (`interval` or `close`),
@@ -299,6 +306,7 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
     | `clock_jump` | `clock jump: waiting for a quote pass after wake` |
     | `no_fresh_full_pass` | `waiting for a fresh quote pass` |
     | `stale_share_too_high` | `too many stale quotes` |
+    | `process_down` | no tick message: written at startup for slots missed while the process was down (below) |
 
     `interval not elapsed` is not a scheduled slot and writes nothing. A test fails if `history_due` or
     `freshness_gate` gains a message without a code.
@@ -319,8 +327,36 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
     `GET /history/deferrals?profile=&since=&limit=` (and `vantage-headless history-deferrals [--profile P]
     [--since EPOCH] [--limit N]`) returns the rows newest first, each with `recorded_run`: the first run at or after
     the slot, or `null` while it is still a gap. This is read-only, and the daemon has no write route.
-  - **Limit.** The recorder writes these rows on its ticks. Slots that fall entirely inside a period when the process
-    was not running (frozen, down) get no row. Only the slot that is due when it resumes does. Those gaps show up as
-    missing `score_runs`.
+  - **Downtime gap (`process_down`).** At `serve` startup (`backfill_process_down`, in one transaction), every
+    scheduled slot that came due while the process was not running gets one `process_down` row:
+    - **Since when.** The anchor is the later of the profile's last recorded run and its latest `run_deferrals` slot.
+      Candidates are the slots in `(anchor, now]`.
+    - **Which slots.** The same schedule as `due_slot`: interval slots `last + k·interval` (or the
+      `now − now mod interval` buckets when only deferrals exist) and every weekday 16:10 ET close. A running process
+      gets `Due::Close` for each close, so missed closes get rows too, with `trigger = 'close'`. A close that lands
+      on an interval slot is one `close` row.
+    - **Not the slot due now.** Whatever `due_slot(now)` returns, including a close still inside its 18 h
+      catch-up, is left to the live process. It records that slot, or defers it with its real reason. So a run at
+      `T`, a restart just after `T + 4·interval` gives exactly 3 rows (`T + 1..3·interval`).
+    - **`stale_count = 0`, `total = 0`.** Nothing was priced because no process was running. This satisfies
+      `total >= stale_count >= 0`, and the derived stale share is `null`, which does not claim a 0 % share.
+      `observed_at` is the startup time.
+    - **Cap: `PROCESS_DOWN_DETAIL_DAYS = 7`.** Slots at or after `now − 7 d` get one row each. All older missed
+      slots collapse into ONE summary row:
+      - `slot` is the newest of those older slots, and `trigger` is that slot's trigger;
+      - `covers` is how many missed slots the row stands for (interval and close);
+      - `covers_from` is the earliest of them, so the row covers `[covers_from, slot]`.
+      Every other row has `covers = 1, covers_from = NULL`. CHECKs: `covers >= 1`, `covers_from <= slot`, and both
+      `covers > 1` and a non-NULL `covers_from` are allowed only on `process_down`. Keying the summary on its newest
+      slot keeps the anchor rule exact, so a later restart never re-summarises the same span.
+    - **Idempotent.** First record wins per `(profile, slot)`, and the anchor moves past the written slots, so a
+      second restart adds nothing.
+    - **Nothing on a fresh store.** No run and no deferral for the profile means no rows, so the first open of an
+      empty store writes nothing. History disabled (`--history-interval-hours 0`) also writes nothing.
+    - **Clock behind the last run** (a backwards jump): no rows. With the wall clock behind the anchor, "missed
+      since" is not trustworthy.
+    - The interval is the current `--history-interval-hours`. If the interval changed while the process was down,
+      the missed slots follow the new schedule from the last run.
+    - A failure is logged on stderr and does not stop `serve`.
 - **`POST /persist`** refuses any request that carries an `Origin` header and requires `X-Vantage-Cli: 1` (the CLI
   sends it).
