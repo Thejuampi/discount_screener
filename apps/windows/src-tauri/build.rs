@@ -43,10 +43,11 @@ fn main() {
 /// time). `--git-path refs/heads/<branch>` points at the shared
 /// `.git/refs/heads/<branch>` instead.
 ///
-/// After `git pack-refs --all --prune` the loose ref file is gone; watching
-/// `packed-refs` covers packs, and watching the ref's parent directory
-/// (e.g. `refs/heads`) covers the loose ref coming back on the next commit
-/// (HEAD itself is often unchanged: it still says `ref: refs/heads/…`).
+/// After `git pack-refs --all --prune` the loose ref file is gone (and for
+/// nested names like `feat/foo`, so is `refs/heads/feat/`). Watching
+/// `packed-refs` covers packs; watching the stable `refs/heads` directory
+/// covers the loose ref coming back on the next commit (HEAD itself is often
+/// unchanged: it still says `ref: refs/heads/…`).
 /// **Only existing paths are emitted**: Cargo treats a missing
 /// `rerun-if-changed` path as Dirty on every build (`the file … is missing`).
 fn emit_git_reruns() {
@@ -70,14 +71,23 @@ fn emit_git_reruns() {
                 if let Some(ref_path) =
                     git_stdout(&["rev-parse", "--path-format=absolute", "--git-path", r])
                 {
-                    // Loose ref when present. After `pack-refs --prune` it is gone;
-                    // watching the parent dir (e.g. refs/heads) still sees it come
-                    // back on the next commit. Never emit a missing path: Cargo
-                    // treats those as Dirty on every build.
+                    // Loose ref when present. After `pack-refs --prune` it is
+                    // gone, and for nested branch names (`feat/foo`) the
+                    // intermediate dir (`refs/heads/feat`) is gone too. Always
+                    // watch the stable `refs/heads` directory (survives pack)
+                    // so recreating a loose ref dirties the build. Never emit a
+                    // missing path: Cargo treats those as Dirty on every build.
                     let ref_path = PathBuf::from(ref_path);
                     emit_rerun_if_exists(&ref_path);
-                    if let Some(parent) = ref_path.parent() {
-                        emit_rerun_if_exists(parent);
+                    if r.starts_with("refs/heads/") {
+                        if let Some(heads) = git_stdout(&[
+                            "rev-parse",
+                            "--path-format=absolute",
+                            "--git-path",
+                            "refs/heads",
+                        ]) {
+                            emit_rerun_if_exists(Path::new(&heads));
+                        }
                     }
                 }
             }
