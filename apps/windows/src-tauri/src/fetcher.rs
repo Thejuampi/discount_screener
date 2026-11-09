@@ -1154,7 +1154,7 @@ mod quote_html_recovery_tests {
 
 #[cfg(test)]
 mod parse_candles_regular_market_time_tests {
-    use super::{parse_candles, CandleFetch};
+    use super::parse_candles;
     use serde_json::json;
 
     fn chart_json(rmt: Option<i64>) -> serde_json::Value {

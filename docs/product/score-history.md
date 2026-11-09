@@ -231,9 +231,11 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
   open (~09:30 ET) and crypto at 00:00 UTC, so the bar time alone must not be preferred over
   `regularMarketTime` or chart-path closes would never count toward full-pass after the open. After the regular
   session, `regularMarketTime` sits near the 16:00 ET close, so a pass started after hours also fails safe
-  (that stamp is before `pass_start` and does not count). `/status` deferral warnings via `--defer-warn-hours`
-  fire **once per deferral episode** (tracked by `deferred_since`), not on every tick.
-  QuoteSummary has no trade time; that limit is unchanged. It is kept in memory only, so stored input bytes and hashes are unchanged.
+  (that stamp is before `pass_start` and does not count). `quote_fetched_at` lives in memory only
+  (`#[serde(skip)]`), so stored input bytes and hashes are unchanged; only the derived `quote_ts` column is stored.
+- **No new time, no new stamp:** a refresh that yields no fresh quote time (quote fetch failed, or the chart ran on a
+  row that already has a price, which the chart does not overwrite) keeps the row's previous stamp. It is never
+  wiped and never refreshed, so the row stays stale until a real quote arrives.
 - **Known limit (no `market_ts`):** the price path (quoteSummary) does not give us Yahoo's `regularMarketTime`;
   only the chart endpoint has it. Carrying it would add a field to the serialized snapshot rows and change input
   bytes/hashes and official output, so it is not stored. A stale exchange quote fetched recently therefore looks
@@ -241,9 +243,12 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
 - **Future `quote_ts`** (wall clock stepped back below a fetch time): no age is computed (`quote_age_secs` NULL) and
   the row counts as stale, in storage and in `/status`; ages are never clamped to 0.
 - **Deferral episode:** `deferred_since_epoch`/`deferred_reason` are set on a gate hit and cleared when a run is
-  recorded or when the tick is simply not due (`Due::No`).
+  recorded or when the tick is simply not due (`Due::No`). `/status` deferral warnings via `--defer-warn-hours`
+  fire **once per deferral episode** (tracked by `deferred_since`), not on every tick.
 - **Full pass:** a refresh pass counts as full only if ≥ 90% of the universe received a fresh quote during it
-  (`last_full_pass_at`, wall clock).
+  (`last_full_pass_at`, wall clock). "During it" means stamped at or after the pass start, a sealed `PassStart`
+  taken from the wall clock when the pass begins; a raw number such as `0` cannot be passed in. If the wall clock
+  reads 0 (broken clock), the pass start is treated as "never" and no pass counts as full (fail-closed).
 - **v5 columns on `score_history`** (additive; pre-v5 rows read as `stale = 0`, `quote_ts` and `quote_age_secs` NULL):
   - `quote_ts`;
   - `quote_age_secs` (CHECK `>= 0`);

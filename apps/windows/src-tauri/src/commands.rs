@@ -653,12 +653,12 @@ pub(crate) mod opportunity_projection_tests {
                 quote_fetched_at: Some(if k < 9 { 1_000 + k as i64 } else { 999 }),
             });
         }
-        assert!(super::full_pass_succeeded(&syms, &st, 1_000), "9/10 = 90%");
-        assert!(!super::full_pass_succeeded(&syms, &st, 1_001), "8/10 < 90%");
+        assert!(super::full_pass_succeeded(&syms, &st, PassStart::at(1_000)), "9/10 = 90%");
+        assert!(!super::full_pass_succeeded(&syms, &st, PassStart::at(1_001)), "8/10 < 90%");
         let mut more = syms.clone();
         more.push("NEVER".into());
-        assert!(!super::full_pass_succeeded(&more, &st, 1_000), "9/11 < 90%");
-        assert!(super::full_pass_succeeded(&[], &st, 1_000));
+        assert!(!super::full_pass_succeeded(&more, &st, PassStart::at(1_000)), "9/11 < 90%");
+        assert!(super::full_pass_succeeded(&[], &st, PassStart::at(1_000)));
     }
 
     pub(crate) fn fixture_state() -> Arc<Mutex<ScreenerState>> {
@@ -1976,16 +1976,74 @@ pub fn wall_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+/// Wall-clock start of a coordinator quote pass, sealed so a raw integer (in
+/// particular `0`, which would let every pre-pass stamp count as fresh) can never
+/// reach the full-pass check. Production mints it only with [`PassStart::now`];
+/// tests use `PassStart::at` (`cfg(test)`, rejects `<= 0`).
+mod pass_start_seal {
+    /// Epoch seconds at which a quote pass began. See the module docs.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PassStart(i64);
+
+    impl PassStart {
+        /// Capture the wall clock as the pass start.
+        pub fn now() -> Self {
+            Self::from_wall(super::wall_epoch())
+        }
+
+        /// A broken clock (`wall_epoch() == 0`) fails closed: the pass start becomes
+        /// "never", so no quote counts as fresh and the run is deferred.
+        fn from_wall(epoch: i64) -> Self {
+            if epoch > 0 {
+                Self(epoch)
+            } else {
+                Self(i64::MAX)
+            }
+        }
+
+        #[cfg(test)]
+        pub fn at(epoch: i64) -> Self {
+            assert!(epoch > 0, "PassStart::at needs a real epoch, got {epoch}");
+            Self(epoch)
+        }
+
+        pub fn epoch(self) -> i64 {
+            self.0
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::PassStart;
+
+        #[test]
+        fn pass_start_broken_clock_fails_closed() {
+            assert_eq!(PassStart::from_wall(0).epoch(), i64::MAX);
+            assert_eq!(PassStart::from_wall(-7).epoch(), i64::MAX);
+            assert_eq!(PassStart::from_wall(42).epoch(), 42);
+            assert!(PassStart::now().epoch() > 0);
+        }
+
+        #[test]
+        #[should_panic(expected = "real epoch")]
+        fn pass_start_at_rejects_zero() {
+            let _ = PassStart::at(0);
+        }
+    }
+}
+pub(crate) use pass_start_seal::PassStart;
+
 /// Share of a pass's symbols that must get a fresh quote for it to count as a full pass.
 pub const FULL_PASS_MIN_SUCCESS: f64 = 0.90;
 
 /// True when at least [`FULL_PASS_MIN_SUCCESS`] of `symbols` were quoted at or after
 /// `pass_start` (an empty universe is trivially full).
-pub fn full_pass_succeeded(
+pub(crate) fn full_pass_succeeded(
     symbols: &[String],
     screener: &crate::engine::ScreenerState,
-    pass_start: i64,
+    pass_start: PassStart,
 ) -> bool {
+    let pass_start = pass_start.epoch();
     let ok = symbols
         .iter()
         .filter(|s| {
@@ -2067,10 +2125,8 @@ fn mark_full_pass_if_current(
     last_full_pass_at: &std::sync::atomic::AtomicI64,
     symbols: &[String],
     screener: &std::sync::Mutex<crate::engine::ScreenerState>,
-    pass_start: i64,
+    pass_start: PassStart,
 ) {
-    // `pass_start` is the wall epoch when the coordinator pass began (never `0`).
-    debug_assert!(pass_start > 0, "pass_start must be the wall time when the pass began");
     if generation_is_current(feed_gen, generation)
         && full_pass_succeeded(symbols, &screener.lock().unwrap(), pass_start)
     {
@@ -2078,15 +2134,15 @@ fn mark_full_pass_if_current(
     }
 }
 
-/// Coordinator refresh-loop seam: ends a quote pass with the `pass_start` captured
-/// when the pass began. Keeps the worker from hard-coding `0` (kills that mutant).
+/// Coordinator refresh-loop end of pass: marks the pass full using the
+/// [`PassStart`] captured when it began (a literal `0` no longer type-checks).
 fn complete_coordinator_quote_pass(
     feed_gen: &std::sync::atomic::AtomicU64,
     generation: u64,
     last_full_pass_at: &std::sync::atomic::AtomicI64,
     symbols: &[String],
     screener: &std::sync::Mutex<crate::engine::ScreenerState>,
-    pass_start: i64,
+    pass_start: PassStart,
 ) {
     mark_full_pass_if_current(
         feed_gen,
@@ -3429,8 +3485,8 @@ mod feed_coordinator_tests {
         needs_enrichment_retry, publish_demand_operating_valuation_if_current,
         publish_universe_financial_dcf_from_fundamentals_if_current,
         reset_initial_pass_completion, resolve_regime_score_status,
-        symbol_state_enrichment_complete, warmable_completed_generation, RefreshOutcome,
-        RegimeScoreStatus,
+        refresh_one_symbol, symbol_state_enrichment_complete, warmable_completed_generation,
+        PassStart, RefreshOutcome, RefreshSource, RegimeScoreStatus,
     };
     use crate::engine::{
         compute_chart_summary, FundamentalSnapshot, InsiderData, MarketSnapshot, ScreenerState,
@@ -4100,15 +4156,15 @@ mod feed_coordinator_tests {
         }
         let gen = AtomicU64::new(3);
         let last = AtomicI64::new(42);
-        super::mark_full_pass_if_current(&gen, 3, &last, &syms, &screener, 1_000);
+        super::mark_full_pass_if_current(&gen, 3, &last, &syms, &screener, PassStart::at(1_000));
         assert_eq!(last.load(Ordering::SeqCst), 42, "8/10 is not a full pass");
         screener
             .lock()
             .unwrap()
             .ingest_snapshot(snap("S8", 100, Some(1_100)));
-        super::mark_full_pass_if_current(&gen, 2, &last, &syms, &screener, 1_000);
+        super::mark_full_pass_if_current(&gen, 2, &last, &syms, &screener, PassStart::at(1_000));
         assert_eq!(last.load(Ordering::SeqCst), 42, "stale generation");
-        super::mark_full_pass_if_current(&gen, 3, &last, &syms, &screener, 1_000);
+        super::mark_full_pass_if_current(&gen, 3, &last, &syms, &screener, PassStart::at(1_000));
         assert!(last.load(Ordering::SeqCst) > 42, "9/10 marks the pass");
     }
 
@@ -4226,7 +4282,7 @@ mod feed_coordinator_tests {
             Some(bar_open),
             "no meta → last candle"
         );
-        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, pass_start);
+        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, PassStart::at(pass_start));
         assert_eq!(
             last.load(Ordering::SeqCst),
             0,
@@ -4252,7 +4308,7 @@ mod feed_coordinator_tests {
             Some(rmt),
             "regularMarketTime preferred over bar open"
         );
-        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, pass_start);
+        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, PassStart::at(pass_start));
         assert!(
             last.load(Ordering::SeqCst) > 0,
             "regularMarketTime during the pass counts toward 90%"
@@ -4279,7 +4335,7 @@ mod feed_coordinator_tests {
             None,
             "present-but-future stamp must be unknown, not wall"
         );
-        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, pass_start);
+        super::mark_full_pass_if_current(&gen, 1, &last, &syms, &screener, PassStart::at(pass_start));
         assert_eq!(
             last.load(Ordering::SeqCst),
             0,
@@ -4357,8 +4413,272 @@ mod feed_coordinator_tests {
         );
     }
 
-    /// S6: quotes stamped before `pass_start` must not make a full pass (kills
-    /// a worker mutant that passes `0` instead of the captured pass_start).
+    /// Scripted network boundary for `refresh_one_symbol`. Each hook may bump the
+    /// feed generation to simulate a profile switch landing mid-fetch.
+    struct ScriptedSource {
+        active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        quote: Box<dyn Fn() -> std::io::Result<FetchResult> + Send + Sync>,
+        candles: Box<dyn Fn() -> std::io::Result<crate::fetcher::CandleFetch> + Send + Sync>,
+        bump_on_quote: bool,
+        bump_on_candles: bool,
+        candle_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RefreshSource for ScriptedSource {
+        fn fetch_symbol(&self, _sym: &str) -> std::io::Result<FetchResult> {
+            if self.bump_on_quote {
+                self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            (self.quote)()
+        }
+
+        fn fetch_candles(
+            &self,
+            _sym: &str,
+            _range: &str,
+            _interval: &str,
+        ) -> std::io::Result<crate::fetcher::CandleFetch> {
+            self.candle_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.bump_on_candles {
+                self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            (self.candles)()
+        }
+    }
+
+    struct RefreshRig {
+        active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        rank: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        screener: std::sync::Arc<std::sync::Mutex<ScreenerState>>,
+        gate: EnrichmentGate,
+        feed_status: std::sync::Mutex<crate::state::FeedStatus>,
+    }
+
+    fn refresh_rig() -> RefreshRig {
+        use std::sync::{atomic::AtomicU64, Arc, Mutex};
+        let active = Arc::new(AtomicU64::new(1));
+        let rank = Arc::new(AtomicU64::new(0));
+        let screener = Arc::new(Mutex::new(ScreenerState::new()));
+        let gate = EnrichmentGate::for_test(
+            Arc::clone(&active),
+            Arc::clone(&screener),
+            Arc::clone(&rank),
+        );
+        RefreshRig {
+            active,
+            rank,
+            screener,
+            gate,
+            feed_status: Mutex::new(Default::default()),
+        }
+    }
+
+    fn scripted(
+        rig: &RefreshRig,
+        quote: impl Fn() -> std::io::Result<FetchResult> + Send + Sync + 'static,
+        candles: impl Fn() -> std::io::Result<crate::fetcher::CandleFetch> + Send + Sync + 'static,
+    ) -> ScriptedSource {
+        ScriptedSource {
+            active: std::sync::Arc::clone(&rig.active),
+            quote: Box::new(quote),
+            candles: Box::new(candles),
+            bump_on_quote: false,
+            bump_on_candles: false,
+            candle_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn priced_quote(sym: &'static str) -> impl Fn() -> std::io::Result<FetchResult> + Send + Sync {
+        move || {
+            Ok(FetchResult {
+                symbol: sym.into(),
+                snapshot: Some(snap(sym, 12_345, None)),
+                signal: None,
+                fundamentals: None,
+            })
+        }
+    }
+
+    fn chart_with_rmt(
+        rmt: i64,
+    ) -> impl Fn() -> std::io::Result<crate::fetcher::CandleFetch> + Send + Sync {
+        move || {
+            Ok(crate::fetcher::CandleFetch {
+                candles: candles_at(rmt - 3_600),
+                regular_market_time: Some(rmt),
+            })
+        }
+    }
+
+    fn net_err() -> std::io::Result<crate::fetcher::CandleFetch> {
+        Err(std::io::Error::other("connection reset"))
+    }
+
+    /// Control for the None tests: same rig, no generation move → `Some`, the
+    /// symbol is visible and stamped by the quote fetch.
+    #[test]
+    fn refresh_one_symbol_current_generation_ingests_and_stamps() {
+        let rig = refresh_rig();
+        let src = scripted(&rig, priced_quote("RQ1"), chart_with_rmt(super::wall_epoch()));
+        let before = super::wall_epoch();
+        let out = refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ1")
+            .expect("current generation returns Some");
+        assert!(out.visible);
+        let st = rig.screener.lock().unwrap();
+        assert_eq!(st.snapshots["RQ1"].market_price_cents, 12_345);
+        assert!(st.snapshots["RQ1"].quote_fetched_at.is_some_and(|t| t >= before));
+        assert!(st.daily_candles.contains_key("RQ1"), "chart applied");
+        assert!(rig.rank.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    /// Generation moves while the quote is in flight: `None`, nothing from the
+    /// stale generation lands (no snapshot, no rank bump) and the chart fetch is
+    /// never even attempted.
+    #[test]
+    fn refresh_one_symbol_returns_none_when_generation_moves_during_quote() {
+        let rig = refresh_rig();
+        let mut src = scripted(&rig, priced_quote("RQ2"), chart_with_rmt(super::wall_epoch()));
+        src.bump_on_quote = true;
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ2").is_none());
+        assert!(!rig.screener.lock().unwrap().snapshots.contains_key("RQ2"));
+        assert_eq!(rig.rank.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(src.candle_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // Same move while a *failing* quote is in flight (a 404 records no feed
+        // error, so only the post-quote generation check stops it): still `None`
+        // before any chart fetch.
+        let rig = refresh_rig();
+        let mut src = scripted(
+            &rig,
+            || Err(std::io::Error::other("HTTP 404 not found")),
+            chart_with_rmt(super::wall_epoch()),
+        );
+        src.bump_on_quote = true;
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ2").is_none());
+        assert_eq!(src.candle_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(rig.feed_status.lock().unwrap().last_error.is_none(), "stale error not recorded");
+    }
+
+    /// Generation moves while the chart is in flight: `None`, and the stale chart
+    /// (candles + a fresh regularMarketTime) is not applied.
+    #[test]
+    fn refresh_one_symbol_returns_none_when_generation_moves_during_chart() {
+        let rig = refresh_rig();
+        // Quote fails so only the chart could create/stamp the row.
+        let mut src = scripted(
+            &rig,
+            || Err(std::io::Error::other("connection reset")),
+            chart_with_rmt(super::wall_epoch()),
+        );
+        src.bump_on_candles = true;
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ3").is_none());
+        let st = rig.screener.lock().unwrap();
+        assert!(!st.snapshots.contains_key("RQ3"), "stale chart must not create the row");
+        assert!(!st.daily_candles.contains_key("RQ3"), "stale candles not ingested");
+        assert_eq!(rig.rank.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Preserve-on-None: a refresh that yields no new quote time (quote fetch
+    /// fails, chart fails) keeps the prior stamp — it neither wipes it nor
+    /// refreshes it, so the row stays stale for the next pass's 90% check.
+    #[test]
+    fn refresh_one_symbol_without_new_quote_preserves_prior_stamp() {
+        let rig = refresh_rig();
+        let old = 1_000_000_000i64;
+        rig.screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("RQ4", 500, Some(old)));
+        let src = scripted(&rig, || Err(std::io::Error::other("timed out")), net_err);
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ4").is_some());
+        let st = rig.screener.lock().unwrap();
+        assert_eq!(st.snapshots["RQ4"].quote_fetched_at, Some(old), "stamp preserved");
+        assert_eq!(st.snapshots["RQ4"].market_price_cents, 500);
+        assert!(
+            !super::full_pass_succeeded(&["RQ4".to_string()], &st, PassStart::at(old + 1)),
+            "a preserved pre-pass stamp is still stale"
+        );
+    }
+
+    /// Quote fails but the chart succeeds with a fresh regularMarketTime on a row
+    /// that already has a price: the chart does not touch that price, so it must
+    /// not refresh the stamp either (a stale price can't be made to look fresh).
+    #[test]
+    fn refresh_one_symbol_chart_only_keeps_priced_row_stamp() {
+        let rig = refresh_rig();
+        let old = 1_000_000_000i64;
+        rig.screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("RQ6", 500, Some(old)));
+        let src = scripted(
+            &rig,
+            || Err(std::io::Error::other("timed out")),
+            chart_with_rmt(super::wall_epoch()),
+        );
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ6").is_some());
+        let st = rig.screener.lock().unwrap();
+        assert!(st.daily_candles.contains_key("RQ6"), "chart was applied");
+        assert_eq!(st.snapshots["RQ6"].market_price_cents, 500, "price untouched");
+        assert_eq!(st.snapshots["RQ6"].quote_fetched_at, Some(old), "stamp untouched");
+    }
+
+    /// Engine merge rule the refresh paths rely on: an incoming snapshot with no
+    /// stamp keeps the prior one (partial and full ingest); a stamped one wins.
+    #[test]
+    fn ingest_snapshot_preserves_stamp_on_none_and_replaces_on_some() {
+        let mut st = ScreenerState::new();
+        st.ingest_snapshot(snap("RQ7", 100, Some(1_000)));
+        st.ingest_partial_snapshot(snap("RQ7", 110, None));
+        assert_eq!(st.snapshots["RQ7"].quote_fetched_at, Some(1_000), "partial keeps");
+        st.ingest_snapshot_preserving_known(snap("RQ7", 120, None));
+        assert_eq!(st.snapshots["RQ7"].quote_fetched_at, Some(1_000), "known keeps");
+        st.ingest_snapshot(snap("RQ7", 130, None));
+        assert_eq!(st.snapshots["RQ7"].quote_fetched_at, Some(1_000), "full keeps");
+        assert_eq!(st.snapshots["RQ7"].market_price_cents, 130);
+        st.ingest_snapshot(snap("RQ7", 140, Some(2_000)));
+        assert_eq!(st.snapshots["RQ7"].quote_fetched_at, Some(2_000), "new stamp wins");
+    }
+
+    /// Preserve-on-None through the quote ingest path: a quote with no price
+    /// (stamp `None`) must not erase the prior stamp, and a later priced quote
+    /// does refresh it.
+    #[test]
+    fn quote_without_price_preserves_prior_stamp_then_priced_quote_refreshes() {
+        let rig = refresh_rig();
+        let old = 1_000_000_000i64;
+        rig.screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("RQ5", 700, Some(old)));
+        let src = scripted(
+            &rig,
+            || {
+                Ok(FetchResult {
+                    symbol: "RQ5".into(),
+                    snapshot: Some(snap("RQ5", 0, None)),
+                    signal: None,
+                    fundamentals: None,
+                })
+            },
+            net_err,
+        );
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ5").is_some());
+        assert_eq!(
+            rig.screener.lock().unwrap().snapshots["RQ5"].quote_fetched_at,
+            Some(old)
+        );
+        let src = scripted(&rig, priced_quote("RQ5"), net_err);
+        let before = super::wall_epoch();
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ5").is_some());
+        assert!(rig.screener.lock().unwrap().snapshots["RQ5"]
+            .quote_fetched_at
+            .is_some_and(|t| t >= before));
+    }
+
+    /// S6: quotes stamped before `pass_start` must not make a full pass. Passing
+    /// `0` is now a compile error ([`PassStart`] is sealed); this pins the boundary.
     #[test]
     fn complete_coordinator_quote_pass_ignores_quotes_before_pass_start() {
         use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -4376,14 +4696,14 @@ mod feed_coordinator_tests {
         let feed_gen = AtomicU64::new(1);
         let last = AtomicI64::new(0);
         super::complete_coordinator_quote_pass(
-            &feed_gen, 1, &last, &syms, &screener, pass_start,
+            &feed_gen, 1, &last, &syms, &screener, PassStart::at(pass_start),
         );
         assert_eq!(
             last.load(Ordering::SeqCst),
             0,
             "pre-pass stamps must not count (pass_start must not be replaced with 0)"
         );
-        // Control: same stamps with pass_start=1 would count; keep pass_start honest.
+        // Control: re-stamped after the pass began, the same symbols now count.
         for s in &syms {
             screener
                 .lock()
@@ -4391,7 +4711,7 @@ mod feed_coordinator_tests {
                 .ingest_snapshot(snap(s, 100, Some(pass_start + 1)));
         }
         super::complete_coordinator_quote_pass(
-            &feed_gen, 1, &last, &syms, &screener, pass_start,
+            &feed_gen, 1, &last, &syms, &screener, PassStart::at(pass_start),
         );
         assert!(last.load(Ordering::SeqCst) > 0, "fresh-during-pass stamps count");
     }
@@ -5605,9 +5925,10 @@ fn apply_refresh_chart_if_current(
                         next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
                         quote_fetched_at: quote_ts,
                     });
-                    // `ingest_snapshot` preserves a prior stamp when the new value is
-                    // `None`; chart-close must still clear it for present-but-future
-                    // (unknown → stale, fail-closed).
+                    // `ingest_snapshot` keeps a prior stamp when the new one is `None`.
+                    // This row had no price, so the chart close IS its quote: overwrite
+                    // the stamp, clearing it for a present-but-future time (unknown →
+                    // stale, fail-closed).
                     if let Some(s) = state.snapshots.get_mut(sym) {
                         s.quote_fetched_at = quote_ts;
                     }
@@ -5666,10 +5987,41 @@ fn apply_candle_fetch_if_current(
     )
 }
 
+/// Network boundary of [`refresh_one_symbol`]: Yahoo in production. Tests swap in
+/// a scripted source so the real refresh body (generation checks, quote + chart
+/// ingest, stamping) runs without network.
+trait RefreshSource {
+    fn fetch_symbol(&self, sym: &str) -> std::io::Result<crate::fetcher::FetchResult>;
+    fn fetch_candles(
+        &self,
+        sym: &str,
+        range: &str,
+        interval: &str,
+    ) -> std::io::Result<crate::fetcher::CandleFetch>;
+}
+
+impl RefreshSource for YahooClient {
+    fn fetch_symbol(&self, sym: &str) -> std::io::Result<crate::fetcher::FetchResult> {
+        YahooClient::fetch_symbol(self, sym)
+    }
+
+    fn fetch_candles(
+        &self,
+        sym: &str,
+        range: &str,
+        interval: &str,
+    ) -> std::io::Result<crate::fetcher::CandleFetch> {
+        YahooClient::fetch_candles(self, sym, range, interval)
+    }
+}
+
 /// Fetch one symbol progressively: price/name makes it visible immediately, while
 /// quoteSummary completeness controls only whether it remains in the retry set.
+///
+/// Returns `None` as soon as the feed generation moves (profile switch / restart):
+/// the caller's worker must stop, and nothing from the stale generation is ingested.
 fn refresh_one_symbol(
-    client: &YahooClient,
+    client: &dyn RefreshSource,
     gate: &EnrichmentGate,
     feed_status: &std::sync::Mutex<crate::state::FeedStatus>,
     generation: u64,
@@ -5746,7 +6098,7 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
 }
 
 /// Spawn refresh / enrich / EDGAR / snapshot workers for symbols at generation.
-/// Workers exit when eed_generation no longer matches generation.
+/// Workers exit when `feed_generation` no longer matches `generation`.
 fn spawn_feed_workers(
     state: &AppState,
     symbols: Arc<Vec<String>>,
@@ -5801,7 +6153,7 @@ fn spawn_feed_workers(
                     symbols.len(),
                     feed_log.path().display()
                 ));
-                let initial_start = wall_epoch();
+                let initial_start = PassStart::now();
                 let mut pending: Vec<String> = symbols.iter().cloned().collect();
 
                 for round in 0..=MAX_RETRY_ROUNDS {
@@ -5877,7 +6229,7 @@ fn spawn_feed_workers(
                                     }
                                     let sym = batch[i].as_str();
                                     let Some(outcome) = refresh_one_symbol(
-                                        &client,
+                                        client.as_ref(),
                                         &gate,
                                         &feed_status,
                                         generation,
@@ -5957,7 +6309,7 @@ fn spawn_feed_workers(
                     if !generation_is_current(&feed_gen, generation) {
                         return;
                     }
-                    let pass_start = wall_epoch();
+                    let pass_start = PassStart::now();
                     let cursor = Arc::new(AtomicUsize::new(0));
                     let mut handles = Vec::new();
                     for w in 0..REFRESH_CONCURRENCY {
@@ -5988,7 +6340,7 @@ fn spawn_feed_workers(
                                     }
                                     let sym = symbols[i].as_str();
                                     let Some(outcome) = refresh_one_symbol(
-                                        &client,
+                                        client.as_ref(),
                                         &gate,
                                         &feed_status,
                                         generation,
