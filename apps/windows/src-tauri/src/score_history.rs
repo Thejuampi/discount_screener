@@ -6679,6 +6679,17 @@ mod tests {
             assert!(e.contains("append-only"), "{sql}: {e}");
         }
         assert_eq!(table_count(&c, t), SkipReason::ALL.len() as i64);
+        // The dedupe key is the schema's UNIQUE key, not only the trigger.
+        let pk: Vec<String> = c
+            .prepare(&format!(
+                "SELECT name FROM pragma_table_info('{t}') WHERE pk > 0 ORDER BY pk"
+            ))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(pk, ["profile", "slot"]);
         // The behavioural self-check covers the table (empty → sentinel, rolled back).
         assert!(trigger_behaviour_failures(&c).unwrap().is_empty());
     }
