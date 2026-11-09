@@ -42,7 +42,7 @@ pub const SCORE_RULE_VERSION: &str = "V3";
 /// if another migration lands on main first (v3 is #68's score_shadow).
 pub const EVALUATIONS_MIGRATION: i64 = 4;
 /// Migration that adds per-row quote freshness (`quote_ts`, `quote_age_secs`, `stale`)
-/// and the append-only `run_annotations` table.
+/// and the append-only `run_annotations` and `run_deferrals` tables.
 pub const QUOTE_FRESHNESS_MIGRATION: i64 = 5;
 /// Highest score-history migration this binary knows.
 pub const SCHEMA_VERSION: i64 = QUOTE_FRESHNESS_MIGRATION;
@@ -57,7 +57,7 @@ pub const MAX_STALE_SHARE: f64 = 0.10;
 /// Default of `--clock-jump-secs` (Director-approved design, 2026-11-04).
 pub const CLOCK_JUMP_SECS: i64 = 300;
 /// Tables exported to backups and merged on restore (indices 0..=2 are fixed).
-pub const HISTORY_TABLES: [&str; 9] = [
+pub const HISTORY_TABLES: [&str; 10] = [
     "score_runs",
     "score_history",
     "score_history_migrations",
@@ -67,9 +67,10 @@ pub const HISTORY_TABLES: [&str; 9] = [
     "score_evaluations",
     "score_run_stats",
     "run_annotations",
+    "run_deferrals",
 ];
 /// Tables the source guard protects (includes the planned shadow table).
-pub const GUARDED_TABLES: [&str; 9] = [
+pub const GUARDED_TABLES: [&str; 10] = [
     "score_runs",
     "score_history",
     "score_history_migrations",
@@ -79,9 +80,10 @@ pub const GUARDED_TABLES: [&str; 9] = [
     "score_run_stats",
     "score_shadow",
     "run_annotations",
+    "run_deferrals",
 ];
 /// Triggers that must exist before the store writes.
-pub const REQUIRED_TRIGGERS: [&str; 27] = [
+pub const REQUIRED_TRIGGERS: [&str; 30] = [
     "score_inputs_no_delete",
     "score_inputs_no_update",
     "score_inputs_no_overwrite",
@@ -109,6 +111,9 @@ pub const REQUIRED_TRIGGERS: [&str; 27] = [
     "run_annotations_no_delete",
     "run_annotations_no_update",
     "run_annotations_no_overwrite",
+    "run_deferrals_no_delete",
+    "run_deferrals_no_update",
+    "run_deferrals_no_overwrite",
 ];
 
 /// Backups go to `--history-backup-dir`, else this env var, else
@@ -255,6 +260,11 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 /// - `score_history.stale`: 1 when the age exceeded the threshold; such rows are stored but
 ///   excluded from valid history, decision changes and the shadow report.
 /// - `run_annotations`: append-only notes on a run (e.g. "stale quotes after wake").
+/// - `run_deferrals`: one append-only row per scheduled run slot that did NOT record
+///   (deferred by the freshness gate or skipped by the scheduler), keyed by
+///   `(profile, slot)` so retry ticks inside one slot add nothing. `slot` is the
+///   scheduled due time ([`due_slot`]); `reason` is a [`SkipReason::code`];
+///   stale share = `stale_count / total` (derived, `total = 0` → none).
 const QUOTE_FRESHNESS_DDL: &str = "
 ALTER TABLE score_history ADD COLUMN quote_ts INTEGER;
 ALTER TABLE score_history ADD COLUMN quote_age_secs INTEGER
@@ -274,7 +284,111 @@ CREATE TRIGGER IF NOT EXISTS run_annotations_no_overwrite BEFORE INSERT ON run_a
 WHEN EXISTS (SELECT 1 FROM run_annotations WHERE run_id = NEW.run_id
              AND created_at = NEW.created_at AND reason = NEW.reason)
 BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+CREATE TABLE IF NOT EXISTS run_deferrals (
+    profile      TEXT NOT NULL,
+    slot         INTEGER NOT NULL,
+    trigger      TEXT NOT NULL CHECK (trigger IN ('interval', 'close')),
+    observed_at  INTEGER NOT NULL,
+    reason       TEXT NOT NULL CHECK (reason IN ('initial_pass_in_progress',
+                 'year_charts_pending', 'no_live_ranking', 'close_snapshot_imminent',
+                 'clock_jump', 'no_fresh_full_pass', 'stale_share_too_high')),
+    stale_count  INTEGER NOT NULL CHECK (stale_count >= 0),
+    total        INTEGER NOT NULL CHECK (total >= stale_count),
+    PRIMARY KEY (profile, slot)
+);
+CREATE TRIGGER IF NOT EXISTS run_deferrals_no_delete BEFORE DELETE ON run_deferrals
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_deferrals_no_update BEFORE UPDATE ON run_deferrals
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_deferrals_no_overwrite BEFORE INSERT ON run_deferrals
+WHEN EXISTS (SELECT 1 FROM run_deferrals WHERE profile = NEW.profile AND slot = NEW.slot)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 ";
+
+/// Why a scheduled run slot did not record (`run_deferrals.reason`). One distinct code
+/// per scheduler skip ([`history_due`]) and freshness deferral ([`freshness_gate`]);
+/// "interval not elapsed" is not a slot (nothing was scheduled) and has no code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The feed's initial pass for this generation has not completed.
+    InitialPassInProgress,
+    /// Year charts below [`HISTORY_YEAR_COVERAGE`] and the wait has not elapsed.
+    YearChartsPending,
+    /// The ranking is not live (persisted snapshot) or is empty.
+    NoLiveRanking,
+    /// An interval slot inside [`CLOSE_DEDUP_SECS`] of the close (the close run replaces it).
+    CloseSnapshotImminent,
+    /// Wall-clock gap (suspend / clock jump) with no quote pass completed after it.
+    ClockJump,
+    /// The last completed full quote pass is older than the stale threshold.
+    NoFreshFullPass,
+    /// More than `max_stale_share` of the priced rows are stale.
+    StaleShareTooHigh,
+}
+
+impl SkipReason {
+    pub const ALL: [SkipReason; 7] = [
+        SkipReason::InitialPassInProgress,
+        SkipReason::YearChartsPending,
+        SkipReason::NoLiveRanking,
+        SkipReason::CloseSnapshotImminent,
+        SkipReason::ClockJump,
+        SkipReason::NoFreshFullPass,
+        SkipReason::StaleShareTooHigh,
+    ];
+
+    /// Stored code (the `run_deferrals.reason` CHECK lists exactly these).
+    pub fn code(self) -> &'static str {
+        match self {
+            SkipReason::InitialPassInProgress => "initial_pass_in_progress",
+            SkipReason::YearChartsPending => "year_charts_pending",
+            SkipReason::NoLiveRanking => "no_live_ranking",
+            SkipReason::CloseSnapshotImminent => "close_snapshot_imminent",
+            SkipReason::ClockJump => "clock_jump",
+            SkipReason::NoFreshFullPass => "no_fresh_full_pass",
+            SkipReason::StaleShareTooHigh => "stale_share_too_high",
+        }
+    }
+
+    /// The code for a [`history_due`] / [`freshness_gate`] message; `None` for
+    /// "interval not elapsed" (and anything unknown — a test pins that every message
+    /// those two functions can return is covered).
+    pub fn from_message(why: &str) -> Option<Self> {
+        Some(match why {
+            "initial pass in progress" => SkipReason::InitialPassInProgress,
+            "waiting for year charts" => SkipReason::YearChartsPending,
+            "no live ranking" => SkipReason::NoLiveRanking,
+            "close snapshot imminent" => SkipReason::CloseSnapshotImminent,
+            "clock jump: waiting for a quote pass after wake" => SkipReason::ClockJump,
+            "waiting for a fresh quote pass" => SkipReason::NoFreshFullPass,
+            "too many stale quotes" => SkipReason::StaleShareTooHigh,
+            _ => return None,
+        })
+    }
+}
+
+/// One `run_deferrals` row (UTC epoch seconds). `stale_share` is derived on read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunDeferral {
+    pub profile: String,
+    /// Scheduled due time of the slot that did not record ([`due_slot`]).
+    pub slot: i64,
+    /// `interval` or `close`.
+    pub trigger: String,
+    /// First recorder tick that deferred / skipped this slot.
+    pub observed_at: i64,
+    /// [`SkipReason::code`].
+    pub reason: String,
+    pub stale_count: i64,
+    pub total: i64,
+}
+
+impl RunDeferral {
+    /// `stale_count / total`, `None` when nothing was priced.
+    pub fn stale_share(&self) -> Option<f64> {
+        (self.total > 0).then(|| self.stale_count as f64 / self.total as f64)
+    }
+}
 
 /// Max length of a run annotation reason.
 pub const MAX_ANNOTATION_LEN: usize = 500;
@@ -1349,6 +1463,8 @@ pub struct RestoreReport {
     pub run_stats_added: usize,
     /// `run_annotations` rows added (0 when the backup predates v5).
     pub annotations_added: usize,
+    /// `run_deferrals` rows added (0 when the backup predates v5).
+    pub deferrals_added: usize,
     /// Row counts found in the (verified) backup.
     pub backup_runs: i64,
     pub backup_rows: i64,
@@ -1601,6 +1717,14 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Result<Vec<String>, String>
                 .execute(
                     "INSERT INTO run_annotations (run_id, reason, created_at) \
                      VALUES ('__selfcheck__', 'selfcheck', 0)",
+                    [],
+                )
+                .map(|_| ()),
+            "run_deferrals" => c
+                .execute(
+                    "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
+                     stale_count, total) VALUES ('__selfcheck__', 0, 'interval', 0, \
+                     'clock_jump', 0, 0)",
                     [],
                 )
                 .map(|_| ()),
@@ -2447,6 +2571,73 @@ impl ScoreHistoryStore {
         annotate_conn(&c, run_id, reason, now)
     }
 
+    /// Appends the deferral of one scheduled slot. Idempotent per `(profile, slot)`:
+    /// a later tick in the same slot inserts nothing (the first record is kept, never
+    /// updated). Returns whether a row was added.
+    pub fn record_deferral(&self, d: &RunDeferral) -> Result<bool, String> {
+        self.check_writable()?;
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let n = c
+            .execute(
+                "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
+                 stale_count, total) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 \
+                 WHERE NOT EXISTS (SELECT 1 FROM run_deferrals WHERE profile = ?1 AND slot = ?2)",
+                params![
+                    d.profile,
+                    d.slot,
+                    d.trigger,
+                    d.observed_at,
+                    d.reason,
+                    d.stale_count,
+                    d.total
+                ],
+            )
+            .map_err(err)?;
+        Ok(n == 1)
+    }
+
+    /// Deferred / skipped slots, newest first (`profile` filter, `slot >= since`), each
+    /// with the first run recorded at or after its slot (`None` = still a gap).
+    pub fn deferrals(
+        &self,
+        profile: Option<&str>,
+        since: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(RunDeferral, Option<String>)>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let mut st = c
+            .prepare(
+                "SELECT d.profile, d.slot, d.trigger, d.observed_at, d.reason, d.stale_count, \
+                 d.total, (SELECT r.run_id FROM score_runs r WHERE r.profile = d.profile \
+                 AND r.captured_at >= d.slot ORDER BY r.captured_at ASC, r.run_id ASC LIMIT 1) \
+                 FROM run_deferrals d WHERE (?1 IS NULL OR d.profile = ?1) AND d.slot >= ?2 \
+                 ORDER BY d.slot DESC, d.profile ASC LIMIT ?3",
+            )
+            .map_err(err)?;
+        let out = st
+            .query_map(
+                params![profile, since.unwrap_or(i64::MIN), limit as i64],
+                |r| {
+                    Ok((
+                        RunDeferral {
+                            profile: r.get(0)?,
+                            slot: r.get(1)?,
+                            trigger: r.get(2)?,
+                            observed_at: r.get(3)?,
+                            reason: r.get(4)?,
+                            stale_count: r.get(5)?,
+                            total: r.get(6)?,
+                        },
+                        r.get(7)?,
+                    ))
+                },
+            )
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err);
+        out
+    }
+
     /// Annotations of one run, oldest first.
     pub fn annotations(&self, run_id: &str) -> Result<Vec<RunAnnotation>, String> {
         let c = self.conn.lock().map_err(|_| "lock")?;
@@ -2844,7 +3035,7 @@ fn remove_all(dir: &Path, names: Vec<String>) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Merged tables and their keys.
-const MERGE_TABLES: [(&str, &[&str]); 8] = [
+const MERGE_TABLES: [(&str, &[&str]); 9] = [
     ("score_runs", &["run_id"]),
     ("score_history", &["run_id", "symbol"]),
     // Migration v3; optional in the source (a pre-v3 backup has no such table).
@@ -2854,6 +3045,7 @@ const MERGE_TABLES: [(&str, &[&str]); 8] = [
     ("score_evaluations", &["run_id", "symbol"]),
     ("score_run_stats", &["run_id"]),
     ("run_annotations", &["run_id", "created_at", "reason"]),
+    ("run_deferrals", &["profile", "slot"]),
 ];
 
 /// Tables introduced after v1, as (version, table). A backup older than `version` may
@@ -2865,6 +3057,7 @@ const LATER_TABLES: &[(i64, &str)] = &[
     (EVALUATIONS_MIGRATION, "score_evaluations"),
     (EVALUATIONS_MIGRATION, "score_run_stats"),
     (QUOTE_FRESHNESS_MIGRATION, "run_annotations"),
+    (QUOTE_FRESHNESS_MIGRATION, "run_deferrals"),
 ];
 
 /// Columns introduced by migrations after v1, as (version, table, column). An older
@@ -3092,6 +3285,7 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
         evaluations_added: n("score_evaluations"),
         run_stats_added: n("score_run_stats"),
         annotations_added: n("run_annotations"),
+        deferrals_added: n("run_deferrals"),
         backup_runs: rep.score_runs,
         backup_rows: rep.score_history,
     })
@@ -3192,6 +3386,43 @@ pub fn history_due(i: &DueInputs) -> Due {
         return Due::Interval;
     }
     Due::No("interval not elapsed")
+}
+
+/// Deterministic slot of the run the schedule wants at `now`, ignoring readiness (the
+/// key of a `run_deferrals` row), with its trigger. Mirrors [`history_due`]:
+/// - a pending close catch-up → that close slot (`close`);
+/// - interval elapsed → the LATEST due interval time `last + k·interval`,
+///   `k = ⌊(now − last) / interval⌋` (`interval`), so a long deferral leaves one row per
+///   elapsed interval and retry ticks inside one interval share a slot;
+/// - no run yet, or the clock is behind the last run → the interval bucket
+///   `⌊now / interval⌋·interval`; with `interval <= 0` (dev/tests) → `last` (or 0);
+/// - otherwise nothing is scheduled → `None`.
+pub fn due_slot(now: i64, last_run: Option<i64>, interval: i64) -> Option<(i64, &'static str)> {
+    let bucket = || {
+        if interval > 0 {
+            now - now.rem_euclid(interval)
+        } else {
+            last_run.unwrap_or(0)
+        }
+    };
+    let Some(last) = last_run else {
+        return Some((bucket(), "interval"));
+    };
+    if now < last {
+        return Some((bucket(), "interval"));
+    }
+    if let Some(slot) = last_close_snapshot(now) {
+        if now - slot < CLOSE_CATCHUP_SECS && last < slot {
+            return Some((slot, "close"));
+        }
+    }
+    if now - last >= interval {
+        if interval <= 0 {
+            return Some((last, "interval"));
+        }
+        return Some((last + (now - last) / interval * interval, "interval"));
+    }
+    None
 }
 
 /// Validated append-only INSERT of one run annotation (plain INSERT; triggers refuse
@@ -3633,6 +3864,9 @@ mod tests {
         assert_eq!(s.shadow_count().unwrap(), 6);
         s.annotate_run(&meta(1).run_id(), "stale quotes", 1)
             .unwrap();
+        assert!(s
+            .record_deferral(&deferral("sp500", 7, SkipReason::ClockJump))
+            .unwrap());
         let c = s.conn.lock().unwrap();
         for t in HISTORY_TABLES {
             let del = format!("{} FROM {t}", "DELETE");
@@ -4100,11 +4334,12 @@ mod tests {
         let s = ScoreHistoryStore::open(&p, Some(&dir.join("bk"))).unwrap();
         assert_eq!(s.run_count().unwrap(), 400);
         let c = s.conn.lock().unwrap();
-        // Annotations are operator-written only (none in this run loop).
+        // Annotations are operator-written and deferrals recorder-written only (none in
+        // this run loop).
         for t in HISTORY_TABLES
             .iter()
             .skip(4)
-            .filter(|t| **t != "run_annotations")
+            .filter(|t| **t != "run_annotations" && **t != "run_deferrals")
         {
             assert!(table_count(&c, t) > 0, "{t}");
         }
@@ -4207,14 +4442,14 @@ mod tests {
             b.execute_batch(EVALUATIONS_DDL).unwrap();
         }
         if version >= QUOTE_FRESHNESS_MIGRATION {
-            let ddl = QUOTE_FRESHNESS_DDL
-                .split(';')
-                .filter(|x| !x.contains("ALTER") && !x.trim().is_empty())
+            // Only the v5 tables are needed for a merge source (no ALTERs, no triggers).
+            let tables = QUOTE_FRESHNESS_DDL
+                .split("CREATE TABLE")
+                .skip(1)
+                .map(|seg| format!("CREATE TABLE{}", &seg[..seg.find(");").unwrap() + 2]))
                 .collect::<Vec<_>>()
-                .join(";");
-            // Triggers span several `;`; only the table is needed for a merge source.
-            let table = ddl.split("CREATE TRIGGER").next().unwrap();
-            b.execute_batch(table).unwrap();
+                .join("\n");
+            b.execute_batch(&tables).unwrap();
         }
         let has = |t: &str, c: &str| {
             b.query_row(
@@ -5834,6 +6069,7 @@ mod tests {
             "score_evaluations",
             "score_run_stats",
             "run_annotations",
+            "run_deferrals",
         ];
         s.missing_triggers
             .retain(|t| !later.iter().any(|p| t.starts_with(p)));
@@ -5975,7 +6211,7 @@ mod tests {
     fn fresh_db_is_current_schema_with_all_triggers() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(REQUIRED_TRIGGERS.len(), 27);
+        assert_eq!(REQUIRED_TRIGGERS.len(), 30);
         assert!(s.missing_triggers.is_empty());
         let c = s.conn.lock().unwrap();
         let n: i64 = c
@@ -6053,7 +6289,7 @@ mod tests {
         let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..4]).unwrap();
         assert_eq!(s.schema_version().unwrap(), 4);
         s.missing_triggers
-            .retain(|t| !t.starts_with("run_annotations"));
+            .retain(|t| !t.starts_with("run_annotations") && !t.starts_with("run_deferrals"));
         *s.selfcheck.lock().unwrap() = SelfCheck::Passed;
         s.record_run(&meta(100), &[row("ADSK", "Act", 40, 60, 10, 30)])
             .unwrap();
@@ -6358,5 +6594,257 @@ mod tests {
             assert_eq!(n, 0, "nothing written");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn deferral(profile: &str, slot: i64, reason: SkipReason) -> RunDeferral {
+        RunDeferral {
+            profile: profile.into(),
+            slot,
+            trigger: "interval".into(),
+            observed_at: slot + 30,
+            reason: reason.code().into(),
+            stale_count: 3,
+            total: 20,
+        }
+    }
+
+    #[test]
+    fn deferral_is_one_row_per_slot_and_first_record_wins() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        assert!(s
+            .record_deferral(&deferral("sp500", 100, SkipReason::ClockJump))
+            .unwrap());
+        let mut again = deferral("sp500", 100, SkipReason::StaleShareTooHigh);
+        again.observed_at = 999;
+        assert!(
+            !s.record_deferral(&again).unwrap(),
+            "same slot: nothing added"
+        );
+        // Other slot / other profile are separate rows.
+        assert!(s
+            .record_deferral(&deferral("sp500", 200, SkipReason::ClockJump))
+            .unwrap());
+        assert!(s
+            .record_deferral(&deferral("dow", 100, SkipReason::ClockJump))
+            .unwrap());
+        let d = s.deferrals(Some("sp500"), None, 10).unwrap();
+        assert_eq!(
+            d.iter()
+                .map(|(x, _)| (x.slot, x.reason.as_str(), x.observed_at))
+                .collect::<Vec<_>>(),
+            [(200, "clock_jump", 230), (100, "clock_jump", 130)],
+            "newest first; the first record of slot 100 is kept unchanged"
+        );
+        assert_eq!(d[0].0.stale_share(), Some(0.15));
+        assert_eq!(s.deferrals(None, Some(150), 10).unwrap().len(), 1);
+        assert_eq!(s.deferrals(None, None, 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn deferrals_are_append_only_and_codes_are_checked() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        // Every reason code is accepted; codes are distinct.
+        let codes: std::collections::HashSet<&str> =
+            SkipReason::ALL.iter().map(|r| r.code()).collect();
+        assert_eq!(codes.len(), SkipReason::ALL.len());
+        for (i, r) in SkipReason::ALL.iter().enumerate() {
+            assert!(
+                s.record_deferral(&deferral("sp500", i as i64, *r)).unwrap(),
+                "{r:?}"
+            );
+        }
+        // Free text, an unknown trigger and stale_count > total are refused.
+        let mut bad = deferral("sp500", 50, SkipReason::ClockJump);
+        bad.reason = "box was asleep".into();
+        assert!(s.record_deferral(&bad).unwrap_err().contains("CHECK"));
+        let mut bad = deferral("sp500", 51, SkipReason::ClockJump);
+        bad.trigger = "manual".into();
+        assert!(s.record_deferral(&bad).unwrap_err().contains("CHECK"));
+        let mut bad = deferral("sp500", 52, SkipReason::ClockJump);
+        bad.stale_count = 21;
+        assert!(s.record_deferral(&bad).unwrap_err().contains("CHECK"));
+        let c = s.conn.lock().unwrap();
+        let t = HISTORY_TABLES[9];
+        assert_eq!(t, "run_deferrals");
+        let rep = ["INSERT", "OR", "REPLACE"].join(" ");
+        for sql in [
+            format!("{} FROM {t}", "DELETE"),
+            format!("{} FROM {t} WHERE slot = 0", "DELETE"),
+            format!("{} {t} SET reason = 'clock_jump'", "UPDATE"),
+            format!("{} {t} SET stale_count = 0 WHERE slot = 0", "UPDATE"),
+            format!("{rep} INTO {t} SELECT * FROM {t}"),
+            format!("{} INTO {t} SELECT * FROM {t} LIMIT 1", "INSERT"),
+        ] {
+            let e = c.execute(&sql, []).unwrap_err().to_string();
+            assert!(e.contains("append-only"), "{sql}: {e}");
+        }
+        assert_eq!(table_count(&c, t), SkipReason::ALL.len() as i64);
+        // The behavioural self-check covers the table (empty → sentinel, rolled back).
+        assert!(trigger_behaviour_failures(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn each_deferral_trigger_is_required_for_writes() {
+        let root = tmpdir("deftrig");
+        for t in REQUIRED_TRIGGERS
+            .iter()
+            .filter(|t| t.starts_with(HISTORY_TABLES[9]))
+        {
+            let q = root.join(format!("{t}.sqlite"));
+            drop(ScoreHistoryStore::open(&q, None).unwrap());
+            let c = Connection::open(&q).unwrap();
+            c.execute_batch(&format!("{} TRIGGER {t}", "DROP")).unwrap();
+            drop(c);
+            let s = ScoreHistoryStore::open(&q, None).unwrap();
+            let e = s
+                .record_deferral(&deferral("sp500", 1, SkipReason::ClockJump))
+                .unwrap_err();
+            assert!(e.contains("triggers missing") && e.contains(t), "{e}");
+            assert!(
+                s.deferrals(None, None, 10).unwrap().is_empty(),
+                "nothing written"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deferral_survives_reopen_and_is_in_backup_and_restore() {
+        let root = tmpdir("defbk");
+        let bdir = root.join("bk");
+        let p = root.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        s.record_run(&meta(100), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        assert!(s
+            .record_deferral(&deferral("sp500", 50, SkipReason::StaleShareTooHigh))
+            .unwrap());
+        assert!(s
+            .record_deferral(&deferral("sp500", 500, SkipReason::ClockJump))
+            .unwrap());
+        drop(s);
+        // Restart: reopen re-runs init + migrations; the rows are still there.
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        let d = s.deferrals(None, None, 10).unwrap();
+        assert_eq!(d.len(), 2);
+        // Slot 50 was later recorded (run at 100); slot 500 is still a gap.
+        assert_eq!(
+            d.iter()
+                .map(|(x, r)| (x.slot, r.clone()))
+                .collect::<Vec<_>>(),
+            [(500, None), (50, Some(meta(100).run_id()))]
+        );
+        assert!(!s
+            .record_deferral(&deferral("sp500", 50, SkipReason::ClockJump))
+            .unwrap());
+        // Backup carries the table.
+        std::fs::create_dir_all(&bdir).unwrap();
+        let bk = bdir.join("def.sqlite.gz");
+        s.export_to(&bk).unwrap();
+        let pl = plain(&bk).unwrap();
+        let b = Connection::open(&pl.path).unwrap();
+        assert_eq!(
+            table_count(&b, "run_deferrals"),
+            2,
+            "backup contains run_deferrals"
+        );
+        drop(b);
+        drop(pl);
+        // Append-only restore merges them; a second restore adds nothing.
+        let data = root.join("d");
+        let r = restore(&bk, &data, &root.join("bk2")).unwrap();
+        assert_eq!(r.deferrals_added, 2);
+        assert_eq!(
+            restore(&bk, &data, &root.join("bk2"))
+                .unwrap()
+                .deferrals_added,
+            0
+        );
+        let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
+        assert_eq!(t.deferrals(None, None, 10).unwrap(), d);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn due_slot_is_deterministic_from_the_schedule() {
+        const H: i64 = 6 * 3600;
+        let now: i64 = 1_793_538_000; // Sun 13:00 UTC: no close slot pending.
+                                      // Interval not elapsed: nothing scheduled.
+        assert_eq!(due_slot(now, Some(now - H + 1), H), None);
+        // Elapsed: the latest due interval time, stable across retry ticks.
+        assert_eq!(due_slot(now, Some(now - H), H), Some((now, "interval")));
+        assert_eq!(
+            due_slot(now + 599, Some(now - H), H),
+            Some((now, "interval"))
+        );
+        // A long deferral: one slot per elapsed interval.
+        assert_eq!(
+            due_slot(now + H + 5, Some(now - H), H),
+            Some((now + H, "interval"))
+        );
+        // No run yet / clock behind the last run: the interval bucket.
+        let b = now - now.rem_euclid(H);
+        assert_eq!(due_slot(now, None, H), Some((b, "interval")));
+        assert_eq!(due_slot(now, Some(now + 50), H), Some((b, "interval")));
+        assert_eq!(due_slot(now, Some(now - 5), 0), Some((now - 5, "interval")));
+        // A pending close catch-up wins, keyed by the close slot.
+        let close = next_close_snapshot(now);
+        assert_eq!(
+            due_slot(close + 60, Some(close - 600), H),
+            Some((close, "close"))
+        );
+        assert_eq!(
+            due_slot(close + 7_200, Some(close - 600), H),
+            Some((close, "close"))
+        );
+        // Agrees with history_due on every due/not-due decision it schedules.
+        for (t, last) in [(now, now - H), (now, now - 10), (close + 60, close - 600)] {
+            let due = history_due(&DueInputs {
+                now: t,
+                pass_completed: true,
+                since_pass: 0,
+                charts_ready: true,
+                live: true,
+                rows: 1,
+                last_run: Some(last),
+                interval: H,
+            });
+            match (due, due_slot(t, Some(last), H)) {
+                (Due::Close(c), Some((slot, "close"))) => assert_eq!(c, slot),
+                (Due::Interval, Some((_, "interval"))) => {}
+                (Due::No("interval not elapsed"), None) => {}
+                other => panic!("{t}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_scheduler_and_gate_message_has_a_distinct_reason_code() {
+        let src = include_str!("score_history.rs");
+        let body = |name: &str| {
+            let i = src.find(&format!("pub fn {name}(")).unwrap();
+            &src[i..i + src[i..].find("\n}\n").unwrap()]
+        };
+        let mut codes = std::collections::HashSet::new();
+        let mut n = 0;
+        for f in ["history_due", "freshness_gate"] {
+            for m in body(f).split('"').skip(1).step_by(2) {
+                n += 1;
+                if m == "interval not elapsed" {
+                    assert_eq!(SkipReason::from_message(m), None, "not a scheduled slot");
+                    continue;
+                }
+                let r = SkipReason::from_message(m)
+                    .unwrap_or_else(|| panic!("no reason code for skip message {m:?}"));
+                assert!(codes.insert(r.code()), "{m:?} shares a code");
+            }
+        }
+        assert_eq!(n, 8, "history_due (5) + freshness_gate (3) messages");
+        assert_eq!(
+            codes.len(),
+            SkipReason::ALL.len(),
+            "every code is reachable"
+        );
     }
 }

@@ -20,6 +20,9 @@
   `regularMarketTime` ≈ 16:00 ET, so a post-close pass fails safe. `--defer-warn-hours` warns once per
   deferral episode. QuoteSummary still has no trade time.
 - A not-due tick clears the deferral shown in `/status`.
+- Append-only `run_deferrals` (still migration v5) records each scheduled slot that does not record: one row per
+  `(profile, slot)`, with a reason code, `stale_count` and `total`. It is covered by backups and restore. Read it with
+  `GET /history/deferrals` or `history-deferrals`.
 
 ### V3.1 decision rule — SHADOW MODE (Android core + headless)
 

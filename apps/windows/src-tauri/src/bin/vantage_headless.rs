@@ -107,6 +107,7 @@ history TICKER [--days N] [--changes] [--profile P] [--tz IANA] [--json]\n\
      history-backup --data-dir DIR [--history-backup-dir B] [--verify]   (verified backup now; --verify checks all)\n\
      history-restore FILE --data-dir DIR [--history-backup-dir B]   (append-only merge; refused while serve runs)\n\
      history-annotate RUN_ID --reason TEXT [--data-dir DIR]   (append-only run note; CLI-only, writes the store file, OK while serve runs)\n\
+     history-deferrals [--profile P] [--since EPOCH] [--limit N]   (read-only: scheduled runs that were deferred/skipped, via GET /history/deferrals)\n\
      history-shadow-report --data-dir DIR [--profile P] [--min-n N] [--json]   (V3.1 shadow: demoted vs kept, 5/20/60d)\n\
 serve:  --history-interval-hours H (default 6; 0 disables score history)\n\
      \x20       --history-backup-dir B (default $VANTAGE_HISTORY_BACKUP_DIR, else $XDG_DATA_HOME/vantage/backups\n\
@@ -327,6 +328,20 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 v.score_runs,
                 v.score_history,
                 v.score_shadow
+            );
+            Ok(())
+        }
+        "history-deferrals" => {
+            // Read-only: scheduled slots that did not record (`run_deferrals`).
+            let mut path = "/history/deferrals?".to_string();
+            for k in ["profile", "since", "limit"] {
+                if let Some(v) = o.flags.get(k) {
+                    path.push_str(&format!("{k}={}&", pct(v)));
+                }
+            }
+            println!(
+                "{}",
+                http_req(&addr, "GET", path.trim_end_matches(['&', '?']))?
             );
             Ok(())
         }
@@ -1093,6 +1108,22 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
             let model = parse_model(q.get("model").copied().unwrap_or("v3"))?;
             Ok(serde_json::to_value(engine.parity(model)?).unwrap())
         }
+        "/history/deferrals" => {
+            let profile = q.get("profile").map(|p| pct_decode(p)).transpose()?;
+            let since = q
+                .get("since")
+                .map(|v| {
+                    v.parse::<i64>()
+                        .map_err(|_| "bad since (epoch seconds)".to_string())
+                })
+                .transpose()?;
+            let limit = q
+                .get("limit")
+                .map(|v| v.parse::<usize>().map_err(|_| "bad limit".to_string()))
+                .transpose()?
+                .unwrap_or(100);
+            engine.deferrals(profile.as_deref(), since, limit)
+        }
         "/history/annotations" => {
             let run = pct_decode(q.get("run").ok_or("annotations needs run=")?)?;
             Ok(serde_json::json!({ "run_id": run, "annotations": engine.annotations(&run)? }))
@@ -1449,6 +1480,19 @@ mod tests {
         assert!(route(&engine, "GET", "/history/annotations?run=sp500-1-v3")
             .0
             .starts_with("200"));
+        // Deferred / skipped slots: read-only GET only.
+        let (st, body) = route(&engine, "GET", "/history/deferrals?profile=sp500&limit=5");
+        assert!(st.starts_with("200"), "{st} {body}");
+        assert!(body.contains("\"deferrals\":[]"), "{body}");
+        assert!(!route(&engine, "GET", "/history/deferrals?limit=0")
+            .0
+            .starts_with("200"));
+        assert!(!route(&engine, "GET", "/history/deferrals?since=x")
+            .0
+            .starts_with("200"));
+        assert!(route(&engine, "POST", "/history/deferrals")
+            .0
+            .starts_with("405"));
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let send = |extra: &str| -> String {

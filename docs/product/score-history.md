@@ -282,5 +282,45 @@ The Director approved this design on 2026-11-04, including the defaults: 1800 s 
     and refuses a store that is not at v5 or is missing any trigger.
   - The daemon has no write route. Read annotations with `GET /history/annotations?run=`; they also appear on that
     run's `/history` points.
+- **`run_deferrals` (no silent gaps).** Every scheduled slot that does not record leaves one durable, append-only
+  row in `history.sqlite`. The in-memory `TickClock` deferral is only what `/status` shows.
+  - Columns: `profile`, `slot` (UTC epoch of the scheduled due time), `trigger` (`interval` or `close`),
+    `observed_at` (UTC epoch of the first tick that did not record it), `reason`, `stale_count` and `total` (priced
+    rows at that tick). The stale share is derived as `stale_count / total` (none when `total = 0`); it is not
+    stored. A CHECK refuses free text, an unknown trigger and `stale_count > total`.
+  - `reason` codes, one per existing skip or defer message:
+
+    | code | message |
+    |---|---|
+    | `initial_pass_in_progress` | `initial pass in progress` |
+    | `year_charts_pending` | `waiting for year charts` |
+    | `no_live_ranking` | `no live ranking` |
+    | `close_snapshot_imminent` | `close snapshot imminent` (the close run replaces that interval slot) |
+    | `clock_jump` | `clock jump: waiting for a quote pass after wake` |
+    | `no_fresh_full_pass` | `waiting for a fresh quote pass` |
+    | `stale_share_too_high` | `too many stale quotes` |
+
+    `interval not elapsed` is not a scheduled slot and writes nothing. A test fails if `history_due` or
+    `freshness_gate` gains a message without a code.
+  - **Slot rule** (`due_slot`, which mirrors `history_due`):
+    - A pending close catch-up uses that close slot.
+    - Once the interval has elapsed, the slot is the latest due interval time, `last + k·interval` with
+      `k = ⌊(now − last) / interval⌋`. A long deferral therefore leaves one row per elapsed interval.
+    - With no run yet, or with the clock behind the last run, the slot is the interval bucket
+      `⌊now / interval⌋·interval`.
+  - **No flooding.** `PRIMARY KEY (profile, slot)`, and the insert is `INSERT … SELECT … WHERE NOT EXISTS` on that
+    key (the `no_overwrite` trigger aborts a duplicate insert, as on every other history table). The first tick of a
+    slot wins: retry ticks, a later different reason, and a restart inside the same slot add nothing and change
+    nothing.
+  - **Append-only.** `BEFORE DELETE`, `BEFORE UPDATE` and `BEFORE INSERT` (existing key) triggers
+    `RAISE(ABORT)`. They are required at open, covered by the behavioural self-check and the backups, and merged by
+    restore (key `profile, slot`; 0 rows from a pre-v5 backup).
+  - **A slot recorded later keeps its deferral row.** Join on `score_runs` to see whether the gap closed.
+    `GET /history/deferrals?profile=&since=&limit=` (and `vantage-headless history-deferrals [--profile P]
+    [--since EPOCH] [--limit N]`) returns the rows newest first, each with `recorded_run`: the first run at or after
+    the slot, or `null` while it is still a gap. This is read-only, and the daemon has no write route.
+  - **Limit.** The recorder writes these rows on its ticks. Slots that fall entirely inside a period when the process
+    was not running (frozen, down) get no row. Only the slot that is due when it resumes does. Those gaps show up as
+    missing `score_runs`.
 - **`POST /persist`** refuses any request that carries an `Origin` header and requires `X-Vantage-Cli: 1` (the CLI
   sends it).

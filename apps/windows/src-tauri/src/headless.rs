@@ -1433,6 +1433,38 @@ impl HeadlessEngine {
             .annotate_run(run_id, reason, now)
     }
 
+    /// Deferred / skipped scheduled slots (`run_deferrals`), newest first, as JSON
+    /// (read-only). `recorded_run`: first run at or after the slot (`null` = still a gap).
+    pub fn deferrals(
+        &self,
+        profile: Option<&str>,
+        since: Option<i64>,
+        limit: usize,
+    ) -> Result<serde_json::Value, String> {
+        if limit == 0 || limit > HISTORY_ALL_MAX_LIMIT {
+            return Err(format!("limit must be 1..={HISTORY_ALL_MAX_LIMIT}"));
+        }
+        let rows = self
+            .history
+            .as_ref()
+            .ok_or("score history disabled (--history-interval-hours 0)")?
+            .deferrals(profile, since, limit)?;
+        let out: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(d, run)| {
+                serde_json::json!({
+                    "profile": d.profile, "slot": d.slot,
+                    "slot_utc": crate::score_history::iso_utc(d.slot),
+                    "trigger": d.trigger, "observed_at": d.observed_at,
+                    "observed_utc": crate::score_history::iso_utc(d.observed_at),
+                    "reason": d.reason, "stale_count": d.stale_count, "total": d.total,
+                    "stale_share": d.stale_share(), "recorded_run": run,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "deferrals": out }))
+    }
+
     /// Annotations of one run.
     pub fn annotations(
         &self,
@@ -1879,6 +1911,7 @@ pub fn record_history_tick_fresh(
     };
     let (android, eval) = run_evaluation(&snap, rank_universe.as_deref(), &universe)?;
     let ranked = android_to_ranked(&android);
+    let last_run = store.last_run_at(&profile, HISTORY_MODEL)?;
     let due = history_due(&DueInputs {
         now,
         pass_completed,
@@ -1886,18 +1919,9 @@ pub fn record_history_tick_fresh(
         charts_ready,
         live: source == "live",
         rows: ranked.len(),
-        last_run: store.last_run_at(&profile, HISTORY_MODEL)?,
+        last_run,
         interval,
     });
-    let trigger = match due {
-        Due::No(why) => {
-            // Not due is not a freshness deferral: drop any stale deferral episode.
-            clock.clear_deferred();
-            return Ok(HistoryWrite::Skipped(why));
-        }
-        Due::Interval => "interval",
-        Due::Close(_) => "close",
-    };
     let fresh = src.quote_times().map(|quote_ts| QuoteFreshness {
         quote_ts,
         stale_after_secs: clock.stale_after,
@@ -1909,6 +1933,37 @@ pub fn record_history_tick_fresh(
     let stale_rows = fresh.as_ref().map_or(0, |f| {
         priced.iter().filter(|r| f.of(&r.symbol, now).2).count()
     });
+    // A scheduled slot that does not record leaves one durable `run_deferrals` row
+    // (first tick wins; later ticks in the same slot add nothing).
+    let note_slot = |why: &'static str| -> Result<(), String> {
+        let (Some(reason), Some((slot, trigger))) = (
+            crate::score_history::SkipReason::from_message(why),
+            crate::score_history::due_slot(now, last_run, interval),
+        ) else {
+            return Ok(());
+        };
+        store
+            .record_deferral(&crate::score_history::RunDeferral {
+                profile: profile.clone(),
+                slot,
+                trigger: trigger.into(),
+                observed_at: now,
+                reason: reason.code().into(),
+                stale_count: stale_rows as i64,
+                total: priced.len() as i64,
+            })
+            .map(|_| ())
+    };
+    let trigger = match due {
+        Due::No(why) => {
+            // Not due is not a freshness deferral: drop any stale deferral episode.
+            clock.clear_deferred();
+            note_slot(why)?;
+            return Ok(HistoryWrite::Skipped(why));
+        }
+        Due::Interval => "interval",
+        Due::Close(_) => "close",
+    };
     if let Some(why) = freshness_gate(&FreshInputs {
         now,
         rows: priced.len(),
@@ -1919,6 +1974,7 @@ pub fn record_history_tick_fresh(
         max_stale_share: clock.max_stale_share,
     }) {
         clock.note_deferred(now, why);
+        note_slot(why)?;
         return Ok(HistoryWrite::Skipped(why));
     }
     clock.clear_deferred();
@@ -2726,6 +2782,235 @@ mod history_tick_tests {
             s.stale_counts(&format!("sp500-{t}-v3")).unwrap(),
             (n as i64, 0)
         );
+    }
+
+    fn defs(s: &ScoreHistoryStore) -> Vec<crate::score_history::RunDeferral> {
+        s.deferrals(None, None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect()
+    }
+
+    /// One recorded interval run at `NOW` on fresh quotes (the schedule's anchor).
+    fn anchored(f: &Fake, s: &ScoreHistoryStore) {
+        use crate::score_history::TickClock;
+        f.pass.set(Some(NOW - 10));
+        set_quotes(f, 0, NOW - 5, NOW - 5);
+        let w = ftick(f, s, &Mutex::new(None), &TickClock::new(1800), NOW);
+        assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+    }
+
+    #[test]
+    fn stale_share_deferral_writes_one_record_with_counts_per_slot() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let mut f = live_fake();
+        f.snap = wide_snap();
+        let total = priced(&f).len();
+        anchored(&f, &s);
+        // Next slot (NOW + H6): 8 priced rows 2 h old (> 10%). Retry ticks every 60 s
+        // inside the slot (a fresh TickClock each: no clock-jump gate).
+        let t = NOW + H6 + 60;
+        for k in 0..5 {
+            let at = t + 60 * k;
+            f.pass.set(Some(at - 10));
+            set_quotes(&f, 8, at - 7200, at - 5);
+            assert_eq!(
+                ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), at),
+                HistoryWrite::Skipped("too many stale quotes")
+            );
+        }
+        let d = defs(&s);
+        assert_eq!(d.len(), 1, "retry ticks in one slot: one record");
+        assert_eq!(
+            (
+                d[0].slot,
+                d[0].trigger.as_str(),
+                d[0].observed_at,
+                d[0].reason.as_str()
+            ),
+            (NOW + H6, "interval", t, "stale_share_too_high")
+        );
+        assert_eq!((d[0].stale_count, d[0].total), (8, total as i64));
+        assert_eq!(d[0].profile, "sp500");
+        // Still stale one interval later: the next slot gets its own record.
+        let t2 = NOW + 2 * H6 + 30;
+        f.pass.set(Some(t2 - 10));
+        set_quotes(&f, 8, t2 - 7200, t2 - 5);
+        let _ = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t2);
+        assert_eq!(
+            defs(&s).iter().map(|x| x.slot).collect::<Vec<_>>(),
+            [NOW + 2 * H6, NOW + H6]
+        );
+        // Fresh again: recorded; the deferrals stay (append-only), and the newer one
+        // points at the run that closed the gap.
+        let t3 = t2 + 60;
+        set_quotes(&f, 0, t3 - 5, t3 - 5);
+        f.pass.set(Some(t3 - 10));
+        let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t3);
+        assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+        let all = s.deferrals(None, None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all
+            .iter()
+            .all(|(_, r)| r.as_deref() == Some(format!("sp500-{t3}-v3").as_str())));
+    }
+
+    #[test]
+    fn clock_jump_deferral_is_recorded() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let f = live_fake();
+        let total = priced(&f).len() as i64;
+        f.pass.set(Some(NOW - 10));
+        set_quotes(&f, 0, NOW - 5, NOW - 5);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, NOW),
+            HistoryWrite::Recorded { .. }
+        ));
+        // Same clock, next tick 6 h later (> CLOCK_JUMP_SECS): quotes fresh, still deferred.
+        let t = NOW + H6 + 60;
+        f.pass.set(Some(t - 10));
+        set_quotes(&f, 0, t - 5, t - 5);
+        assert_eq!(
+            ftick(&f, &s, &seen, &clock, t),
+            HistoryWrite::Skipped("clock jump: waiting for a quote pass after wake")
+        );
+        let _ = ftick(&f, &s, &seen, &clock, t + 60);
+        let d = defs(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            (
+                d[0].slot,
+                d[0].reason.as_str(),
+                d[0].stale_count,
+                d[0].total
+            ),
+            (NOW + H6, "clock_jump", 0, total)
+        );
+    }
+
+    #[test]
+    fn no_fresh_full_pass_deferral_is_recorded() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        let t = NOW + H6 + 60;
+        // Quotes fresh, but the last completed full pass is 1 h old (> 30 min).
+        f.pass.set(Some(t - 3600));
+        set_quotes(&f, 0, t - 5, t - 5);
+        assert_eq!(
+            ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t),
+            HistoryWrite::Skipped("waiting for a fresh quote pass")
+        );
+        let d = defs(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            (d[0].slot, d[0].reason.as_str()),
+            (NOW + H6, "no_fresh_full_pass")
+        );
+    }
+
+    #[test]
+    fn scheduler_skips_of_a_due_slot_are_recorded_with_their_codes() {
+        use crate::score_history::{next_close_snapshot, TickClock};
+        let clock = || TickClock::new(1800);
+        let t = NOW + H6 + 60;
+        let fresh = |f: &Fake, at: i64| {
+            f.pass.set(Some(at - 10));
+            set_quotes(f, 0, at - 5, at - 5);
+        };
+        // Initial pass in progress.
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        f.gen.set(u64::MAX);
+        let _ = ftick(&f, &s, &Mutex::new(None), &clock(), t);
+        // Year charts pending (pass just seen, coverage below 95%).
+        let s2 = ScoreHistoryStore::open_in_memory().unwrap();
+        let f2 = live_fake();
+        anchored(&f2, &s2);
+        f2.year.set(0);
+        fresh(&f2, t);
+        let _ = ftick(&f2, &s2, &Mutex::new(None), &clock(), t);
+        // Not a live ranking.
+        let s3 = ScoreHistoryStore::open_in_memory().unwrap();
+        let f3 = live_fake();
+        anchored(&f3, &s3);
+        f3.source.set("persisted");
+        fresh(&f3, t);
+        let _ = ftick(&f3, &s3, &Mutex::new(None), &clock(), t);
+        let one = |s: &ScoreHistoryStore| {
+            let d = defs(s);
+            assert_eq!(d.len(), 1, "{d:?}");
+            (d[0].slot, d[0].reason.clone())
+        };
+        assert_eq!(one(&s), (NOW + H6, "initial_pass_in_progress".into()));
+        assert_eq!(one(&s2), (NOW + H6, "year_charts_pending".into()));
+        assert_eq!(one(&s3), (NOW + H6, "no_live_ranking".into()));
+        // Close imminent: the interval slot 15 min before the close is skipped.
+        let s4 = ScoreHistoryStore::open_in_memory().unwrap();
+        let f4 = live_fake();
+        let close = next_close_snapshot(NOW);
+        let at = close - 15 * 60;
+        fresh(&f4, at - H6);
+        let w = ftick(&f4, &s4, &Mutex::new(None), &clock(), at - H6);
+        assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+        fresh(&f4, at);
+        assert_eq!(
+            ftick(&f4, &s4, &Mutex::new(None), &clock(), at),
+            HistoryWrite::Skipped("close snapshot imminent")
+        );
+        assert_eq!(one(&s4), (at, "close_snapshot_imminent".into()));
+        // Not due at all ("interval not elapsed") writes nothing.
+        let s5 = ScoreHistoryStore::open_in_memory().unwrap();
+        let f5 = live_fake();
+        anchored(&f5, &s5);
+        fresh(&f5, NOW + 600);
+        assert_eq!(
+            ftick(&f5, &s5, &Mutex::new(None), &clock(), NOW + 600),
+            HistoryWrite::Skipped("interval not elapsed")
+        );
+        assert!(defs(&s5).is_empty());
+    }
+
+    #[test]
+    fn deferral_record_survives_a_restart() {
+        use crate::score_history::TickClock;
+        let dir = std::env::temp_dir().join(format!(
+            "ds-defer-restart-{}-{}",
+            std::process::id(),
+            crate::commands::wall_epoch()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("history.sqlite");
+        let f = live_fake();
+        let t = NOW + H6 + 60;
+        {
+            let s = ScoreHistoryStore::open(&p, None).unwrap();
+            anchored(&f, &s);
+            f.pass.set(Some(t - 3600));
+            let _ = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t);
+            assert_eq!(defs(&s).len(), 1);
+        }
+        // Restart: reopen (init + migrations again), retry in the same slot.
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        let before = defs(&s);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].reason, "no_fresh_full_pass");
+        f.pass.set(Some(t + 50));
+        set_quotes(&f, priced(&f).len(), t - 7200, t);
+        let _ = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t + 60);
+        assert_eq!(
+            defs(&s),
+            before,
+            "same slot after restart: unchanged, no new row"
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// No-feed engine in a temp dir with the given gate limits (no port, no network).
