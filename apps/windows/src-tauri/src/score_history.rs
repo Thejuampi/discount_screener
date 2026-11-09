@@ -7935,4 +7935,47 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
         time("before: old query, no index (271df3b)", &old);
         time("after: CTE, no index", &new);
     }
+
+    /// Close catch-up edges, on a grid around the close slot: `now − slot ==
+    /// CLOSE_CATCHUP_SECS` is past the catch-up (strict `<`), `last == slot` means the
+    /// close already recorded (strict `last < slot`); due_slot and history_due agree.
+    #[test]
+    fn due_slot_close_catch_up_edges_match_history_due() {
+        const H: i64 = 30 * 86_400; // long interval: only the close branch can fire
+        let slot = next_close_snapshot(1_793_538_000);
+        let due_close = |now: i64, last: i64| {
+            let ds = due_slot(now, Some(last), H);
+            let hd = history_due(&DueInputs {
+                now,
+                pass_completed: true,
+                since_pass: 0,
+                charts_ready: true,
+                live: true,
+                rows: 1,
+                last_run: Some(last),
+                interval: H,
+            });
+            let a = ds == Some((slot, "close"));
+            assert_eq!(
+                a,
+                hd == Due::Close(slot),
+                "now-slot={} last-slot={}",
+                now - slot,
+                last - slot
+            );
+            a
+        };
+        for dn in [
+            0,
+            1,
+            CLOSE_CATCHUP_SECS - 1,
+            CLOSE_CATCHUP_SECS,
+            CLOSE_CATCHUP_SECS + 1,
+        ] {
+            for dl in [-3_600, -1, 0, 1] {
+                let want = dn < CLOSE_CATCHUP_SECS && dl < 0;
+                assert_eq!(due_close(slot + dn, slot + dl), want, "dn={dn} dl={dl}");
+            }
+        }
+    }
 }

@@ -1994,9 +1994,9 @@ mod pass_start_seal {
         trait AmbiguousIfClone<A> {
             fn some_item() {}
         }
-        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        impl<T> AmbiguousIfClone<()> for T {}
         struct IsClone;
-        impl<T: ?Sized + Clone> AmbiguousIfClone<IsClone> for T {}
+        impl<T: Clone> AmbiguousIfClone<IsClone> for T {}
         let _ = <PassStart as AmbiguousIfClone<_>>::some_item;
     };
 
@@ -2021,6 +2021,11 @@ mod pass_start_seal {
             assert!(epoch > 0, "PassStart::at needs a real epoch, got {epoch}");
             Self(epoch)
         }
+
+        // INVARIANT: no method may construct `Self` from `&self` (no `copy()`,
+        // `same_start()`, `with_epoch()`, `From<&PassStart>` …): that would be `Clone`
+        // by another name and reopen the reuse hole. New starts come only from `now()`
+        // (and the cfg(test) `at()`).
 
         /// Read-only view; consumers still take the `PassStart` itself by value.
         pub fn epoch(&self) -> i64 {
