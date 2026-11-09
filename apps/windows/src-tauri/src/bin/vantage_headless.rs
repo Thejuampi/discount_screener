@@ -39,6 +39,16 @@ const DEFAULT_ADDR: &str = "127.0.0.1:7979";
 const MAX_CONNECTIONS: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// One-line identity for `--version` / `-V`.
+/// Shape: `vantage-headless <CARGO_PKG_VERSION> (<full-sha|unknown>[-dirty])`.
+fn version_line() -> String {
+    format!(
+        "vantage-headless {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("DS_BUILD_SHA")
+    )
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match run(args) {
@@ -70,6 +80,7 @@ fn parse_opts(args: &[String]) -> Opts {
                 "json"
                     | "market-context"
                     | "help"
+                    | "version"
                     | "allow-remote"
                     | "changes"
                     | "no-feed"
@@ -83,6 +94,8 @@ fn parse_opts(args: &[String]) -> Opts {
             }
         } else if a == "-h" {
             flags.insert("help".into(), "1".into());
+        } else if a == "-V" {
+            flags.insert("version".into(), "1".into());
         } else {
             positional.push(a.clone());
         }
@@ -93,6 +106,7 @@ fn parse_opts(args: &[String]) -> Opts {
 
 fn usage() -> &'static str {
     "usage: vantage-headless <serve|rank|status|parity|persist|rank-snapshot|history> [options]\n\
+     \x20       --version | -V   print version and build SHA\n\
      common: --addr HOST:PORT   (default 127.0.0.1:7979)\n\
      serve:  --profile sp500|dow|merval|... --semantics android|tauri (feed universe; default android)\n\
      \x20       --data-dir DIR [--market-context] [--allow-remote]\n\
@@ -115,6 +129,10 @@ serve:  --history-interval-hours H (default 6; 0 disables score history)\n\
 fn run(args: Vec<String>) -> Result<(), String> {
     let o = parse_opts(&args);
     let cmd = o.positional.first().map(String::as_str).unwrap_or("help");
+    if o.flags.contains_key("version") || cmd == "version" {
+        println!("{}", version_line());
+        return Ok(());
+    }
     if o.flags.contains_key("help") || cmd == "help" {
         println!("{}", usage());
         return Ok(());
@@ -1184,6 +1202,29 @@ mod tests {
         assert!(run(vec!["rank".into(), "--help".into()]).is_ok());
         assert!(run(vec!["--help".into()]).is_ok());
         assert!(run(vec!["help".into()]).is_ok());
+    }
+
+    #[test]
+    fn version_line_has_sha_or_unknown() {
+        let line = version_line();
+        // "vantage-headless 0.1.0 (<40-hex>[-dirty]|unknown)"
+        assert!(
+            line.starts_with("vantage-headless "),
+            "unexpected version line: {line}"
+        );
+        let start = line.find('(').expect("missing ( in version line");
+        let end = line.rfind(')').expect("missing ) in version line");
+        let inner = &line[start + 1..end];
+        let sha = inner.strip_suffix("-dirty").unwrap_or(inner);
+        let ok = sha == "unknown"
+            || (sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(ok, "build SHA must be 40-hex or unknown, got {inner:?} in {line}");
+        assert!(run(vec!["--version".into()]).is_ok());
+        assert!(run(vec!["-V".into()]).is_ok());
+        assert!(run(vec!["version".into()]).is_ok());
+        // Usage text still works and mentions --version.
+        assert!(run(vec!["--help".into()]).is_ok());
+        assert!(usage().contains("--version"));
     }
 
     #[test]

@@ -1120,6 +1120,8 @@ pub struct EngineStatus {
     pub score_panics: u64,
     pub source: &'static str,
     pub snapshot_captured_at_epoch: Option<i64>,
+    /// Full git SHA (or `unknown`) stamped at build time; same value `--version` prints.
+    pub build_sha: String,
 }
 
 /// Model id stored in `score_runs.model` by the headless writer.
@@ -1480,6 +1482,7 @@ impl HeadlessEngine {
             score_panics: SCORE_PANICS.load(Ordering::Relaxed),
             source,
             snapshot_captured_at_epoch: Some(snap.captured_at_epoch),
+            build_sha: env!("DS_BUILD_SHA").to_string(),
         }
     }
 }
