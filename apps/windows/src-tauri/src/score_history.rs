@@ -945,10 +945,7 @@ const BAD_QUARANTINE_RENAME_ATTEMPTS: usize = 8;
 /// Move `path` aside to a unique `*.bad*` name. Check-or-retry before rename so
 /// a concurrent quarantine cannot clobber an existing `.bad` (capped attempts).
 fn quarantine_input_blob_aside(path: &Path, kind: &str) -> Result<(), String> {
-    let base = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("blob");
+    let base = path.file_name().and_then(|s| s.to_str()).unwrap_or("blob");
     let mut last = String::new();
     for _ in 0..BAD_QUARANTINE_RENAME_ATTEMPTS {
         let bad = unique_bad_quarantine_path(path, base);
@@ -4908,7 +4905,11 @@ mod tests {
         assert_eq!(std::fs::read(&path_dirlink).unwrap(), b"payload-dirlink");
         let bad_dirlink = inputs.join(format!("{hash_dirlink}.bad"));
         assert!(
-            bad_dirlink.symlink_metadata().unwrap().file_type().is_symlink(),
+            bad_dirlink
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "symlink-to-directory quarantined"
         );
 
@@ -4921,7 +4922,11 @@ mod tests {
         assert_eq!(std::fs::read(&path_dang).unwrap(), b"payload-dangling");
         let bad_dang = inputs.join(format!("{hash_dang}.bad"));
         assert!(
-            bad_dang.symlink_metadata().unwrap().file_type().is_symlink(),
+            bad_dang
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "dangling symlink quarantined"
         );
 
@@ -4939,7 +4944,7 @@ mod tests {
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with(&format!("{hash4}.bad.")) )
+            .filter(|n| n.starts_with(&format!("{hash4}.bad.")))
             .collect();
         assert!(
             !unique_bads.is_empty(),
