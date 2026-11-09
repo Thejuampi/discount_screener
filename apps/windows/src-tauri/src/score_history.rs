@@ -41,10 +41,26 @@ pub const SCORE_RULE_VERSION: &str = "V3";
 /// Migration that adds the full-universe evaluation tables. THE single number to bump
 /// if another migration lands on main first (v3 is #68's score_shadow).
 pub const EVALUATIONS_MIGRATION: i64 = 4;
+/// Migration that adds per-row quote freshness (`quote_ts`, `quote_age_secs`, `stale`)
+/// and the append-only `run_annotations` table. Frozen as shipped at 3c2e275.
+pub const QUOTE_FRESHNESS_MIGRATION: i64 = 5;
+/// Migration that adds the append-only `run_deferrals` table (+ triggers) and the
+/// `score_runs (profile, model, captured_at)` index.
+pub const RUN_DEFERRALS_MIGRATION: i64 = 6;
 /// Highest score-history migration this binary knows.
-pub const SCHEMA_VERSION: i64 = EVALUATIONS_MIGRATION;
+pub const SCHEMA_VERSION: i64 = RUN_DEFERRALS_MIGRATION;
+/// A row whose quote is older than this at record time is stored with `stale = 1`
+/// (kept, but excluded from valid history, decision changes and the shadow report).
+pub const DEFAULT_QUOTE_STALE_SECS: i64 = 1800;
+/// A run is deferred while more than this share of its rows is stale (default of
+/// `--max-stale-share`; Director-approved design, 2026-11-04).
+pub const MAX_STALE_SHARE: f64 = 0.10;
+/// The recorder ticks every 60 s; a wall-clock gap longer than this between ticks means
+/// the process was suspended (or the clock jumped) and quotes must be refreshed first.
+/// Default of `--clock-jump-secs` (Director-approved design, 2026-11-04).
+pub const CLOCK_JUMP_SECS: i64 = 300;
 /// Tables exported to backups and merged on restore (indices 0..=2 are fixed).
-pub const HISTORY_TABLES: [&str; 8] = [
+pub const HISTORY_TABLES: [&str; 10] = [
     "score_runs",
     "score_history",
     "score_history_migrations",
@@ -53,9 +69,11 @@ pub const HISTORY_TABLES: [&str; 8] = [
     "score_run_inputs",
     "score_evaluations",
     "score_run_stats",
+    "run_annotations",
+    "run_deferrals",
 ];
 /// Tables the source guard protects (includes the planned shadow table).
-pub const GUARDED_TABLES: [&str; 8] = [
+pub const GUARDED_TABLES: [&str; 10] = [
     "score_runs",
     "score_history",
     "score_history_migrations",
@@ -64,9 +82,11 @@ pub const GUARDED_TABLES: [&str; 8] = [
     "score_evaluations",
     "score_run_stats",
     "score_shadow",
+    "run_annotations",
+    "run_deferrals",
 ];
 /// Triggers that must exist before the store writes.
-pub const REQUIRED_TRIGGERS: [&str; 24] = [
+pub const REQUIRED_TRIGGERS: [&str; 30] = [
     "score_inputs_no_delete",
     "score_inputs_no_update",
     "score_inputs_no_overwrite",
@@ -91,6 +111,12 @@ pub const REQUIRED_TRIGGERS: [&str; 24] = [
     "score_shadow_no_delete",
     "score_shadow_no_update",
     "score_shadow_no_overwrite",
+    "run_annotations_no_delete",
+    "run_annotations_no_update",
+    "run_annotations_no_overwrite",
+    "run_deferrals_no_delete",
+    "run_deferrals_no_update",
+    "run_deferrals_no_overwrite",
 ];
 
 /// Backups go to `--history-backup-dir`, else this env var, else
@@ -227,7 +253,225 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
 ",
     ),
     (EVALUATIONS_MIGRATION, EVALUATIONS_DDL),
+    (QUOTE_FRESHNESS_MIGRATION, QUOTE_FRESHNESS_DDL),
+    (RUN_DEFERRALS_MIGRATION, RUN_DEFERRALS_DDL),
 ];
+
+/// Quote freshness per stored row plus operator annotations (additive only).
+/// - `score_history.quote_ts`: wall-clock epoch of the row's last quote fetch (NULL = unknown,
+///   e.g. rows recorded before v5 or offline snapshot seeding).
+/// - `score_history.quote_age_secs`: `captured_at - quote_ts` at record time.
+/// - `score_history.stale`: 1 when the age exceeded the threshold; such rows are stored but
+///   excluded from valid history, decision changes and the shadow report.
+/// - `run_annotations`: append-only notes on a run (e.g. "stale quotes after wake").
+///
+/// FROZEN: byte-identical to v5 as shipped at 3c2e275 (a test pins its hash).
+const QUOTE_FRESHNESS_DDL: &str = "
+ALTER TABLE score_history ADD COLUMN quote_ts INTEGER;
+ALTER TABLE score_history ADD COLUMN quote_age_secs INTEGER
+    CHECK (quote_age_secs IS NULL OR quote_age_secs >= 0);
+ALTER TABLE score_history ADD COLUMN stale INTEGER NOT NULL DEFAULT 0 CHECK (stale IN (0, 1));
+CREATE TABLE IF NOT EXISTS run_annotations (
+    run_id      TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (run_id, created_at, reason)
+);
+CREATE TRIGGER IF NOT EXISTS run_annotations_no_delete BEFORE DELETE ON run_annotations
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_annotations_no_update BEFORE UPDATE ON run_annotations
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_annotations_no_overwrite BEFORE INSERT ON run_annotations
+WHEN EXISTS (SELECT 1 FROM run_annotations WHERE run_id = NEW.run_id
+             AND created_at = NEW.created_at AND reason = NEW.reason)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+";
+
+/// v6 (everything about deferred / skipped slots lives here, nowhere else):
+/// - `run_deferrals`: one append-only row per scheduled run slot that did NOT record
+///   (deferred by the freshness gate, skipped by the scheduler, missed while the process
+///   was down, or failed with an error), keyed by `(profile, slot)` so retry ticks inside
+///   one slot add nothing. `slot` is the scheduled due time ([`due_slot`]); `reason` is a
+///   [`SkipReason::code`]; stale share = `stale_count / total` (derived, `total = 0` →
+///   none). There is no `model` column: the recorder schedules one model
+///   (`HISTORY_MODEL`) per profile, so a slot is per profile.
+///   `process_down` rows are written at startup for slots missed while the process was
+///   down ([`process_down_plan`]); a summary row beyond [`PROCESS_DOWN_DETAIL_DAYS`]
+///   carries `covers` (slots it stands for) and `covers_from` (earliest of them).
+/// - `score_runs_profile_model_at`: index for "first run of profile+model at or after a
+///   slot" (`next_run` on the deferrals read path) and `last_run_at`.
+const RUN_DEFERRALS_DDL: &str = "
+CREATE TABLE IF NOT EXISTS run_deferrals (
+    profile      TEXT NOT NULL,
+    slot         INTEGER NOT NULL,
+    trigger      TEXT NOT NULL CHECK (trigger IN ('interval', 'close')),
+    observed_at  INTEGER NOT NULL,
+    reason       TEXT NOT NULL CHECK (reason IN ('initial_pass_in_progress',
+                 'year_charts_pending', 'no_live_ranking', 'close_snapshot_imminent',
+                 'clock_jump', 'no_fresh_full_pass', 'stale_share_too_high',
+                 'process_down', 'record_failed')),
+    stale_count  INTEGER NOT NULL CHECK (stale_count >= 0),
+    total        INTEGER NOT NULL CHECK (total >= stale_count),
+    covers       INTEGER NOT NULL DEFAULT 1 CHECK (covers >= 1),
+    covers_from  INTEGER CHECK (covers_from IS NULL OR covers_from <= slot),
+    CHECK (covers = 1 OR reason = 'process_down'),
+    CHECK (covers_from IS NULL OR reason = 'process_down'),
+    PRIMARY KEY (profile, slot)
+);
+CREATE TRIGGER IF NOT EXISTS run_deferrals_no_delete BEFORE DELETE ON run_deferrals
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_deferrals_no_update BEFORE UPDATE ON run_deferrals
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_deferrals_no_overwrite BEFORE INSERT ON run_deferrals
+WHEN EXISTS (SELECT 1 FROM run_deferrals WHERE profile = NEW.profile AND slot = NEW.slot)
+BEGIN SELECT RAISE(ABORT, 'score history is append-only: existing key'); END;
+CREATE INDEX IF NOT EXISTS score_runs_profile_model_at
+    ON score_runs (profile, model, captured_at);
+";
+
+/// Why a scheduled run slot did not record (`run_deferrals.reason`). One distinct code
+/// per scheduler skip ([`history_due`]) and freshness deferral ([`freshness_gate`]);
+/// "interval not elapsed" is not a slot (nothing was scheduled) and has no code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The feed's initial pass for this generation has not completed.
+    InitialPassInProgress,
+    /// Year charts below [`HISTORY_YEAR_COVERAGE`] and the wait has not elapsed.
+    YearChartsPending,
+    /// The ranking is not live (persisted snapshot) or is empty.
+    NoLiveRanking,
+    /// An interval slot inside [`CLOSE_DEDUP_SECS`] of the close (the close run replaces it).
+    CloseSnapshotImminent,
+    /// Wall-clock gap (suspend / clock jump) with no quote pass completed after it.
+    ClockJump,
+    /// The last completed full quote pass is older than the stale threshold.
+    NoFreshFullPass,
+    /// More than `max_stale_share` of the priced rows are stale.
+    StaleShareTooHigh,
+    /// The slot came due while the process was not running (written at startup by
+    /// [`ScoreHistoryStore::backfill_process_down`], never by a tick).
+    ProcessDown,
+    /// The slot was due but evaluating or writing the run failed with an error
+    /// (best-effort row written by the recorder after the error).
+    RecordFailed,
+}
+
+impl SkipReason {
+    pub const ALL: [SkipReason; 9] = [
+        SkipReason::InitialPassInProgress,
+        SkipReason::YearChartsPending,
+        SkipReason::NoLiveRanking,
+        SkipReason::CloseSnapshotImminent,
+        SkipReason::ClockJump,
+        SkipReason::NoFreshFullPass,
+        SkipReason::StaleShareTooHigh,
+        SkipReason::ProcessDown,
+        SkipReason::RecordFailed,
+    ];
+
+    /// Stored code (the `run_deferrals.reason` CHECK lists exactly these).
+    pub fn code(self) -> &'static str {
+        match self {
+            SkipReason::InitialPassInProgress => "initial_pass_in_progress",
+            SkipReason::YearChartsPending => "year_charts_pending",
+            SkipReason::NoLiveRanking => "no_live_ranking",
+            SkipReason::CloseSnapshotImminent => "close_snapshot_imminent",
+            SkipReason::ClockJump => "clock_jump",
+            SkipReason::NoFreshFullPass => "no_fresh_full_pass",
+            SkipReason::StaleShareTooHigh => "stale_share_too_high",
+            SkipReason::ProcessDown => "process_down",
+            SkipReason::RecordFailed => "record_failed",
+        }
+    }
+
+    /// The code for a [`history_due`] / [`freshness_gate`] message; `None` for
+    /// "interval not elapsed" (and anything unknown — a test pins that every message
+    /// those two functions can return is covered).
+    pub fn from_message(why: &str) -> Option<Self> {
+        Some(match why {
+            "initial pass in progress" => SkipReason::InitialPassInProgress,
+            "waiting for year charts" => SkipReason::YearChartsPending,
+            "no live ranking" => SkipReason::NoLiveRanking,
+            "close snapshot imminent" => SkipReason::CloseSnapshotImminent,
+            "clock jump: waiting for a quote pass after wake" => SkipReason::ClockJump,
+            "waiting for a fresh quote pass" => SkipReason::NoFreshFullPass,
+            "too many stale quotes" => SkipReason::StaleShareTooHigh,
+            _ => return None,
+        })
+    }
+}
+
+/// One `run_deferrals` row (UTC epoch seconds). `stale_share` is derived on read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunDeferral {
+    pub profile: String,
+    /// Scheduled due time of the slot that did not record ([`due_slot`]).
+    pub slot: i64,
+    /// `interval` or `close`.
+    pub trigger: String,
+    /// First recorder tick that deferred / skipped this slot.
+    pub observed_at: i64,
+    /// [`SkipReason::code`].
+    pub reason: String,
+    pub stale_count: i64,
+    pub total: i64,
+    /// Slots this row stands for: 1, except a `process_down` summary row (see
+    /// [`PROCESS_DOWN_DETAIL_DAYS`]), which covers every missed slot in
+    /// `[covers_from, slot]`.
+    #[serde(default = "one")]
+    pub covers: i64,
+    /// Earliest slot a `process_down` summary row covers; `None` on every other row.
+    #[serde(default)]
+    pub covers_from: Option<i64>,
+}
+
+fn one() -> i64 {
+    1
+}
+
+impl RunDeferral {
+    /// `stale_count / total`, `None` when nothing was priced.
+    pub fn stale_share(&self) -> Option<f64> {
+        (self.total > 0).then(|| self.stale_count as f64 / self.total as f64)
+    }
+}
+
+/// Max length of a run annotation reason.
+pub const MAX_ANNOTATION_LEN: usize = 500;
+
+/// One operator note on a run (`run_annotations`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RunAnnotation {
+    pub run_id: String,
+    pub reason: String,
+    pub created_at: i64,
+}
+
+/// Per-row quote freshness for one run: symbol -> wall-clock epoch at which OUR feed
+/// fetched its last quote (`quote_ts`). This is our fetch time, not the exchange's
+/// quote / trade timestamp.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuoteFreshness {
+    pub quote_ts: std::collections::HashMap<String, i64>,
+    pub stale_after_secs: i64,
+}
+
+impl QuoteFreshness {
+    /// `(quote_ts, age, stale)` for `symbol` at `at`. Fails closed: an unknown quote
+    /// time is stale. Stale means `age > stale_after_secs` (age == threshold is fresh).
+    pub fn of(&self, symbol: &str, at: i64) -> (Option<i64>, Option<i64>, bool) {
+        match self.quote_ts.get(symbol) {
+            // A quote time in the future (wall clock stepped back) has no
+            // trustworthy age: treat it like an unknown time, i.e. stale.
+            Some(&ts) if ts > at => (Some(ts), None, true),
+            Some(&ts) => {
+                let age = at - ts;
+                (Some(ts), Some(age), age > self.stale_after_secs)
+            }
+            None => (None, None, true),
+        }
+    }
+}
 
 /// Full-universe evaluations (see `docs/product/score-history.md`).
 /// - `score_inputs`: content-addressed raw snapshot rows (sha256 of the exact serde
@@ -871,10 +1115,7 @@ fn quarantine_input_blob_aside_with(
     kind: &str,
     mut propose: impl FnMut(&Path, &str) -> PathBuf,
 ) -> Result<(), String> {
-    let base = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("blob");
+    let base = path.file_name().and_then(|s| s.to_str()).unwrap_or("blob");
     let mut last = String::new();
     for _ in 0..BAD_QUARANTINE_RENAME_ATTEMPTS {
         let bad = propose(path, base);
@@ -958,8 +1199,12 @@ fn cleanup_stale_input_tmps(inputs_dir: &Path, max_age: std::time::Duration) -> 
             continue;
         }
         let Ok(meta) = ent.metadata() else { continue };
-        let Ok(modified) = meta.modified() else { continue };
-        let Ok(age) = now.duration_since(modified) else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
         if age < max_age {
             continue;
         }
@@ -984,7 +1229,7 @@ fn write_input_blob(backup_dir: &Path, hash: &str, bytes: &[u8]) -> Result<bool,
     let dir = inputs_blob_dir(backup_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     fsync_dir(&dir).ok(); // best-effort after mkdir
-    // Opportunistic cleanup of crashed-writer temps (15 minutes).
+                          // Opportunistic cleanup of crashed-writer temps (15 minutes).
     let _ = cleanup_stale_input_tmps(&dir, std::time::Duration::from_secs(15 * 60));
     let path = inputs_blob_path(backup_dir, hash)?;
     ensure_regular_input_blob_path(&path)?;
@@ -1211,6 +1456,10 @@ pub struct HistoryPoint {
     pub price_cents: i64,
     pub target_cents: Option<i64>,
     pub upside_bps: Option<i64>,
+    /// Operator notes on this point's run (`run_annotations`), oldest first; always
+    /// present (`[]` = none) so a consumer can exclude annotated runs explicitly.
+    #[serde(default)]
+    pub annotations: Vec<String>,
 }
 
 /// A decision flip (same profile, model and rule_version) and what moved.
@@ -1259,6 +1508,10 @@ pub struct RestoreReport {
     pub run_inputs_added: usize,
     pub evaluations_added: usize,
     pub run_stats_added: usize,
+    /// `run_annotations` rows added (0 when the backup predates v5).
+    pub annotations_added: usize,
+    /// `run_deferrals` rows added (0 when the backup predates v5).
+    pub deferrals_added: usize,
     /// Row counts found in the (verified) backup.
     pub backup_runs: i64,
     pub backup_rows: i64,
@@ -1507,6 +1760,21 @@ pub fn trigger_behaviour_failures(c: &Connection) -> Result<Vec<String>, String>
                 )
                 .map(|_| ())
             }
+            "run_annotations" => c
+                .execute(
+                    "INSERT INTO run_annotations (run_id, reason, created_at) \
+                     VALUES ('__selfcheck__', 'selfcheck', 0)",
+                    [],
+                )
+                .map(|_| ()),
+            "run_deferrals" => c
+                .execute(
+                    "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
+                     stale_count, total, covers, covers_from) VALUES ('__selfcheck__', 0, \
+                     'interval', 0, 'process_down', 0, 0, 1, NULL)",
+                    [],
+                )
+                .map(|_| ()),
             _ => c
                 .execute(
                     "INSERT INTO score_history_migrations (version, applied_at) VALUES (-1, 0)",
@@ -1902,6 +2170,19 @@ impl ScoreHistoryStore {
         rows: &[RankedRow],
         eval: Option<&RunEvaluation>,
     ) -> Result<RecordOutcome, String> {
+        self.record_run_quotes(meta, rows, eval, None)
+    }
+
+    /// [`Self::record_run_full`] plus per-row quote freshness: each row stores its
+    /// `quote_ts` and `quote_age_secs`, and `stale = 1` when the age exceeds
+    /// `fresh.stale_after_secs` (the row is kept, never rewritten).
+    pub fn record_run_quotes(
+        &self,
+        meta: &RunMeta,
+        rows: &[RankedRow],
+        eval: Option<&RunEvaluation>,
+        fresh: Option<&QuoteFreshness>,
+    ) -> Result<RecordOutcome, String> {
         self.check_writable()?;
         let run_id = meta.run_id();
         let (good, bad): (Vec<&RankedRow>, Vec<&RankedRow>) = rows
@@ -1944,17 +2225,24 @@ impl ScoreHistoryStore {
         )
         .map_err(err)?;
         {
+            // Quote columns only when freshness is given, so the pre-v5 statement (and an
+            // older writer's schema) is untouched; the v5 columns then default to NULL / 0.
             let mut st = tx
-                .prepare(
+                .prepare(if fresh.is_some() {
+                    "INSERT INTO score_history (run_id, symbol, captured_at, rank, decision, \
+                     composite, fundamentals, technical, forecast, regime, confidence, trust_signal, \
+                     price_cents, target_cents, upside_bps, inputs_json, quote_ts, quote_age_secs, \
+                     stale) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,NULL,?16,?17,?18)"
+                } else {
                     "INSERT INTO score_history (run_id, symbol, captured_at, rank, decision, \
                      composite, fundamentals, technical, forecast, regime, confidence, trust_signal, \
                      price_cents, target_cents, upside_bps, inputs_json) \
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,NULL)",
-                )
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,NULL)"
+                })
                 .map_err(err)?;
             let fin = |x: Option<f64>| x.filter(|v| v.is_finite());
             for r in &good {
-                st.execute(params![
+                let base = params![
                     run_id,
                     r.symbol,
                     meta.captured_at,
@@ -1970,8 +2258,18 @@ impl ScoreHistoryStore {
                     (r.price * 100.0).round() as i64,
                     fin(r.target).map(|t| (t * 100.0).round() as i64),
                     fin(r.upside_pct).map(|u| (u * 100.0).round() as i64),
-                ])
-                .map_err(|e| format!("insert {}: {e}", r.symbol))?;
+                ];
+                let res = match fresh {
+                    Some(f) => {
+                        let (qts, qage, stale) = f.of(&r.symbol, meta.captured_at);
+                        let stale = stale as i64;
+                        let mut all: Vec<&dyn rusqlite::ToSql> = base.to_vec();
+                        all.extend([&qts as &dyn rusqlite::ToSql, &qage, &stale]);
+                        st.execute(all.as_slice())
+                    }
+                    None => st.execute(base),
+                };
+                res.map_err(|e| format!("insert {}: {e}", r.symbol))?;
             }
         }
         if good
@@ -2040,6 +2338,27 @@ impl ScoreHistoryStore {
         )
         .optional()
         .map_err(err)
+    }
+
+    /// `(run_id, symbol)` of rows stored with `stale = 1`, filtered by run and/or symbol.
+    pub fn stale_pairs(
+        &self,
+        run_id: Option<&str>,
+        symbol: Option<&str>,
+    ) -> Result<std::collections::HashSet<(String, String)>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let mut st = c
+            .prepare(
+                "SELECT run_id, symbol FROM score_history WHERE stale = 1 \
+                 AND (?1 IS NULL OR run_id = ?1) AND (?2 IS NULL OR symbol = ?2)",
+            )
+            .map_err(err)?;
+        let out = st
+            .query_map(params![run_id, symbol], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        Ok(out)
     }
 
     /// All evaluations of one run (rank order for `ok`, then symbol).
@@ -2221,7 +2540,7 @@ impl ScoreHistoryStore {
                  h.confidence, h.trust_signal, h.price_cents, h.target_cents, h.upside_bps, \
                  r.rule_version, r.trigger \
                  FROM score_history h JOIN score_runs r ON r.run_id = h.run_id \
-                 WHERE h.symbol = ?1 AND h.captured_at >= ?2 \
+                 WHERE h.symbol = ?1 AND h.captured_at >= ?2 AND h.stale = 0 \
                    AND (?3 IS NULL OR r.model = ?3) AND (?4 IS NULL OR r.profile = ?4) \
                  ORDER BY h.captured_at ASC, h.run_id ASC",
             )
@@ -2253,11 +2572,28 @@ impl ScoreHistoryStore {
                         rule_version: r.get(17)?,
                         trigger: r.get(18)?,
                         rule_change: false,
+                        annotations: Vec::new(),
                     })
                 },
             )
             .map_err(err)?;
         let mut pts = rows.collect::<Result<Vec<_>, _>>().map_err(err)?;
+        drop(st);
+        {
+            let mut ann = c
+                .prepare(
+                    "SELECT reason FROM run_annotations WHERE run_id = ?1 \
+                     ORDER BY created_at ASC, reason ASC",
+                )
+                .map_err(err)?;
+            for p in &mut pts {
+                p.annotations = ann
+                    .query_map(params![p.run_id], |r| r.get(0))
+                    .map_err(err)?
+                    .collect::<Result<Vec<String>, _>>()
+                    .map_err(err)?;
+            }
+        }
         let mut last: std::collections::HashMap<(String, String), String> = Default::default();
         for p in &mut pts {
             let key = (p.profile.clone(), p.model.clone());
@@ -2267,6 +2603,185 @@ impl ScoreHistoryStore {
             last.insert(key, p.rule_version.clone());
         }
         Ok(pts)
+    }
+
+    /// Appends one annotation to an existing run (plain INSERT; the table is
+    /// append-only, so an annotation can never be edited or removed).
+    pub fn annotate_run(
+        &self,
+        run_id: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<RunAnnotation, String> {
+        self.check_writable()?;
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        annotate_conn(&c, run_id, reason, now)
+    }
+
+    /// Appends the deferral of one scheduled slot. Idempotent per `(profile, slot)`:
+    /// a later tick in the same slot inserts nothing (the first record is kept, never
+    /// updated). Returns whether a row was added.
+    pub fn record_deferral(&self, d: &RunDeferral) -> Result<bool, String> {
+        self.check_writable()?;
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        insert_deferral(&c, d).map_err(err)
+    }
+
+    /// Test-only raw SQL on the store's connection (fault injection, e.g. a trigger
+    /// that makes one table's INSERT fail).
+    #[cfg(test)]
+    pub(crate) fn exec_for_test(&self, sql: &str) {
+        self.conn.lock().unwrap().execute_batch(sql).unwrap();
+    }
+
+    /// Startup backfill of the downtime gap: one `process_down` row per scheduled slot
+    /// that came due while the process was down ([`process_down_plan`]), plus at most
+    /// one summary row for slots older than [`PROCESS_DOWN_DETAIL_DAYS`]. One
+    /// transaction; first record wins per `(profile, slot)`, so a second restart adds
+    /// nothing. Returns the rows added.
+    pub fn backfill_process_down(
+        &self,
+        profile: &str,
+        model: &str,
+        interval: i64,
+        now: i64,
+    ) -> Result<usize, String> {
+        let last_run = self.last_run_at(profile, model)?;
+        self.check_writable()?;
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let last_deferral: Option<i64> = c
+            .query_row(
+                "SELECT MAX(slot) FROM run_deferrals WHERE profile = ?1",
+                params![profile],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        let plan = process_down_plan(last_run, last_deferral, interval, now);
+        if plan.is_empty() {
+            return Ok(0);
+        }
+        let row = |slot: i64, trigger: &str, covers: i64, covers_from: Option<i64>| RunDeferral {
+            profile: profile.to_string(),
+            slot,
+            trigger: trigger.to_string(),
+            observed_at: now,
+            reason: SkipReason::ProcessDown.code().into(),
+            stale_count: 0,
+            total: 0,
+            covers,
+            covers_from,
+        };
+        c.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
+        let res = (|| -> rusqlite::Result<usize> {
+            let mut added = 0;
+            if let Some(sm) = &plan.summary {
+                added += insert_deferral(&c, &row(sm.slot, sm.trigger, sm.covers, Some(sm.from)))?
+                    as usize;
+            }
+            for (slot, trigger) in &plan.slots {
+                added += insert_deferral(&c, &row(*slot, trigger, 1, None))? as usize;
+            }
+            c.execute_batch("COMMIT")?;
+            Ok(added)
+        })();
+        res.map_err(|e| {
+            let _ = c.execute_batch("ROLLBACK");
+            err(e)
+        })
+    }
+
+    /// Deferred / skipped slots, newest first: `profile` filter, `since <= slot <
+    /// before` (page backwards with `before` = the oldest slot of the previous page),
+    /// at most `limit` rows. Each comes with `next_run`: the first run of the same
+    /// profile AND `model` captured at or after the slot (`None` = no run since: the
+    /// gap is still open). `next_run` is computed only for the `limit` rows returned
+    /// (CTE first), on the `score_runs (profile, model, captured_at)` index.
+    pub fn deferrals(
+        &self,
+        profile: Option<&str>,
+        model: &str,
+        since: Option<i64>,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(RunDeferral, Option<String>)>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let mut st = c
+            .prepare(
+                "WITH d AS (SELECT profile, slot, trigger, observed_at, reason, stale_count, \
+                 total, covers, covers_from FROM run_deferrals \
+                 WHERE (?1 IS NULL OR profile = ?1) AND slot >= ?2 AND slot < ?3 \
+                 ORDER BY slot DESC, profile ASC LIMIT ?4) \
+                 SELECT d.profile, d.slot, d.trigger, d.observed_at, d.reason, d.stale_count, \
+                 d.total, d.covers, d.covers_from, (SELECT r.run_id FROM score_runs r \
+                 WHERE r.profile = d.profile AND r.model = ?5 AND r.captured_at >= d.slot \
+                 ORDER BY r.captured_at ASC, r.run_id ASC LIMIT 1) \
+                 FROM d ORDER BY d.slot DESC, d.profile ASC",
+            )
+            .map_err(err)?;
+        let out = st
+            .query_map(
+                params![
+                    profile,
+                    since.unwrap_or(i64::MIN),
+                    before.unwrap_or(i64::MAX),
+                    limit as i64,
+                    model
+                ],
+                |r| {
+                    Ok((
+                        RunDeferral {
+                            profile: r.get(0)?,
+                            slot: r.get(1)?,
+                            trigger: r.get(2)?,
+                            observed_at: r.get(3)?,
+                            reason: r.get(4)?,
+                            stale_count: r.get(5)?,
+                            total: r.get(6)?,
+                            covers: r.get(7)?,
+                            covers_from: r.get(8)?,
+                        },
+                        r.get(9)?,
+                    ))
+                },
+            )
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err);
+        out
+    }
+
+    /// Annotations of one run, oldest first.
+    pub fn annotations(&self, run_id: &str) -> Result<Vec<RunAnnotation>, String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        let mut st = c
+            .prepare(
+                "SELECT run_id, reason, created_at FROM run_annotations WHERE run_id = ?1 \
+                 ORDER BY created_at ASC, reason ASC",
+            )
+            .map_err(err)?;
+        let out = st
+            .query_map(params![run_id], |r| {
+                Ok(RunAnnotation {
+                    run_id: r.get(0)?,
+                    reason: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
+            })
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err);
+        out
+    }
+
+    /// `(stored, stale)` row counts of one run.
+    pub fn stale_counts(&self, run_id: &str) -> Result<(i64, i64), String> {
+        let c = self.conn.lock().map_err(|_| "lock")?;
+        c.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(stale), 0) FROM score_history WHERE run_id = ?1",
+            params![run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(err)
     }
 
     pub fn counts(&self) -> Result<(i64, i64), String> {
@@ -2326,6 +2841,23 @@ impl ScoreHistoryStore {
                 table_count(&c, "score_history"),
                 table_count(&c, "score_shadow"),
             );
+            // Every history table must exist in the source (a store opened with an older
+            // migration set, or damaged): say which, instead of an SQL syntax error.
+            let missing: Vec<&str> = HISTORY_TABLES
+                .iter()
+                .copied()
+                .filter(|t| !has_table(&c, "main", t))
+                .collect();
+            if !missing.is_empty() {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!(
+                    "export: history table(s) {} missing from the store (schema v{}, need v{}); \
+                     nothing exported",
+                    missing.join(", "),
+                    current_version(&c).unwrap_or(0),
+                    SCHEMA_VERSION
+                ));
+            }
             c.execute("ATTACH DATABASE ?1 AS bk", params![tmp.to_string_lossy()])
                 .map_err(err)?;
             // Incremental `score_inputs`: payload bytes live under
@@ -2462,6 +2994,15 @@ fn current_version(c: &Connection) -> Result<i64, String> {
 
 /// Applies pending additive migrations, each with its log row in one `BEGIN IMMEDIATE`.
 /// A non-empty file is backed up first (whole file, `VACUUM INTO`, gzip, verified).
+/// A store at v5 that already has `run_deferrals` was migrated by a pre-release #74
+/// build (271df3b-era v5, before `run_deferrals` moved to v6). Its v5 is not the
+/// released v5, so it is refused untouched: no migration, no backup, no write.
+pub const PRE_RELEASE_V5_ERROR: &str = "score history store is at schema v5 but already has a \
+run_deferrals table: it was migrated by a pre-release build of PR #74 (271df3b-era v5), \
+whose v5 differs from the released v5. Refusing to open or migrate it; nothing was changed. \
+Move this history.sqlite aside and restore the pre-migration backup \
+(history.pre-score-history-v4-to-v5-*.sqlite.gz), then start again.";
+
 fn migrate(
     c: &Connection,
     backup_dir: Option<&Path>,
@@ -2469,6 +3010,9 @@ fn migrate(
 ) -> Result<Option<PathBuf>, String> {
     let has_log = has_table(c, "main", "score_history_migrations");
     let current = if has_log { current_version(c)? } else { 0 };
+    if current == QUOTE_FRESHNESS_MIGRATION && has_table(c, "main", "run_deferrals") {
+        return Err(PRE_RELEASE_V5_ERROR.into());
+    }
     let pending: Vec<&(i64, &str)> = migrations.iter().filter(|(v, _)| *v > current).collect();
     if pending.is_empty() {
         if !has_log {
@@ -2632,7 +3176,7 @@ fn remove_all(dir: &Path, names: Vec<String>) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Merged tables and their keys.
-const MERGE_TABLES: [(&str, &[&str]); 7] = [
+const MERGE_TABLES: [(&str, &[&str]); 9] = [
     ("score_runs", &["run_id"]),
     ("score_history", &["run_id", "symbol"]),
     // Migration v3; optional in the source (a pre-v3 backup has no such table).
@@ -2641,6 +3185,8 @@ const MERGE_TABLES: [(&str, &[&str]); 7] = [
     ("score_run_inputs", &["run_id", "idx"]),
     ("score_evaluations", &["run_id", "symbol"]),
     ("score_run_stats", &["run_id"]),
+    ("run_annotations", &["run_id", "created_at", "reason"]),
+    ("run_deferrals", &["profile", "slot"]),
 ];
 
 /// Tables introduced after v1, as (version, table). A backup older than `version` may
@@ -2651,11 +3197,17 @@ const LATER_TABLES: &[(i64, &str)] = &[
     (EVALUATIONS_MIGRATION, "score_run_inputs"),
     (EVALUATIONS_MIGRATION, "score_evaluations"),
     (EVALUATIONS_MIGRATION, "score_run_stats"),
+    (QUOTE_FRESHNESS_MIGRATION, "run_annotations"),
+    (RUN_DEFERRALS_MIGRATION, "run_deferrals"),
 ];
 
 /// Columns introduced by migrations after v1, as (version, table, column). An older
 /// backup may lack exactly these (they are then filled with their default). Empty today.
-const LATER_COLUMNS: &[(i64, &str, &str)] = &[];
+const LATER_COLUMNS: &[(i64, &str, &str)] = &[
+    (QUOTE_FRESHNESS_MIGRATION, "score_history", "quote_ts"),
+    (QUOTE_FRESHNESS_MIGRATION, "score_history", "quote_age_secs"),
+    (QUOTE_FRESHNESS_MIGRATION, "score_history", "stale"),
+];
 
 #[derive(Debug, PartialEq)]
 struct Col {
@@ -2873,6 +3425,8 @@ pub fn restore(src: &Path, data_dir: &Path, backup_dir: &Path) -> Result<Restore
         run_inputs_added: n("score_run_inputs"),
         evaluations_added: n("score_evaluations"),
         run_stats_added: n("score_run_stats"),
+        annotations_added: n("run_annotations"),
+        deferrals_added: n("run_deferrals"),
         backup_runs: rep.score_runs,
         backup_rows: rep.score_history,
     })
@@ -2973,6 +3527,381 @@ pub fn history_due(i: &DueInputs) -> Due {
         return Due::Interval;
     }
     Due::No("interval not elapsed")
+}
+
+/// Deterministic slot of the run the schedule wants at `now`, ignoring readiness (the
+/// key of a `run_deferrals` row), with its trigger. Mirrors [`history_due`]:
+/// - a pending close catch-up → that close slot (`close`);
+/// - interval elapsed → the LATEST due interval time `last + k·interval`,
+///   `k = ⌊(now − last) / interval⌋` (`interval`), so a long deferral leaves one row per
+///   elapsed interval and retry ticks inside one interval share a slot;
+/// - no run yet, or the clock is behind the last run → the interval bucket
+///   `⌊now / interval⌋·interval`; with `interval <= 0` (dev/tests) → `last` (or 0);
+/// - otherwise nothing is scheduled → `None`.
+pub fn due_slot(now: i64, last_run: Option<i64>, interval: i64) -> Option<(i64, &'static str)> {
+    let bucket = || {
+        if interval > 0 {
+            now - now.rem_euclid(interval)
+        } else {
+            last_run.unwrap_or(0)
+        }
+    };
+    let Some(last) = last_run else {
+        return Some((bucket(), "interval"));
+    };
+    if now < last {
+        return Some((bucket(), "interval"));
+    }
+    if let Some(slot) = last_close_snapshot(now) {
+        if now - slot < CLOSE_CATCHUP_SECS && last < slot {
+            return Some((slot, "close"));
+        }
+    }
+    if now - last >= interval {
+        if interval <= 0 {
+            return Some((last, "interval"));
+        }
+        return Some((last + (now - last) / interval * interval, "interval"));
+    }
+    None
+}
+
+/// First-record-wins INSERT of one `run_deferrals` row (`true` = added).
+fn insert_deferral(c: &Connection, d: &RunDeferral) -> rusqlite::Result<bool> {
+    let n = c.execute(
+        "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
+         stale_count, total, covers, covers_from) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 \
+         WHERE NOT EXISTS (SELECT 1 FROM run_deferrals WHERE profile = ?1 AND slot = ?2)",
+        params![
+            d.profile,
+            d.slot,
+            d.trigger,
+            d.observed_at,
+            d.reason,
+            d.stale_count,
+            d.total,
+            d.covers,
+            d.covers_from
+        ],
+    )?;
+    Ok(n == 1)
+}
+
+/// Missed slots are written one row each only this far back from startup; older
+/// missed slots collapse into ONE summary row (bounded write after a long outage).
+pub const PROCESS_DOWN_DETAIL_DAYS: i64 = 7;
+
+/// Summary of the missed slots older than [`PROCESS_DOWN_DETAIL_DAYS`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessDownSummary {
+    /// The NEWEST missed slot older than the cap (the row's key; keeps "latest
+    /// recorded slot" correct, so a restart never re-summarises the same span).
+    pub slot: i64,
+    pub trigger: &'static str,
+    /// Earliest missed slot covered (`covers_from`).
+    pub from: i64,
+    /// Number of missed slots in `[from, slot]` (interval and close).
+    pub covers: i64,
+}
+
+/// What [`ScoreHistoryStore::backfill_process_down`] writes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessDownPlan {
+    /// One row each, oldest first: missed slots within [`PROCESS_DOWN_DETAIL_DAYS`].
+    pub slots: Vec<(i64, &'static str)>,
+    pub summary: Option<ProcessDownSummary>,
+}
+
+impl ProcessDownPlan {
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty() && self.summary.is_none()
+    }
+}
+
+/// Slots missed while the process was down, by the same schedule as [`due_slot`]:
+/// - anchor = the later of the last recorded run and the latest `run_deferrals` slot of
+///   the profile; no run AND no deferral (fresh store) → nothing;
+/// - clock behind the last run (backwards jump) → nothing (no trustworthy "since");
+/// - `interval <= 0` (history disabled / dev) → nothing;
+/// - candidates in `(anchor, now]`: interval slots `base + k·interval` (`base` = last run,
+///   or 0 = the `now − now mod interval` buckets when only deferrals exist) and every
+///   weekday close snapshot (a running process gets `Due::Close` for each close);
+///   a close that coincides with an interval slot is one `close` slot;
+/// - minus the slot that is due NOW (`due_slot(now)`): the restarted process still
+///   records or defers it with its real reason;
+/// - slots `>= now − PROCESS_DOWN_DETAIL_DAYS` → one row each; older → one summary.
+pub fn process_down_plan(
+    last_run: Option<i64>,
+    last_deferral: Option<i64>,
+    interval: i64,
+    now: i64,
+) -> ProcessDownPlan {
+    let mut plan = ProcessDownPlan::default();
+    if interval <= 0 {
+        return plan;
+    }
+    let anchor = match (last_run, last_deferral) {
+        (None, None) => return plan,
+        (a, b) => a.max(b).unwrap(),
+    };
+    if last_run.is_some_and(|l| now < l) || now <= anchor {
+        return plan;
+    }
+    let base = last_run.unwrap_or(0);
+    let current = due_slot(now, last_run, interval).map(|(s, _)| s);
+    let cutoff = now - PROCESS_DOWN_DETAIL_DAYS * 86_400;
+    // Interval slots in (lo, hi] as k range of base + k·interval.
+    let k_range = |lo: i64, hi: i64| -> (i64, i64) {
+        (
+            (lo - base).div_euclid(interval) + 1,
+            (hi - base).div_euclid(interval),
+        )
+    };
+    let on_lattice = |s: i64| (s - base).rem_euclid(interval) == 0;
+    let closes_in = |lo: i64, hi: i64| -> Vec<i64> {
+        let mut v = Vec::new();
+        let mut c = next_close_snapshot(lo);
+        while c <= hi {
+            v.push(c);
+            c = next_close_snapshot(c);
+        }
+        v
+    };
+    // Detail span (max(anchor, cutoff − 1), now]: materialised (bounded by the cap).
+    let lo = anchor.max(cutoff - 1);
+    let mut detail: std::collections::BTreeMap<i64, &'static str> = Default::default();
+    let (k0, k1) = k_range(lo, now);
+    for k in k0..=k1 {
+        detail.insert(base + k * interval, "interval");
+    }
+    for c in closes_in(lo, now) {
+        detail.insert(c, "close");
+    }
+    if let Some(cur) = current {
+        detail.remove(&cur);
+    }
+    plan.slots = detail.into_iter().collect();
+    // Older span (anchor, cutoff − 1]: counted, not materialised.
+    if anchor < cutoff - 1 {
+        let hi = cutoff - 1;
+        let (k0, mut k1) = k_range(anchor, hi);
+        // The slot due now is never "missed". It can only fall in this span when
+        // interval > the cap, and then it is the newest interval slot (k1).
+        if k0 <= k1 && current == Some(base + k1 * interval) {
+            k1 -= 1;
+        }
+        let closes: Vec<i64> = closes_in(anchor, hi)
+            .into_iter()
+            .filter(|c| Some(*c) != current)
+            .collect();
+        let slots_n = (k1 - k0 + 1).max(0)
+            + closes
+                .iter()
+                .filter(|c| !(on_lattice(**c) && (k0..=k1).contains(&((**c - base) / interval))))
+                .count() as i64;
+        let first = (k0 <= k1)
+            .then(|| base + k0 * interval)
+            .into_iter()
+            .chain(closes.first().copied())
+            .min();
+        let last = (k0 <= k1)
+            .then(|| base + k1 * interval)
+            .into_iter()
+            .chain(closes.last().copied())
+            .max();
+        if let (Some(from), Some(slot), true) = (first, last, slots_n > 0) {
+            let trigger = if closes.contains(&slot) {
+                "close"
+            } else {
+                "interval"
+            };
+            plan.summary = Some(ProcessDownSummary {
+                slot,
+                trigger,
+                from,
+                covers: slots_n,
+            });
+        }
+    }
+    plan
+}
+
+/// Validated append-only INSERT of one run annotation (plain INSERT; triggers refuse
+/// any update / delete / overwrite).
+fn annotate_conn(
+    c: &Connection,
+    run_id: &str,
+    reason: &str,
+    now: i64,
+) -> Result<RunAnnotation, String> {
+    let run_id = validate_run_id(run_id)?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("annotation reason is empty".into());
+    }
+    if reason.chars().count() > MAX_ANNOTATION_LEN {
+        return Err(format!(
+            "annotation reason longer than {MAX_ANNOTATION_LEN} chars"
+        ));
+    }
+    if reason.chars().any(|ch| ch.is_control()) {
+        return Err("annotation reason has control characters".into());
+    }
+    let exists = c
+        .query_row(
+            "SELECT 1 FROM score_runs WHERE run_id = ?1",
+            params![run_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(err)?
+        .is_some();
+    if !exists {
+        return Err(format!("not found: run {run_id}"));
+    }
+    c.execute(
+        "INSERT INTO run_annotations (run_id, reason, created_at) VALUES (?1,?2,?3)",
+        params![run_id, reason, now],
+    )
+    .map_err(err)?;
+    Ok(RunAnnotation {
+        run_id,
+        reason: reason.to_string(),
+        created_at: now,
+    })
+}
+
+/// CLI-only annotation of an existing `history.sqlite` (works while `serve` runs:
+/// SQLite file locking + busy timeout; no migration, no create). Refuses a store that is
+/// not at the current schema or misses any append-only trigger.
+pub fn annotate_file(
+    path: &Path,
+    run_id: &str,
+    reason: &str,
+    now: i64,
+) -> Result<RunAnnotation, String> {
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    c.busy_timeout(BUSY_TIMEOUT).map_err(err)?;
+    let v = current_version(&c)?;
+    if v != SCHEMA_VERSION {
+        return Err(format!(
+            "history schema v{v}, need v{SCHEMA_VERSION} (start the new serve once to migrate)"
+        ));
+    }
+    let missing = missing_triggers(&c);
+    if !missing.is_empty() {
+        return Err(format!(
+            "refusing: missing append-only triggers {missing:?}"
+        ));
+    }
+    annotate_conn(&c, run_id, reason, now)
+}
+
+/// Quote-freshness inputs for one due run (wall-clock epochs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreshInputs {
+    pub now: i64,
+    /// Rows the run would store, and how many of them are older than `stale_after`.
+    pub rows: usize,
+    pub stale_rows: usize,
+    /// End of the feed's last full quote pass. `None` = the source does not track it
+    /// (then the pass and clock-jump gates do not apply).
+    pub last_full_pass_at: Option<i64>,
+    /// When the recorder last detected a wall-clock gap (suspend / clock jump).
+    pub jump_at: Option<i64>,
+    pub stale_after: i64,
+    /// Max share of stale rows (`--max-stale-share`, default [`MAX_STALE_SHARE`]).
+    pub max_stale_share: f64,
+}
+
+/// Deferral reason when a due run must wait for fresher quotes, else `None`.
+/// Applies to every trigger, so the 18 h close catch-up also needs a quote pass that
+/// completed AFTER the wake: after a gap, until a full pass ends later than the gap was
+/// detected; a full pass within `stale_after`; at most [`MAX_STALE_SHARE`] stale rows.
+pub fn freshness_gate(i: &FreshInputs) -> Option<&'static str> {
+    if let Some(pass) = i.last_full_pass_at {
+        // `jump_at` is cleared by [`TickClock::tick`] only once a NEW pass ended after it.
+        if i.jump_at.is_some() {
+            return Some("clock jump: waiting for a quote pass after wake");
+        }
+        if i.now - pass > i.stale_after {
+            return Some("waiting for a fresh quote pass");
+        }
+    }
+    if i.rows > 0 && i.stale_rows as f64 > i.rows as f64 * i.max_stale_share {
+        return Some("too many stale quotes");
+    }
+    None
+}
+
+/// Wall-clock tick tracking for the recorder (detects suspend / clock jumps) and the
+/// current deferral. IN-MEMORY ONLY: never persisted; a restart starts clean (a fresh
+/// process has no `last_full_pass_at` until its own feed completes a pass anyway).
+#[derive(Debug)]
+pub struct TickClock {
+    pub stale_after: i64,
+    /// Tick gap (either direction) treated as a suspend / clock jump.
+    pub jump_secs: i64,
+    pub max_stale_share: f64,
+    /// (last tick, pending jump = (detected at, last_full_pass_at when detected)).
+    state: Mutex<(Option<i64>, Option<(i64, Option<i64>)>)>,
+    /// Freshness deferral in progress: (since, latest reason).
+    deferred: Mutex<Option<(i64, &'static str)>>,
+}
+
+impl TickClock {
+    pub fn new(stale_after: i64) -> Self {
+        Self::with_limits(stale_after, CLOCK_JUMP_SECS, MAX_STALE_SHARE)
+    }
+
+    pub fn with_limits(stale_after: i64, jump_secs: i64, max_stale_share: f64) -> Self {
+        Self {
+            stale_after,
+            jump_secs,
+            max_stale_share,
+            state: Mutex::new((None, None)),
+            deferred: Mutex::new(None),
+        }
+    }
+
+    /// Records a tick at `now` and returns the time of the pending clock jump, if any.
+    /// A gap longer than `jump_secs` in EITHER direction since the previous tick starts
+    /// a jump. It clears only when `last_full_pass_at` has CHANGED since the jump and
+    /// the new pass ended strictly after it (a pass stamped at the jump second, or an
+    /// older pass that looks "later" after a backward jump, does not count).
+    pub fn tick(&self, now: i64, last_full_pass_at: Option<i64>) -> Option<i64> {
+        let mut st = self.state.lock().unwrap();
+        let (last, mut jump) = *st;
+        if let Some(prev) = last {
+            if (now - prev).abs() > self.jump_secs {
+                jump = Some((now, last_full_pass_at));
+            }
+        }
+        if let (Some((j, at_jump)), Some(p)) = (jump, last_full_pass_at) {
+            if Some(p) != at_jump && p > j {
+                jump = None;
+            }
+        }
+        *st = (Some(now), jump);
+        jump.map(|(j, _)| j)
+    }
+
+    /// Notes a freshness deferral at `now` (keeps the first `since`).
+    pub fn note_deferred(&self, now: i64, why: &'static str) {
+        let mut d = self.deferred.lock().unwrap();
+        let since = d.map_or(now, |(s, _)| s);
+        *d = Some((since, why));
+    }
+
+    pub fn clear_deferred(&self) {
+        *self.deferred.lock().unwrap() = None;
+    }
+
+    /// `(deferred_since, reason)` while a due run is held back by the freshness gate.
+    pub fn deferred(&self) -> Option<(i64, &'static str)> {
+        *self.deferred.lock().unwrap()
+    }
 }
 
 /// Decision flips per (profile, model). A `rule_version` boundary starts a new series:
@@ -3234,6 +4163,11 @@ mod tests {
         s.record_run_full(&meta(1), &[r], Some(&tiny_eval(&["ADSK", "BK"])))
             .unwrap();
         assert_eq!(s.shadow_count().unwrap(), 6);
+        s.annotate_run(&meta(1).run_id(), "stale quotes", 1)
+            .unwrap();
+        assert!(s
+            .record_deferral(&deferral("sp500", 7, SkipReason::ClockJump))
+            .unwrap());
         let c = s.conn.lock().unwrap();
         for t in HISTORY_TABLES {
             let del = format!("{} FROM {t}", "DELETE");
@@ -3701,7 +4635,13 @@ mod tests {
         let s = ScoreHistoryStore::open(&p, Some(&dir.join("bk"))).unwrap();
         assert_eq!(s.run_count().unwrap(), 400);
         let c = s.conn.lock().unwrap();
-        for t in HISTORY_TABLES.iter().skip(4) {
+        // Annotations are operator-written and deferrals recorder-written only (none in
+        // this run loop).
+        for t in HISTORY_TABLES
+            .iter()
+            .skip(4)
+            .filter(|t| **t != "run_annotations" && **t != "run_deferrals")
+        {
             assert!(table_count(&c, t) > 0, "{t}");
         }
         assert_eq!(table_count(&c, "score_evaluations"), 800);
@@ -3784,6 +4724,11 @@ mod tests {
                 .into_iter()
                 .map(|c| (c.name, c.ty))
                 .collect();
+            cols.retain(|(n, _)| {
+                !LATER_COLUMNS
+                    .iter()
+                    .any(|(v, lt, lc)| *lt == t && lc == n && *v > version)
+            });
             cols.reverse();
             edit(t, &mut cols);
             let ddl = cols
@@ -3796,6 +4741,22 @@ mod tests {
         }
         if version >= EVALUATIONS_MIGRATION {
             b.execute_batch(EVALUATIONS_DDL).unwrap();
+        }
+        if version >= QUOTE_FRESHNESS_MIGRATION {
+            // Only the v5 tables are needed for a merge source (no ALTERs, no triggers).
+            let tables = QUOTE_FRESHNESS_DDL
+                .split("CREATE TABLE")
+                .skip(1)
+                .map(|seg| format!("CREATE TABLE{}", &seg[..seg.find(");").unwrap() + 2]))
+                .collect::<Vec<_>>()
+                .join("\n");
+            b.execute_batch(&tables).unwrap();
+        }
+        if version >= RUN_DEFERRALS_MIGRATION {
+            let t = RUN_DEFERRALS_DDL;
+            let i = t.find("CREATE TABLE").unwrap();
+            b.execute_batch(&t[i..i + t[i..].find(");").unwrap() + 2])
+                .unwrap();
         }
         let has = |t: &str, c: &str| {
             b.query_row(
@@ -3861,6 +4822,7 @@ mod tests {
             "price_cents",
             "target_cents",
             "trust_signal",
+            "stale",
         ];
         let hv = [
             "'sp500-7-v3'",
@@ -3873,6 +4835,7 @@ mod tests {
             "24175",
             "30250",
             "'t'",
+            "0",
         ];
         let (n, v): (Vec<&str>, Vec<&str>) = hc
             .iter()
@@ -4086,9 +5049,15 @@ mod tests {
                 j(&["update", t]),
                 j(&["drop", "table", t]),
                 j(&["drop", "table", "if", "exists", t]),
-                j(&["alter", "table", t]),
                 j(&["replace", "into", t]),
             ];
+            // ALTER TABLE is allowed only as an additive `ADD COLUMN` (migrations).
+            for at in find_all(&s, &j(&["alter", "table", t])) {
+                let rest = s[at..].splitn(4, ' ').nth(3).unwrap_or("");
+                if !rest.starts_with(&j(&["add", "column", ""])) {
+                    bad.push(j(&["alter", "table", t]));
+                }
+            }
             for o in ors {
                 needles.push(j(&["update", "or", o, t]));
                 needles.push(j(&["insert", "or", o, "into", t]));
@@ -4423,18 +5392,30 @@ mod tests {
         // V2/V3/V4: length, uppercase, non-hex, empty, slash-in-64.
         let hex64 = "a".repeat(64);
         assert!(validate_input_hash(&hex64).is_ok());
-        assert!(validate_input_hash(&"a".repeat(63)).unwrap_err().contains("64 lowercase hex"));
-        assert!(validate_input_hash(&"a".repeat(65)).unwrap_err().contains("64 lowercase hex"));
-        assert!(validate_input_hash("").unwrap_err().contains("64 lowercase hex"));
+        assert!(validate_input_hash(&"a".repeat(63))
+            .unwrap_err()
+            .contains("64 lowercase hex"));
+        assert!(validate_input_hash(&"a".repeat(65))
+            .unwrap_err()
+            .contains("64 lowercase hex"));
+        assert!(validate_input_hash("")
+            .unwrap_err()
+            .contains("64 lowercase hex"));
         let mut upper = hex64.clone();
         upper.replace_range(0..1, "A");
-        assert!(validate_input_hash(&upper).unwrap_err().contains("64 lowercase hex"));
+        assert!(validate_input_hash(&upper)
+            .unwrap_err()
+            .contains("64 lowercase hex"));
         let mut gee = hex64.clone();
         gee.replace_range(10..11, "g");
-        assert!(validate_input_hash(&gee).unwrap_err().contains("64 lowercase hex"));
+        assert!(validate_input_hash(&gee)
+            .unwrap_err()
+            .contains("64 lowercase hex"));
         let mut slash = hex64.clone();
         slash.replace_range(5..6, "/");
-        assert!(validate_input_hash(&slash).unwrap_err().contains("64 lowercase hex"));
+        assert!(validate_input_hash(&slash)
+            .unwrap_err()
+            .contains("64 lowercase hex"));
         assert!(inputs_blob_path(Path::new("/tmp"), &slash).is_err());
     }
 
@@ -4460,7 +5441,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(calls, 2, "raced destination skipped, then retried");
-        assert_eq!(std::fs::read(&raced).unwrap(), b"keep", "existing .bad untouched");
+        assert_eq!(
+            std::fs::read(&raced).unwrap(),
+            b"keep",
+            "existing .bad untouched"
+        );
         assert!(fresh.symlink_metadata().unwrap().file_type().is_symlink());
         assert!(path.symlink_metadata().is_err(), "original moved aside");
     }
@@ -4543,7 +5528,11 @@ mod tests {
         assert_eq!(std::fs::read(&path_dirlink).unwrap(), b"payload-dirlink");
         let bad_dirlink = inputs.join(format!("{hash_dirlink}.bad"));
         assert!(
-            bad_dirlink.symlink_metadata().unwrap().file_type().is_symlink(),
+            bad_dirlink
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "symlink-to-directory quarantined"
         );
 
@@ -4556,7 +5545,11 @@ mod tests {
         assert_eq!(std::fs::read(&path_dang).unwrap(), b"payload-dangling");
         let bad_dang = inputs.join(format!("{hash_dang}.bad"));
         assert!(
-            bad_dang.symlink_metadata().unwrap().file_type().is_symlink(),
+            bad_dang
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "dangling symlink quarantined"
         );
 
@@ -4574,7 +5567,7 @@ mod tests {
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with(&format!("{hash4}.bad.")) )
+            .filter(|n| n.starts_with(&format!("{hash4}.bad.")))
             .collect();
         assert!(
             !unique_bads.is_empty(),
@@ -5382,6 +6375,8 @@ mod tests {
             "score_run_inputs",
             "score_evaluations",
             "score_run_stats",
+            "run_annotations",
+            "run_deferrals",
         ];
         s.missing_triggers
             .retain(|t| !later.iter().any(|p| t.starts_with(p)));
@@ -5523,7 +6518,7 @@ mod tests {
     fn fresh_db_is_current_schema_with_all_triggers() {
         let s = ScoreHistoryStore::open_in_memory().unwrap();
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(REQUIRED_TRIGGERS.len(), 24);
+        assert_eq!(REQUIRED_TRIGGERS.len(), 30);
         assert!(s.missing_triggers.is_empty());
         let c = s.conn.lock().unwrap();
         let n: i64 = c
@@ -5549,5 +6544,1438 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f == "score_shadow: update"));
+    }
+
+    #[test]
+    fn annotations_are_append_only_and_validated() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        s.record_run(&meta(100), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        let id = meta(100).run_id();
+        assert!(s
+            .annotate_run("sp500-999-v3", "x", 1)
+            .unwrap_err()
+            .contains("not found"));
+        assert!(s.annotate_run(&id, "  ", 1).is_err());
+        assert!(s.annotate_run(&id, "a\nb", 1).is_err());
+        assert!(s.annotate_run(&id, &"x".repeat(501), 1).is_err());
+        s.annotate_run(&id, "stale quotes after wake", 10).unwrap();
+        s.annotate_run(&id, "second note", 11).unwrap();
+        assert!(s.annotate_run(&id, "second note", 11).is_err(), "duplicate");
+        let a = s.annotations(&id).unwrap();
+        assert_eq!(
+            a.iter().map(|x| x.reason.as_str()).collect::<Vec<_>>(),
+            ["stale quotes after wake", "second note"]
+        );
+        {
+            let c = s.conn.lock().unwrap();
+            let t = HISTORY_TABLES[8];
+            let rep = ["INSERT", "OR", "REPLACE"].join(" ");
+            for sql in [
+                format!("{} FROM {t}", "DELETE"),
+                format!("{} {t} SET reason = 'x'", "UPDATE"),
+                format!("{rep} INTO {t} SELECT * FROM {t}"),
+            ] {
+                let e = c.execute(&sql, []).unwrap_err().to_string();
+                assert!(e.contains("append-only"), "{sql}: {e}");
+            }
+        }
+        // Shown on /history points of that run only; other output unchanged.
+        let pts = s.history("ADSK", None, 200, None, None).unwrap();
+        assert_eq!(
+            pts[0].annotations,
+            ["stale quotes after wake", "second note"]
+        );
+        assert_eq!(s.annotations(&id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn v4_db_migrates_to_v5_with_backup_and_old_rows_not_stale() {
+        let dir = tmpdir("v5-mig");
+        let (p, bdir) = (dir.join("history.sqlite"), dir.join("bk"));
+        let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..4]).unwrap();
+        assert_eq!(s.schema_version().unwrap(), 4);
+        s.missing_triggers
+            .retain(|t| !t.starts_with("run_annotations") && !t.starts_with("run_deferrals"));
+        *s.selfcheck.lock().unwrap() = SelfCheck::Passed;
+        s.record_run(&meta(100), &[row("ADSK", "Act", 40, 60, 10, 30)])
+            .unwrap();
+        drop(s);
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        assert!(s.migration_backup.is_some(), "backup before v4 -> v5");
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        assert_eq!(s.stale_counts(&meta(100).run_id()).unwrap(), (1, 0));
+        assert_eq!(s.history("ADSK", None, 200, None, None).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    fn fresh_of(ts: &[(&str, i64)]) -> QuoteFreshness {
+        QuoteFreshness {
+            quote_ts: ts.iter().map(|(s, t)| (s.to_string(), *t)).collect(),
+            stale_after_secs: DEFAULT_QUOTE_STALE_SECS,
+        }
+    }
+
+    #[test]
+    fn stale_boundary_1800_fresh_1801_stale_unknown_stale_per_row_age() {
+        let f = fresh_of(&[
+            ("A", 10_000 - 1800),
+            ("B", 10_000 - 1801),
+            ("C", 10_000 - 5),
+        ]);
+        assert_eq!(f.of("A", 10_000), (Some(8_200), Some(1800), false));
+        assert_eq!(f.of("B", 10_000), (Some(8_199), Some(1801), true));
+        assert_eq!(
+            f.of("C", 10_000),
+            (Some(9_995), Some(5), false),
+            "per-row age"
+        );
+        assert_eq!(f.of("ZZZ", 10_000), (None, None, true), "unknown = stale");
+        // A quote stamped after `at` (clock stepped back) has no age and is stale.
+        assert_eq!(
+            f.of("C", 9_990),
+            (Some(9_995), None, true),
+            "future = stale"
+        );
+        assert_eq!(
+            f.of("C", 9_995),
+            (Some(9_995), Some(0), false),
+            "same second"
+        );
+    }
+
+    fn gate(
+        rows: usize,
+        stale_rows: usize,
+        pass: Option<i64>,
+        jump: Option<i64>,
+    ) -> Option<&'static str> {
+        freshness_gate(&FreshInputs {
+            now: 100_000,
+            rows,
+            stale_rows,
+            last_full_pass_at: pass,
+            jump_at: jump,
+            stale_after: 1800,
+            max_stale_share: MAX_STALE_SHARE,
+        })
+    }
+
+    #[test]
+    fn gate_boundaries_share_and_pass_age() {
+        assert_eq!(gate(20, 2, None, None), None, "2/20 = 10% is allowed");
+        assert_eq!(gate(20, 3, None, None), Some("too many stale quotes"));
+        assert_eq!(gate(0, 0, None, None), None);
+        assert_eq!(
+            gate(20, 0, Some(100_000 - 1800), None),
+            None,
+            "pass 1800 s ago ok"
+        );
+        assert_eq!(
+            gate(20, 0, Some(100_000 - 1801), None),
+            Some("waiting for a fresh quote pass")
+        );
+        assert_eq!(
+            gate(20, 0, Some(100_000), Some(99_000)),
+            Some("clock jump: waiting for a quote pass after wake")
+        );
+        // A custom share flag is honoured.
+        let mut i = FreshInputs {
+            now: 1,
+            rows: 20,
+            stale_rows: 5,
+            last_full_pass_at: None,
+            jump_at: None,
+            stale_after: 1800,
+            max_stale_share: 0.25,
+        };
+        assert_eq!(freshness_gate(&i), None);
+        i.stale_rows = 6;
+        assert!(freshness_gate(&i).is_some());
+    }
+
+    #[test]
+    fn tick_jump_boundary_300_vs_301_and_pass_must_end_after_it() {
+        let c = TickClock::new(1800);
+        assert_eq!(c.tick(1_000, Some(900)), None);
+        assert_eq!(c.tick(1_300, Some(900)), None, "300 s gap is not a jump");
+        assert_eq!(c.tick(1_601, Some(900)), Some(1_601), "301 s gap is a jump");
+        // A pass stamped exactly at the jump second does not clear it.
+        assert_eq!(c.tick(1_620, Some(1_601)), Some(1_601), "pass == jump");
+        assert_eq!(
+            c.tick(1_640, Some(1_602)),
+            None,
+            "pass after the jump clears"
+        );
+        assert_eq!(c.tick(1_700, Some(1_602)), None);
+    }
+
+    #[test]
+    fn backward_clock_jump_defers_until_a_new_pass() {
+        let c = TickClock::new(1800);
+        assert_eq!(c.tick(10_000, Some(9_990)), None);
+        // Clock stepped back 1 h: the last pass (9 990) now looks "in the future".
+        assert_eq!(c.tick(6_400, Some(9_990)), Some(6_400));
+        assert_eq!(
+            c.tick(6_460, Some(9_990)),
+            Some(6_400),
+            "old pass does not clear"
+        );
+        assert_eq!(
+            gate(20, 0, Some(9_990), c.tick(6_520, Some(9_990))),
+            Some("clock jump: waiting for a quote pass after wake")
+        );
+        assert_eq!(
+            c.tick(6_580, Some(6_570)),
+            None,
+            "a new pass after the jump clears"
+        );
+        // A backward gap of exactly 300 s is not a jump.
+        assert_eq!(c.tick(6_280, Some(6_570)), None);
+        assert_eq!(c.tick(5_979, Some(6_570)), Some(5_979));
+    }
+
+    #[test]
+    fn deferral_tracks_first_since_and_clears() {
+        let c = TickClock::new(1800);
+        assert_eq!(c.deferred(), None);
+        c.note_deferred(100, "clock jump: waiting for a quote pass after wake");
+        c.note_deferred(160, "too many stale quotes");
+        assert_eq!(c.deferred(), Some((100, "too many stale quotes")));
+        c.clear_deferred();
+        assert_eq!(c.deferred(), None);
+    }
+
+    #[test]
+    fn stored_quote_columns_age_not_null_and_checks_enforced() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = fresh_of(&[("ADSK", 1_000 - 1801), ("BK", 1_000 - 60)]);
+        s.record_run_quotes(
+            &meta(1_000),
+            &[
+                row("ADSK", "Act", 30, 60, 0, 30),
+                row("BK", "Watch", 20, 50, 0, 20),
+                row("CC", "Watch", 20, 50, 0, 20),
+            ],
+            None,
+            Some(&f),
+        )
+        .unwrap();
+        let c = s.conn.lock().unwrap();
+        let got: Vec<(String, Option<i64>, Option<i64>, i64)> = c
+            .prepare(
+                "SELECT symbol, quote_ts, quote_age_secs, stale FROM score_history ORDER BY symbol",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("ADSK".into(), Some(-801), Some(1801), 1),
+                ("BK".into(), Some(940), Some(60), 0),
+                ("CC".into(), None, None, 1),
+            ]
+        );
+        let t = HISTORY_TABLES[1];
+        let ins = |stale: i64, age: i64| {
+            c.execute(
+                &format!(
+                    "{} INTO {t} (run_id, symbol, captured_at, rank, decision, composite, \
+                     price_cents, quote_age_secs, stale) VALUES ('sp500-1000-v3', 'X{stale}{age}', 1000, 9, \
+                     'Act', 1, 1, ?1, ?2)",
+                    "INSERT"
+                ),
+                params![age, stale],
+            )
+        };
+        assert!(ins(2, 5).unwrap_err().to_string().contains("CHECK"));
+        assert!(ins(0, -1).unwrap_err().to_string().contains("CHECK"));
+        assert!(ins(1, 0).is_ok());
+    }
+
+    #[test]
+    fn v5_backup_round_trip_restores_annotations() {
+        let root = tmpdir("v5rt");
+        let bdir = root.join("bk");
+        let src = ScoreHistoryStore::open(&root.join("src.sqlite"), Some(&bdir)).unwrap();
+        let f = fresh_of(&[("ADSK", 5 - 3600)]);
+        src.record_run_quotes(
+            &meta(5),
+            &[row("ADSK", "Act", 30, 60, 0, 30)],
+            Some(&tiny_eval(&["ADSK", "BK"])),
+            Some(&f),
+        )
+        .unwrap();
+        let id = meta(5).run_id();
+        src.annotate_run(&id, "stale quotes after wake", 7).unwrap();
+        src.annotate_run(&id, "second", 8).unwrap();
+        // Incremental format: export into the backup dir so payloads land in inputs/.
+        std::fs::create_dir_all(&bdir).unwrap();
+        let bk = bdir.join("v5.sqlite.gz");
+        src.export_to(&bk).unwrap();
+        let blobs = std::fs::read_dir(inputs_blob_dir(&bdir)).unwrap().count();
+        assert!(blobs > 0, "v5 export writes inputs/<sha256> blobs");
+        let data = root.join("d");
+        // Restore uses a different backup dir: blobs resolve from the source's dir.
+        let r = restore(&bk, &data, &root.join("bk2")).unwrap();
+        assert_eq!((r.runs_added, r.rows_added, r.annotations_added), (1, 1, 2));
+        let r = restore(&bk, &data, &bdir).unwrap();
+        assert_eq!(r.annotations_added, 0, "idempotent");
+        let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+        assert_eq!(s.annotations(&id).unwrap(), src.annotations(&id).unwrap());
+        let ev = |st: &ScoreHistoryStore| st.reconstruct_snapshot(&id).unwrap();
+        assert_eq!(ev(&s), ev(&src), "inputs byte-identical via blob store");
+        assert_eq!(
+            s.stale_counts(&id).unwrap(),
+            (1, 1),
+            "stale flag survives restore"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v4_backup_restores_with_zero_annotations() {
+        let root = tmpdir("v4rt");
+        let f = root.join("v4.sqlite");
+        custom_backup(&f, 4, |_, _| {});
+        let r = restore(&f, &root.join("d"), &root.join("bk")).unwrap();
+        assert_eq!((r.runs_added, r.rows_added, r.annotations_added), (1, 1, 0));
+        let s = ScoreHistoryStore::open(&root.join("d").join("history.sqlite"), None).unwrap();
+        assert_eq!(
+            s.stale_counts("sp500-7-v3").unwrap(),
+            (1, 0),
+            "pre-v5 rows not stale"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn annotate_file_is_the_cli_path_and_checks_schema() {
+        let root = tmpdir("annfile");
+        let p = root.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        s.record_run(&meta(100), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        // Works while another handle (the serve) holds the store open.
+        let a = annotate_file(&p, &meta(100).run_id(), "stale", 9).unwrap();
+        assert_eq!(s.annotations(&meta(100).run_id()).unwrap(), vec![a]);
+        assert!(annotate_file(&p, "sp500-1-v3", "x", 9)
+            .unwrap_err()
+            .contains("not found"));
+        assert!(annotate_file(&root.join("missing.sqlite"), "sp500-1-v3", "x", 9).is_err());
+        drop(s);
+        let old = root.join("v4.sqlite");
+        drop(ScoreHistoryStore::open_with(&old, None, &MIGRATIONS[..4]).unwrap());
+        assert!(annotate_file(&old, "sp500-1-v3", "x", 9)
+            .unwrap_err()
+            .contains("schema v4"));
+        // Each run_annotations trigger is required: a dropped one refuses the write.
+        for t in REQUIRED_TRIGGERS
+            .iter()
+            .filter(|t| t.starts_with(HISTORY_TABLES[8]))
+        {
+            let q = root.join(format!("{t}.sqlite"));
+            let st = ScoreHistoryStore::open(&q, None).unwrap();
+            st.record_run(&meta(100), &[row("ADSK", "Act", 30, 60, 0, 30)])
+                .unwrap();
+            drop(st);
+            let c = Connection::open(&q).unwrap();
+            c.execute_batch(&format!("DROP TRIGGER {t}")).unwrap();
+            drop(c);
+            let e = annotate_file(&q, &meta(100).run_id(), "stale", 9).unwrap_err();
+            assert!(
+                e.contains("missing append-only triggers") && e.contains(t),
+                "{e}"
+            );
+            let c = Connection::open(&q).unwrap();
+            let n: i64 = c
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {}", HISTORY_TABLES[8]),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "nothing written");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn deferral(profile: &str, slot: i64, reason: SkipReason) -> RunDeferral {
+        RunDeferral {
+            profile: profile.into(),
+            slot,
+            trigger: "interval".into(),
+            observed_at: slot + 30,
+            reason: reason.code().into(),
+            stale_count: 3,
+            total: 20,
+            covers: 1,
+            covers_from: None,
+        }
+    }
+
+    #[test]
+    fn deferral_is_one_row_per_slot_and_first_record_wins() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        assert!(s
+            .record_deferral(&deferral("sp500", 100, SkipReason::ClockJump))
+            .unwrap());
+        let mut again = deferral("sp500", 100, SkipReason::StaleShareTooHigh);
+        again.observed_at = 999;
+        assert!(
+            !s.record_deferral(&again).unwrap(),
+            "same slot: nothing added"
+        );
+        // Other slot / other profile are separate rows.
+        assert!(s
+            .record_deferral(&deferral("sp500", 200, SkipReason::ClockJump))
+            .unwrap());
+        assert!(s
+            .record_deferral(&deferral("dow", 100, SkipReason::ClockJump))
+            .unwrap());
+        let d = s.deferrals(Some("sp500"), "v3", None, None, 10).unwrap();
+        assert_eq!(
+            d.iter()
+                .map(|(x, _)| (x.slot, x.reason.as_str(), x.observed_at))
+                .collect::<Vec<_>>(),
+            [(200, "clock_jump", 230), (100, "clock_jump", 130)],
+            "newest first; the first record of slot 100 is kept unchanged"
+        );
+        assert_eq!(d[0].0.stale_share(), Some(0.15));
+        assert_eq!(
+            s.deferrals(None, "v3", Some(150), None, 10).unwrap().len(),
+            1
+        );
+        assert_eq!(s.deferrals(None, "v3", None, None, 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn deferrals_are_append_only_and_codes_are_checked() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        // Every reason code is accepted; codes are distinct.
+        let codes: std::collections::HashSet<&str> =
+            SkipReason::ALL.iter().map(|r| r.code()).collect();
+        assert_eq!(codes.len(), SkipReason::ALL.len());
+        for (i, r) in SkipReason::ALL.iter().enumerate() {
+            assert!(
+                s.record_deferral(&deferral("sp500", i as i64, *r)).unwrap(),
+                "{r:?}"
+            );
+        }
+        // Free text, an unknown trigger and stale_count > total are refused.
+        let mut bad = deferral("sp500", 50, SkipReason::ClockJump);
+        bad.reason = "box was asleep".into();
+        assert!(s.record_deferral(&bad).unwrap_err().contains("CHECK"));
+        let mut bad = deferral("sp500", 51, SkipReason::ClockJump);
+        bad.trigger = "manual".into();
+        assert!(s.record_deferral(&bad).unwrap_err().contains("CHECK"));
+        let mut bad = deferral("sp500", 52, SkipReason::ClockJump);
+        bad.stale_count = 21;
+        assert!(s.record_deferral(&bad).unwrap_err().contains("CHECK"));
+        let c = s.conn.lock().unwrap();
+        let t = HISTORY_TABLES[9];
+        assert_eq!(t, "run_deferrals");
+        let rep = ["INSERT", "OR", "REPLACE"].join(" ");
+        for sql in [
+            format!("{} FROM {t}", "DELETE"),
+            format!("{} FROM {t} WHERE slot = 0", "DELETE"),
+            format!("{} {t} SET reason = 'clock_jump'", "UPDATE"),
+            format!("{} {t} SET stale_count = 0 WHERE slot = 0", "UPDATE"),
+            format!("{rep} INTO {t} SELECT * FROM {t}"),
+            format!("{} INTO {t} SELECT * FROM {t} LIMIT 1", "INSERT"),
+        ] {
+            let e = c.execute(&sql, []).unwrap_err().to_string();
+            assert!(e.contains("append-only"), "{sql}: {e}");
+        }
+        assert_eq!(table_count(&c, t), SkipReason::ALL.len() as i64);
+        // The dedupe key is the schema's UNIQUE key, not only the trigger.
+        let pk: Vec<String> = c
+            .prepare(&format!(
+                "SELECT name FROM pragma_table_info('{t}') WHERE pk > 0 ORDER BY pk"
+            ))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(pk, ["profile", "slot"]);
+        // The behavioural self-check covers the table (empty → sentinel, rolled back).
+        assert!(trigger_behaviour_failures(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn each_deferral_trigger_is_required_for_writes() {
+        let root = tmpdir("deftrig");
+        for t in REQUIRED_TRIGGERS
+            .iter()
+            .filter(|t| t.starts_with(HISTORY_TABLES[9]))
+        {
+            let q = root.join(format!("{t}.sqlite"));
+            drop(ScoreHistoryStore::open(&q, None).unwrap());
+            let c = Connection::open(&q).unwrap();
+            c.execute_batch(&format!("{} TRIGGER {t}", "DROP")).unwrap();
+            drop(c);
+            let s = ScoreHistoryStore::open(&q, None).unwrap();
+            let e = s
+                .record_deferral(&deferral("sp500", 1, SkipReason::ClockJump))
+                .unwrap_err();
+            assert!(e.contains("triggers missing") && e.contains(t), "{e}");
+            assert!(
+                s.deferrals(None, "v3", None, None, 10).unwrap().is_empty(),
+                "nothing written"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deferral_survives_reopen_and_is_in_backup_and_restore() {
+        let root = tmpdir("defbk");
+        let bdir = root.join("bk");
+        let p = root.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        s.record_run(&meta(100), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        assert!(s
+            .record_deferral(&deferral("sp500", 50, SkipReason::StaleShareTooHigh))
+            .unwrap());
+        assert!(s
+            .record_deferral(&deferral("sp500", 500, SkipReason::ClockJump))
+            .unwrap());
+        drop(s);
+        // Restart: reopen re-runs init + migrations; the rows are still there.
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        let d = s.deferrals(None, "v3", None, None, 10).unwrap();
+        assert_eq!(d.len(), 2);
+        // Slot 50 was later recorded (run at 100); slot 500 is still a gap.
+        assert_eq!(
+            d.iter()
+                .map(|(x, r)| (x.slot, r.clone()))
+                .collect::<Vec<_>>(),
+            [(500, None), (50, Some(meta(100).run_id()))]
+        );
+        assert!(!s
+            .record_deferral(&deferral("sp500", 50, SkipReason::ClockJump))
+            .unwrap());
+        // Backup carries the table.
+        std::fs::create_dir_all(&bdir).unwrap();
+        let bk = bdir.join("def.sqlite.gz");
+        s.export_to(&bk).unwrap();
+        let pl = plain(&bk).unwrap();
+        let b = Connection::open(&pl.path).unwrap();
+        assert_eq!(
+            table_count(&b, "run_deferrals"),
+            2,
+            "backup contains run_deferrals"
+        );
+        drop(b);
+        drop(pl);
+        // Append-only restore merges them; a second restore adds nothing.
+        let data = root.join("d");
+        let r = restore(&bk, &data, &root.join("bk2")).unwrap();
+        assert_eq!(r.deferrals_added, 2);
+        assert_eq!(
+            restore(&bk, &data, &root.join("bk2"))
+                .unwrap()
+                .deferrals_added,
+            0
+        );
+        let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
+        assert_eq!(t.deferrals(None, "v3", None, None, 10).unwrap(), d);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn due_slot_is_deterministic_from_the_schedule() {
+        const H: i64 = 6 * 3600;
+        let now: i64 = 1_793_538_000; // Sun 13:00 UTC: no close slot pending.
+                                      // Interval not elapsed: nothing scheduled.
+        assert_eq!(due_slot(now, Some(now - H + 1), H), None);
+        // Elapsed: the latest due interval time, stable across retry ticks.
+        assert_eq!(due_slot(now, Some(now - H), H), Some((now, "interval")));
+        assert_eq!(
+            due_slot(now + 599, Some(now - H), H),
+            Some((now, "interval"))
+        );
+        // A long deferral: one slot per elapsed interval.
+        assert_eq!(
+            due_slot(now + H + 5, Some(now - H), H),
+            Some((now + H, "interval"))
+        );
+        // No run yet / clock behind the last run: the interval bucket.
+        let b = now - now.rem_euclid(H);
+        assert_eq!(due_slot(now, None, H), Some((b, "interval")));
+        assert_eq!(due_slot(now, Some(now + 50), H), Some((b, "interval")));
+        assert_eq!(due_slot(now, Some(now - 5), 0), Some((now - 5, "interval")));
+        // A pending close catch-up wins, keyed by the close slot.
+        let close = next_close_snapshot(now);
+        assert_eq!(
+            due_slot(close + 60, Some(close - 600), H),
+            Some((close, "close"))
+        );
+        assert_eq!(
+            due_slot(close + 7_200, Some(close - 600), H),
+            Some((close, "close"))
+        );
+        // Agrees with history_due on every due/not-due decision it schedules.
+        for (t, last) in [(now, now - H), (now, now - 10), (close + 60, close - 600)] {
+            let due = history_due(&DueInputs {
+                now: t,
+                pass_completed: true,
+                since_pass: 0,
+                charts_ready: true,
+                live: true,
+                rows: 1,
+                last_run: Some(last),
+                interval: H,
+            });
+            match (due, due_slot(t, Some(last), H)) {
+                (Due::Close(c), Some((slot, "close"))) => assert_eq!(c, slot),
+                (Due::Interval, Some((_, "interval"))) => {}
+                (Due::No("interval not elapsed"), None) => {}
+                other => panic!("{t}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_scheduler_and_gate_message_has_a_distinct_reason_code() {
+        let src = include_str!("score_history.rs");
+        let body = |name: &str| {
+            let i = src.find(&format!("pub fn {name}(")).unwrap();
+            &src[i..i + src[i..].find("\n}\n").unwrap()]
+        };
+        let mut codes = std::collections::HashSet::new();
+        let mut n = 0;
+        for f in ["history_due", "freshness_gate"] {
+            for m in body(f).split('"').skip(1).step_by(2) {
+                n += 1;
+                if m == "interval not elapsed" {
+                    assert_eq!(SkipReason::from_message(m), None, "not a scheduled slot");
+                    continue;
+                }
+                let r = SkipReason::from_message(m)
+                    .unwrap_or_else(|| panic!("no reason code for skip message {m:?}"));
+                assert!(codes.insert(r.code()), "{m:?} shares a code");
+            }
+        }
+        assert_eq!(n, 8, "history_due (5) + freshness_gate (3) messages");
+        // process_down has no tick message: it is written only by the startup backfill.
+        assert!(codes.insert(SkipReason::ProcessDown.code()));
+        assert_eq!(SkipReason::from_message("process_down"), None);
+        // record_failed has no message either: written after a run-path error.
+        assert!(codes.insert(SkipReason::RecordFailed.code()));
+        assert_eq!(SkipReason::from_message("record_failed"), None);
+        assert_eq!(
+            codes.len(),
+            SkipReason::ALL.len(),
+            "every code is reachable"
+        );
+    }
+
+    // ---- process_down (downtime gap) ----
+
+    const SAT_10: i64 = 1_794_045_600; // Sat 2026-11-07 10:00 UTC (no close on weekends)
+    const TUE_00: i64 = 1_794_268_800; // Tue 2026-11-10 00:00 UTC (EST: close = 21:10 UTC)
+    const HR: i64 = 3600;
+
+    fn pd_rows(s: &ScoreHistoryStore) -> Vec<RunDeferral> {
+        let mut v: Vec<RunDeferral> = s
+            .deferrals(Some("sp500"), "v3", None, None, 100_000)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .filter(|d| d.reason == "process_down")
+            .collect();
+        v.sort_by_key(|d| d.slot);
+        v
+    }
+
+    fn store_with_run(at: i64) -> ScoreHistoryStore {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        s.record_run(&meta(at), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn process_down_three_missed_intervals_give_three_rows_and_restart_adds_none() {
+        let s = store_with_run(SAT_10);
+        // Down across the 11:00, 12:00 and 13:00 slots; restart just after 14:00 (the
+        // slot due now, left to the live process).
+        let now = SAT_10 + 4 * HR + 30;
+        assert_eq!(s.backfill_process_down("sp500", "v3", HR, now).unwrap(), 3);
+        let rows = pd_rows(&s);
+        assert_eq!(
+            rows.iter().map(|d| d.slot).collect::<Vec<_>>(),
+            [SAT_10 + HR, SAT_10 + 2 * HR, SAT_10 + 3 * HR]
+        );
+        for d in &rows {
+            assert_eq!(
+                (d.trigger.as_str(), d.observed_at, d.stale_count, d.total),
+                ("interval", now, 0, 0)
+            );
+            assert_eq!((d.covers, d.covers_from, d.stale_share()), (1, None, None));
+        }
+        // Restart again (same instant, later in the same slot): nothing new.
+        assert_eq!(s.backfill_process_down("sp500", "v3", HR, now).unwrap(), 0);
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, now + 600)
+                .unwrap(),
+            0
+        );
+        assert_eq!(pd_rows(&s).len(), 3);
+        // The current slot still takes its real reason from the live process.
+        let mut cur = deferral("sp500", SAT_10 + 4 * HR, SkipReason::StaleShareTooHigh);
+        cur.observed_at = now;
+        assert!(s.record_deferral(&cur).unwrap());
+        // Another outage later: only the new slots (anchor = latest deferral slot).
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, SAT_10 + 7 * HR + 5)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            pd_rows(&s).last().map(|d| d.slot),
+            Some(SAT_10 + 6 * HR),
+            "5:00 and 6:00 after the 4:00 deferral; 7:00 is due now"
+        );
+    }
+
+    #[test]
+    fn process_down_slot_count_has_no_off_by_one() {
+        for (now, want) in [
+            (SAT_10 + HR - 1, 0),
+            (SAT_10 + HR, 0), // 11:00 is due now, not missed
+            (SAT_10 + 2 * HR - 1, 0),
+            (SAT_10 + 2 * HR, 1), // 11:00 missed, 12:00 due now
+            (SAT_10 + 4 * HR - 1, 2),
+            (SAT_10 + 4 * HR, 3),
+        ] {
+            let s = store_with_run(SAT_10);
+            assert_eq!(
+                s.backfill_process_down("sp500", "v3", HR, now).unwrap(),
+                want,
+                "now = SAT_10 + {}",
+                now - SAT_10
+            );
+        }
+    }
+
+    #[test]
+    fn process_down_first_open_on_empty_store_writes_nothing() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, SAT_10 + 400 * HR)
+                .unwrap(),
+            0
+        );
+        // Another profile's run does not anchor this one.
+        s.record_run(&meta(SAT_10), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(
+            s.backfill_process_down("nasdaq", "v3", HR, SAT_10 + 400 * HR)
+                .unwrap(),
+            0
+        );
+        assert!(s.deferrals(None, "v3", None, None, 10).unwrap().is_empty());
+        assert!(process_down_plan(None, None, HR, SAT_10).is_empty());
+        // Disabled history (interval <= 0) never backfills.
+        assert!(process_down_plan(Some(SAT_10), None, 0, SAT_10 + 9 * HR).is_empty());
+    }
+
+    #[test]
+    fn process_down_anchors_on_a_deferral_when_there_is_no_run() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        // Only deferrals: slots are the `now − now mod interval` buckets.
+        let mut d = deferral("sp500", SAT_10, SkipReason::InitialPassInProgress);
+        d.observed_at = SAT_10 + 5;
+        assert!(s.record_deferral(&d).unwrap());
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, SAT_10 + 3 * HR + 9)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            pd_rows(&s).iter().map(|d| d.slot).collect::<Vec<_>>(),
+            [SAT_10 + HR, SAT_10 + 2 * HR]
+        );
+    }
+
+    #[test]
+    fn process_down_backwards_clock_writes_nothing() {
+        let s = store_with_run(SAT_10 + 10 * HR);
+        for now in [SAT_10 + 10 * HR - 1, SAT_10 + 5 * HR, SAT_10 - 30 * 86_400] {
+            assert_eq!(s.backfill_process_down("sp500", "v3", HR, now).unwrap(), 0);
+        }
+        assert!(pd_rows(&s).is_empty());
+        // Behind a deferral slot (but not the run): nothing either.
+        let mut d = deferral("sp500", SAT_10 + 12 * HR, SkipReason::ClockJump);
+        d.observed_at = SAT_10 + 12 * HR;
+        assert!(s.record_deferral(&d).unwrap());
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", HR, SAT_10 + 11 * HR + 5)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn process_down_missed_closes_get_close_rows_and_a_pending_close_is_left_live() {
+        // Last run Tue 00:00 UTC, 6 h interval, restart Thu 00:00:30: missed Tue 06/12/18,
+        // Wed 00/06/12/18, Tue's 16:10 ET (21:10 UTC) close and Thu 00:00. Wed's close
+        // is still in catch-up, so due_slot targets it: it is left to the live process.
+        let s = store_with_run(TUE_00);
+        let now = TUE_00 + 2 * 86_400 + 30;
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, now).unwrap(),
+            9
+        );
+        let got: Vec<(i64, String)> = pd_rows(&s)
+            .into_iter()
+            .map(|d| (d.slot - TUE_00, d.trigger))
+            .collect();
+        let close = 21 * HR + 600;
+        let mut want: Vec<(i64, String)> = [6, 12, 18, 24, 30, 36, 42, 48]
+            .iter()
+            .map(|h| (h * HR, "interval".to_string()))
+            .collect();
+        want.push((close, "close".into()));
+        want.sort();
+        assert_eq!(
+            due_slot(now, Some(TUE_00), 6 * HR),
+            Some((TUE_00 + 86_400 + close, "close"))
+        );
+        assert_eq!(got, want);
+        // Restart while Tue's close is still in catch-up: due_slot targets that close,
+        // so it is left to the live process; only Tue 18:00 was missed.
+        let s = store_with_run(TUE_00 + 12 * HR);
+        let now = TUE_00 + 23 * HR;
+        assert_eq!(
+            due_slot(now, Some(TUE_00 + 12 * HR), 6 * HR),
+            Some((TUE_00 + close, "close"))
+        );
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, now).unwrap(),
+            1
+        );
+        assert_eq!(pd_rows(&s)[0].slot, TUE_00 + 18 * HR);
+    }
+
+    /// Brute-force schedule: every interval slot and close in `(anchor, now]` minus the
+    /// slot due now.
+    fn missed_brute(last: i64, interval: i64, now: i64) -> Vec<i64> {
+        let mut v: std::collections::BTreeSet<i64> = Default::default();
+        let mut t = last + interval;
+        while t <= now {
+            v.insert(t);
+            t += interval;
+        }
+        let mut c = next_close_snapshot(last);
+        while c <= now {
+            v.insert(c);
+            c = next_close_snapshot(c);
+        }
+        if let Some((cur, _)) = due_slot(now, Some(last), interval) {
+            v.remove(&cur);
+        }
+        v.into_iter().collect()
+    }
+
+    #[test]
+    fn process_down_beyond_the_cap_writes_one_summary_row() {
+        let last = TUE_00 - 20 * 86_400 + 7; // off-lattice with the closes
+        let now = TUE_00 + 5 * HR;
+        let cutoff = now - PROCESS_DOWN_DETAIL_DAYS * 86_400;
+        let s = store_with_run(last);
+        let all = missed_brute(last, 6 * HR, now);
+        let (old, recent): (Vec<i64>, Vec<i64>) = all.iter().partition(|t| **t < cutoff);
+        let added = s.backfill_process_down("sp500", "v3", 6 * HR, now).unwrap();
+        assert_eq!(added, recent.len() + 1);
+        let rows = pd_rows(&s);
+        let (sum, det): (Vec<&RunDeferral>, Vec<&RunDeferral>) =
+            rows.iter().partition(|d| d.covers_from.is_some());
+        assert_eq!(sum.len(), 1, "exactly one summary row");
+        let sm = sum[0];
+        assert_eq!(
+            sm.slot,
+            *old.last().unwrap(),
+            "keyed by the newest old slot"
+        );
+        assert_eq!(
+            sm.covers_from,
+            Some(old[0]),
+            "covers_from = earliest missed slot"
+        );
+        assert_eq!(sm.covers, old.len() as i64);
+        assert!(
+            sm.covers > 50,
+            "13 days of 6 h slots + closes: {}",
+            sm.covers
+        );
+        assert_eq!((sm.stale_count, sm.total, sm.observed_at), (0, 0, now));
+        assert_eq!(det.iter().map(|d| d.slot).collect::<Vec<_>>(), recent);
+        assert!(det.iter().all(|d| d.slot >= cutoff && d.covers == 1));
+        assert!(det.iter().any(|d| d.trigger == "close"));
+        // Every missed slot is accounted for exactly once.
+        assert_eq!(sm.covers as usize + det.len(), all.len());
+        // Idempotent across restarts.
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, now).unwrap(),
+            0
+        );
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, now + 3 * 86_400)
+                .unwrap(),
+            missed_brute(last, 6 * HR, now + 3 * 86_400)
+                .iter()
+                .filter(|t| **t > recent.last().copied().unwrap())
+                .count()
+        );
+        assert_eq!(
+            pd_rows(&s)
+                .iter()
+                .filter(|d| d.covers_from.is_some())
+                .count(),
+            1,
+            "a later restart never adds a second summary"
+        );
+        // Plan agrees with the brute force at a few phases, and exactly on the cap
+        // boundary (a close / an interval slot at cutoff − 1 and at cutoff).
+        let c = next_close_snapshot(last + 2 * 86_400);
+        let sl = last + 10 * 6 * HR;
+        let cap = PROCESS_DOWN_DETAIL_DAYS * 86_400;
+        let phases: Vec<i64> = (0..12)
+            .map(|k| now + k * 4321)
+            .chain([c + cap, c + cap + 1, sl + cap, sl + cap + 1])
+            .collect();
+        for n in phases {
+            let p = process_down_plan(Some(last), None, 6 * HR, n);
+            let all = missed_brute(last, 6 * HR, n);
+            let c = n - PROCESS_DOWN_DETAIL_DAYS * 86_400;
+            let old: Vec<i64> = all.iter().copied().filter(|t| *t < c).collect();
+            assert_eq!(
+                p.slots.iter().map(|x| x.0).collect::<Vec<_>>(),
+                all.iter().copied().filter(|t| *t >= c).collect::<Vec<_>>()
+            );
+            let sm = p.summary.unwrap();
+            assert_eq!(
+                (sm.from, sm.slot, sm.covers),
+                (old[0], *old.last().unwrap(), old.len() as i64)
+            );
+        }
+    }
+
+    #[test]
+    fn process_down_summary_columns_are_checked() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let mut d = deferral("sp500", 100, SkipReason::ClockJump);
+        d.covers = 2;
+        assert!(
+            s.record_deferral(&d).is_err(),
+            "covers > 1 only on process_down"
+        );
+        let mut d = deferral("sp500", 100, SkipReason::ClockJump);
+        d.covers_from = Some(50);
+        assert!(
+            s.record_deferral(&d).is_err(),
+            "covers_from only on process_down"
+        );
+        let mut d = deferral("sp500", 100, SkipReason::ProcessDown);
+        d.covers_from = Some(150);
+        d.covers = 2;
+        assert!(s.record_deferral(&d).is_err(), "covers_from <= slot");
+        d.covers = 0;
+        d.covers_from = Some(50);
+        assert!(s.record_deferral(&d).is_err(), "covers >= 1");
+        d.covers = 2;
+        assert!(s.record_deferral(&d).unwrap());
+    }
+
+    #[test]
+    fn process_down_rows_survive_reopen_and_are_in_backup_and_restore() {
+        let root = tmpdir("pdbk");
+        let bdir = root.join("bk");
+        let p = root.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let last = TUE_00 - 9 * 86_400;
+        s.record_run(&meta(last), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        let n = s
+            .backfill_process_down("sp500", "v3", 6 * HR, TUE_00)
+            .unwrap();
+        assert!(n > 10, "{n}");
+        let before = s.deferrals(None, "v3", None, None, 10_000).unwrap();
+        assert_eq!(before.len(), n);
+        assert_eq!(before.iter().filter(|(d, _)| d.covers > 1).count(), 1);
+        drop(s);
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        assert_eq!(s.deferrals(None, "v3", None, None, 10_000).unwrap(), before);
+        assert_eq!(
+            s.backfill_process_down("sp500", "v3", 6 * HR, TUE_00)
+                .unwrap(),
+            0,
+            "restart after reopen adds nothing"
+        );
+        std::fs::create_dir_all(&bdir).unwrap();
+        let bk = bdir.join("pd.sqlite.gz");
+        s.export_to(&bk).unwrap();
+        let pl = plain(&bk).unwrap();
+        let b = Connection::open(&pl.path).unwrap();
+        assert_eq!(table_count(&b, "run_deferrals") as usize, n);
+        drop(b);
+        drop(pl);
+        let data = root.join("d");
+        let r = restore(&bk, &data, &root.join("bk2")).unwrap();
+        assert_eq!(r.deferrals_added, n);
+        assert_eq!(
+            restore(&bk, &data, &root.join("bk2"))
+                .unwrap()
+                .deferrals_added,
+            0
+        );
+        let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
+        assert_eq!(t.deferrals(None, "v3", None, None, 10_000).unwrap(), before);
+        // The restored rows stay append-only.
+        let c = t.conn.lock().unwrap();
+        let t_ = "run_deferrals";
+        assert!(c
+            .execute(
+                &format!("{} {t_} SET covers = 1 WHERE covers > 1", "UPDATE"),
+                []
+            )
+            .is_err());
+        assert!(c.execute(&format!("{} FROM {t_}", "DELETE"), []).is_err());
+        drop(c);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- v6: run_deferrals in its own migration; v5 frozen at 3c2e275 ----
+
+    /// v5 exactly as released at 3c2e275 (sha256 of the SQL text).
+    #[test]
+    fn v5_ddl_is_frozen_at_3c2e275() {
+        assert_eq!(
+            sha256_hex(QUOTE_FRESHNESS_DDL.as_bytes()),
+            "e969bc7afa33cbb702e191bf90597120ae6dbee2119a041109cb9129ce791cdb"
+        );
+        assert_eq!(
+            MIGRATIONS.iter().map(|m| m.0).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(MIGRATIONS[4], (5, QUOTE_FRESHNESS_DDL));
+        assert_eq!(MIGRATIONS[5], (6, RUN_DEFERRALS_DDL));
+        assert!(!QUOTE_FRESHNESS_DDL.contains("run_deferrals"));
+        assert_eq!(SCHEMA_VERSION, 6);
+    }
+
+    /// Model the binary that only knew `MIGRATIONS[..n]`: it required only its own
+    /// triggers and its probe covered only its own tables.
+    fn as_old_writer(s: &mut ScoreHistoryStore, n: usize) {
+        let sql: String = MIGRATIONS[..n].iter().map(|m| m.1).collect();
+        s.missing_triggers
+            .retain(|t| sql.contains(&format!("NOT EXISTS {t} ")));
+        assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        *s.selfcheck.lock().unwrap() = SelfCheck::Passed;
+    }
+
+    fn migrations_logged(p: &Path) -> Vec<(i64, Option<String>)> {
+        let c = Connection::open(p).unwrap();
+        let mut st = c
+            .prepare("SELECT version, backup_path FROM score_history_migrations ORDER BY version")
+            .unwrap();
+        let v = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        v
+    }
+
+    fn assert_v6_works(s: &ScoreHistoryStore, root: &Path, at: i64) {
+        assert_eq!(s.schema_version().unwrap(), 6);
+        assert!(s.missing_triggers.is_empty(), "{:?}", s.missing_triggers);
+        s.record_run(&meta(at), &[row("ADSK", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        assert!(s
+            .record_deferral(&deferral("sp500", at + 100, SkipReason::ClockJump))
+            .unwrap());
+        let bk = root.join(format!("exp-{at}.sqlite.gz"));
+        s.export_to(&bk).unwrap();
+        let pl = plain(&bk).unwrap();
+        let b = Connection::open(&pl.path).unwrap();
+        assert!(table_count(&b, "run_deferrals") >= 1);
+        drop(b);
+        let c = s.conn.lock().unwrap();
+        let idx: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'score_runs_profile_model_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "v6 index");
+    }
+
+    #[test]
+    fn v4_store_migrates_to_v6_in_one_run_with_a_backup() {
+        let root = tmpdir("v4v6");
+        let (p, bdir) = (root.join("history.sqlite"), root.join("bk"));
+        {
+            let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..4]).unwrap();
+            assert_eq!(s.schema_version().unwrap(), 4);
+            as_old_writer(&mut s, 4);
+            s.record_run(&meta(100), &[row("ADSK", "Act", 1, 1, 1, 1)])
+                .unwrap();
+        }
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let b = s.migration_backup.clone().expect("pre-migration backup");
+        let name = b.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.starts_with("history.pre-score-history-v4-to-v6-"),
+            "{name}"
+        );
+        verify_file(&b, false).unwrap();
+        let log = migrations_logged(&p);
+        assert_eq!(
+            log.iter().map(|x| x.0).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        let bp = Some(b.to_string_lossy().to_string());
+        assert_eq!(
+            (&log[4].1, &log[5].1),
+            (&bp, &bp),
+            "one backup for v5 and v6"
+        );
+        assert_eq!(s.counts().unwrap().0, 1, "the v4 run is kept");
+        assert_v6_works(&s, &root, 1_000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v0_store_migrates_to_v6() {
+        let root = tmpdir("v0v6");
+        let (p, bdir) = (root.join("history.sqlite"), root.join("bk"));
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        assert!(
+            s.migration_backup.is_none(),
+            "nothing to back up on an empty file"
+        );
+        assert_eq!(
+            migrations_logged(&p)
+                .iter()
+                .map(|x| x.0)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert_v6_works(&s, &root, 2_000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn released_v5_store_migrates_to_v6_then_records_and_exports() {
+        let root = tmpdir("v5v6");
+        let (p, bdir) = (root.join("history.sqlite"), root.join("bk"));
+        {
+            // MIGRATIONS[..5] is 3c2e275's set (v5 frozen; see v5_ddl_is_frozen_at_3c2e275).
+            let mut s = ScoreHistoryStore::open_with(&p, Some(&bdir), &MIGRATIONS[..5]).unwrap();
+            assert_eq!(s.schema_version().unwrap(), 5);
+            as_old_writer(&mut s, 5);
+            s.record_run(&meta(100), &[row("ADSK", "Act", 1, 1, 1, 1)])
+                .unwrap();
+            s.annotate_run(&meta(100).run_id(), "note", 150).unwrap();
+            // An export from a v5 store says what is missing (no SQL syntax error).
+            let e = s.export_to(&root.join("v5.sqlite.gz")).unwrap_err();
+            assert!(
+                e.contains("run_deferrals") && e.contains("missing") && e.contains("need v6"),
+                "{e}"
+            );
+            assert!(!root.join("v5.sqlite.gz").exists());
+        }
+        let s = ScoreHistoryStore::open(&p, Some(&bdir)).unwrap();
+        let b = s.migration_backup.clone().expect("pre-migration backup");
+        assert!(b
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("history.pre-score-history-v5-to-v6-"));
+        assert_eq!(s.annotations(&meta(100).run_id()).unwrap().len(), 1);
+        assert_v6_works(&s, &root, 3_000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `run_deferrals` as a pre-release #74 build (271df3b) created it inside v5.
+    const PRE_RELEASE_V5_RUN_DEFERRALS: &str = "
+CREATE TABLE IF NOT EXISTS run_deferrals (
+    profile      TEXT NOT NULL,
+    slot         INTEGER NOT NULL,
+    trigger      TEXT NOT NULL CHECK (trigger IN ('interval', 'close')),
+    observed_at  INTEGER NOT NULL,
+    reason       TEXT NOT NULL CHECK (reason IN ('initial_pass_in_progress',
+                 'year_charts_pending', 'no_live_ranking', 'close_snapshot_imminent',
+                 'clock_jump', 'no_fresh_full_pass', 'stale_share_too_high')),
+    stale_count  INTEGER NOT NULL CHECK (stale_count >= 0),
+    total        INTEGER NOT NULL CHECK (total >= stale_count),
+    PRIMARY KEY (profile, slot)
+);
+CREATE TRIGGER IF NOT EXISTS run_deferrals_no_delete BEFORE DELETE ON run_deferrals
+BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
+";
+
+    #[test]
+    fn pre_release_v5_store_with_run_deferrals_is_refused_untouched() {
+        let root = tmpdir("v5pre");
+        let (p, bdir) = (root.join("history.sqlite"), root.join("bk"));
+        {
+            let mut s = ScoreHistoryStore::open_with(&p, None, &MIGRATIONS[..5]).unwrap();
+            as_old_writer(&mut s, 5);
+            s.record_run(&meta(100), &[row("ADSK", "Act", 1, 1, 1, 1)])
+                .unwrap();
+            let c = s.conn.lock().unwrap();
+            c.execute_batch(PRE_RELEASE_V5_RUN_DEFERRALS).unwrap();
+            c.execute(
+                "INSERT INTO run_deferrals VALUES ('sp500', 50, 'interval', 60, 'clock_jump', 0, 0)",
+                [],
+            )
+            .unwrap();
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        }
+        let before = std::fs::read(&p).unwrap();
+        for _ in 0..2 {
+            let e = ScoreHistoryStore::open(&p, Some(&bdir))
+                .err()
+                .expect("refused");
+            assert_eq!(e, PRE_RELEASE_V5_ERROR);
+        }
+        assert!(
+            PRE_RELEASE_V5_ERROR.contains("schema v5")
+                && PRE_RELEASE_V5_ERROR.contains("run_deferrals")
+                && PRE_RELEASE_V5_ERROR.contains("nothing was changed")
+        );
+        assert!(!bdir.exists(), "no pre-migration backup written");
+        assert_eq!(std::fs::read(&p).unwrap(), before, "file untouched");
+        assert_eq!(
+            migrations_logged(&p).last().map(|x| x.0),
+            Some(5),
+            "still v5"
+        );
+        // The CLI annotate path refuses it too (it needs the current schema).
+        assert!(annotate_file(&p, &meta(100).run_id(), "x", 200).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deferrals_next_run_is_same_profile_and_model_and_since_before_filter() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        for slot in [50, 150, 250] {
+            assert!(s
+                .record_deferral(&deferral("sp500", slot, SkipReason::ClockJump))
+                .unwrap());
+        }
+        // A later run in ANOTHER profile, and one of ANOTHER model: neither closes the gap.
+        let mut other = meta(100);
+        other.profile = "nasdaq".into();
+        s.record_run(&other, &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        let mut v2 = meta(120);
+        v2.model = "v2".into();
+        s.record_run(&v2, &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        let next = |slot: i64| {
+            s.deferrals(Some("sp500"), "v3", None, None, 10)
+                .unwrap()
+                .into_iter()
+                .find(|(d, _)| d.slot == slot)
+                .unwrap()
+                .1
+        };
+        assert_eq!(
+            next(50),
+            None,
+            "other profile / other model is not a next run"
+        );
+        s.record_run(&meta(200), &[row("ADSK", "Act", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(next(50), Some(meta(200).run_id()));
+        assert_eq!(next(150), Some(meta(200).run_id()));
+        assert_eq!(next(250), None);
+        // The v2 run is the next v2 run of slot 50 (model is a real filter, not ignored).
+        assert_eq!(
+            s.deferrals(Some("sp500"), "v2", None, None, 10).unwrap()[2].1,
+            Some(v2.run_id())
+        );
+        let slots = |since: Option<i64>, before: Option<i64>, limit: usize| {
+            s.deferrals(None, "v3", since, before, limit)
+                .unwrap()
+                .into_iter()
+                .map(|(d, _)| d.slot)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(slots(None, None, 10), [250, 150, 50]);
+        assert_eq!(slots(Some(150), None, 10), [250, 150], "since is inclusive");
+        assert_eq!(slots(Some(151), None, 10), [250]);
+        assert_eq!(slots(None, Some(250), 10), [150, 50], "before is exclusive");
+        assert_eq!(slots(None, None, 2), [250, 150]);
+        assert_eq!(slots(None, Some(150), 2), [50], "next page");
+    }
+
+    #[test]
+    fn restore_merges_deferrals_on_profile_and_slot() {
+        let root = tmpdir("defmerge");
+        let src = ScoreHistoryStore::open(&root.join("src.sqlite"), None).unwrap();
+        for slot in [50, 60] {
+            assert!(src
+                .record_deferral(&deferral("sp500", slot, SkipReason::ClockJump))
+                .unwrap());
+        }
+        let bk = root.join("m.sqlite.gz");
+        src.export_to(&bk).unwrap();
+        let data = root.join("d");
+        {
+            let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
+            // Overlapping (profile, slot) with different content, plus another profile.
+            let mut d = deferral("sp500", 50, SkipReason::StaleShareTooHigh);
+            d.observed_at = 999;
+            assert!(t.record_deferral(&d).unwrap());
+            assert!(t
+                .record_deferral(&deferral("nasdaq", 60, SkipReason::ClockJump))
+                .unwrap());
+        }
+        let r = restore(&bk, &data, &root.join("bk2")).unwrap();
+        assert_eq!(r.deferrals_added, 1, "only (sp500, 60) is new");
+        let t = ScoreHistoryStore::open(&data.join("history.sqlite"), None).unwrap();
+        let got: Vec<(String, i64, String)> = t
+            .deferrals(None, "v3", None, None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| (d.profile, d.slot, d.reason))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("nasdaq".into(), 60, "clock_jump".into()),
+                ("sp500".into(), 60, "clock_jump".into()),
+                ("sp500".into(), 50, "stale_share_too_high".into()),
+            ],
+            "existing row kept (first wins)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// m2 benchmark (ignored): 10k deferrals, 3k runs; the pre-fix query (correlated
+    /// subquery over every matching row before LIMIT, no index) vs the CTE + index.
+    #[test]
+    #[ignore]
+    fn bench_deferrals_read_path() {
+        const OLD: &str = "SELECT d.profile, d.slot, d.trigger, d.observed_at, d.reason, \
+             d.stale_count, d.total, (SELECT r.run_id FROM score_runs r WHERE r.profile = \
+             d.profile AND r.captured_at >= d.slot ORDER BY r.captured_at ASC, r.run_id ASC \
+             LIMIT 1) FROM run_deferrals d WHERE (?1 IS NULL OR d.profile = ?1) AND \
+             d.slot >= ?2 ORDER BY d.slot DESC, d.profile ASC LIMIT ?3";
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        {
+            let c = s.conn.lock().unwrap();
+            c.execute_batch("BEGIN").unwrap();
+            for k in 0..3_000i64 {
+                c.execute(
+                    "INSERT INTO score_runs (run_id, captured_at, profile, model, rule_version, \
+                     semantics, market_context, binary_version, trigger, symbols_total, \
+                     symbols_ranked) VALUES (?1, ?2, 'sp500', 'v3', 'r', 'android', 0, 't', \
+                     'interval', 1, 1)",
+                    params![format!("sp500-{}-v3", k * 21_600), k * 21_600],
+                )
+                .unwrap();
+            }
+            for k in 0..10_000i64 {
+                c.execute(
+                    "INSERT INTO run_deferrals (profile, slot, trigger, observed_at, reason, \
+                     stale_count, total) VALUES ('sp500', ?1, 'interval', ?1, 'clock_jump', 0, 0)",
+                    params![k * 6_480 + 1],
+                )
+                .unwrap();
+            }
+            c.execute_batch("COMMIT").unwrap();
+        }
+        let time = |label: &str, f: &dyn Fn() -> usize| {
+            let t = std::time::Instant::now();
+            let n = f();
+            println!(
+                "BENCH {label}: {n} rows in {:.1} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        };
+        let old = || {
+            let c = s.conn.lock().unwrap();
+            let mut st = c.prepare(OLD).unwrap();
+            let n = st
+                .query_map(params![None::<String>, i64::MIN, 100], |r| {
+                    r.get::<_, Option<String>>(7)
+                })
+                .unwrap()
+                .count();
+            n
+        };
+        let new = || {
+            s.deferrals(Some("sp500"), "v3", None, None, 100)
+                .unwrap()
+                .len()
+        };
+        time("before: old query, with v6 index", &old);
+        time("after: CTE + model filter, with v6 index", &new);
+        s.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP INDEX score_runs_profile_model_at")
+            .unwrap();
+        time("before: old query, no index (271df3b)", &old);
+        time("after: CTE, no index", &new);
+    }
+
+    /// Close catch-up edges, on a grid around the close slot: `now − slot ==
+    /// CLOSE_CATCHUP_SECS` is past the catch-up (strict `<`), `last == slot` means the
+    /// close already recorded (strict `last < slot`); due_slot and history_due agree.
+    #[test]
+    fn due_slot_close_catch_up_edges_match_history_due() {
+        const H: i64 = 30 * 86_400; // long interval: only the close branch can fire
+        let slot = next_close_snapshot(1_793_538_000);
+        let due_close = |now: i64, last: i64| {
+            let ds = due_slot(now, Some(last), H);
+            let hd = history_due(&DueInputs {
+                now,
+                pass_completed: true,
+                since_pass: 0,
+                charts_ready: true,
+                live: true,
+                rows: 1,
+                last_run: Some(last),
+                interval: H,
+            });
+            let a = ds == Some((slot, "close"));
+            assert_eq!(
+                a,
+                hd == Due::Close(slot),
+                "now-slot={} last-slot={}",
+                now - slot,
+                last - slot
+            );
+            a
+        };
+        for dn in [
+            0,
+            1,
+            CLOSE_CATCHUP_SECS - 1,
+            CLOSE_CATCHUP_SECS,
+            CLOSE_CATCHUP_SECS + 1,
+        ] {
+            for dl in [-3_600, -1, 0, 1] {
+                let want = dn < CLOSE_CATCHUP_SECS && dl < 0;
+                assert_eq!(due_close(slot + dn, slot + dl), want, "dn={dn} dl={dl}");
+            }
+        }
     }
 }

@@ -1100,6 +1100,12 @@ pub struct EngineConfig {
     /// Offline: do not start the quote feed, Year-chart or regime workers; serve the
     /// persisted snapshot and the history tables only.
     pub no_feed: bool,
+    /// A stored row whose quote is older than this is marked stale (default 1800 s).
+    pub quote_stale_secs: i64,
+    /// Tick gap treated as a suspend / clock jump (default 300 s).
+    pub clock_jump_secs: i64,
+    /// Max stale-row share before a run is deferred (default 0.10).
+    pub max_stale_share: f64,
 }
 
 #[derive(Serialize)]
@@ -1120,6 +1126,15 @@ pub struct EngineStatus {
     pub score_panics: u64,
     pub source: &'static str,
     pub snapshot_captured_at_epoch: Option<i64>,
+    /// Age of the oldest live quote in the ranked universe (wall clock), `None` when unknown.
+    pub oldest_quote_age_secs: Option<i64>,
+    /// Loaded symbols whose quote is older than the stale threshold (sorted).
+    pub stale_symbols: Vec<String>,
+    /// End of the last full quote pass (wall-clock epoch), `None` before the first.
+    pub last_full_pass_at_epoch: Option<i64>,
+    /// Set while a due history run is deferred by the quote-freshness gate.
+    pub deferred_since_epoch: Option<i64>,
+    pub deferred_reason: Option<&'static str>,
 }
 
 /// Model id stored in `score_runs.model` by the headless writer.
@@ -1146,6 +1161,9 @@ pub struct HeadlessEngine {
     history: Option<crate::score_history::ScoreHistoryStore>,
     /// When the current generation's initial pass was first seen complete.
     pass_seen: Mutex<Option<(u64, i64)>>,
+    /// Recorder wall-clock ticks (suspend / clock-jump detection). In-memory only:
+    /// reset on restart, never persisted.
+    clock: crate::score_history::TickClock,
     /// `/status` ranked-row count, cached per
     /// `(feed_generation, pass_generation, rank_input_generation)`.
     status_rank: Mutex<Option<(u64, u64, u64, usize)>>,
@@ -1216,7 +1234,11 @@ fn spawn_year_worker(
             let _ = c.warm_session();
             client = Some(c);
         }
-        client.as_ref()?.fetch_candles(sym, "1y", "1wk").ok()
+        client
+            .as_ref()?
+            .fetch_candles(sym, "1y", "1wk")
+            .ok()
+            .map(|f| f.candles)
     });
 }
 
@@ -1289,6 +1311,28 @@ impl HeadlessEngine {
         } else {
             None
         };
+        if let Some(store) = &history {
+            // Downtime gap: one `process_down` row per scheduled slot missed while the
+            // process was down (none on a fresh store or after a backwards clock jump).
+            let profile = canonical_profile(&cfg.profile);
+            match store.backfill_process_down(
+                &profile,
+                HISTORY_MODEL,
+                cfg.history_interval_secs,
+                crate::commands::wall_epoch(),
+            ) {
+                Ok(0) => {}
+                Ok(n) => eprintln!(
+                    "vantage-headless: recorded {n} process_down deferral row(s) for {profile}"
+                ),
+                Err(e) => eprintln!("vantage-headless: process_down backfill failed: {e}"),
+            }
+        }
+        let clock = crate::score_history::TickClock::with_limits(
+            cfg.quote_stale_secs,
+            cfg.clock_jump_secs,
+            cfg.max_stale_share,
+        );
         Ok(Arc::new(Self {
             state,
             cfg,
@@ -1296,6 +1340,7 @@ impl HeadlessEngine {
             year,
             history,
             pass_seen: Mutex::new(None),
+            clock,
             status_rank: Mutex::new(None),
         }))
     }
@@ -1376,14 +1421,97 @@ impl HeadlessEngine {
         let Some(store) = &self.history else {
             return Ok(HistoryWrite::Skipped("disabled"));
         };
-        record_history_tick(
+        record_history_tick_fresh(
             self,
             store,
             &self.pass_seen,
+            &self.clock,
             self.cfg.history_interval_secs,
             self.cfg.market_context,
             now,
         )
+    }
+
+    /// `(since, reason)` while a due history run is deferred by the freshness gate.
+    pub fn history_deferred(&self) -> Option<(i64, &'static str)> {
+        self.clock.deferred()
+    }
+
+    /// Appends an operator annotation to a stored run (append-only).
+    pub fn annotate_run(
+        &self,
+        run_id: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<crate::score_history::RunAnnotation, String> {
+        self.history
+            .as_ref()
+            .ok_or("score history disabled (--history-interval-hours 0)")?
+            .annotate_run(run_id, reason, now)
+    }
+
+    /// Deferred / skipped scheduled slots (`run_deferrals`), newest first, as JSON
+    /// (read-only), `since <= slot < before`. `next_run`: the first `HISTORY_MODEL` run of
+    /// the same profile captured at or after the slot (`null` = no run since; the gap is
+    /// still open). It is NOT "the run that recorded this slot": a slot never records late.
+    pub fn deferrals(
+        &self,
+        profile: Option<&str>,
+        since: Option<i64>,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<serde_json::Value, String> {
+        if limit == 0 || limit > HISTORY_ALL_MAX_LIMIT {
+            return Err(format!("limit must be 1..={HISTORY_ALL_MAX_LIMIT}"));
+        }
+        let rows = self
+            .history
+            .as_ref()
+            .ok_or("score history disabled (--history-interval-hours 0)")?
+            .deferrals(profile, HISTORY_MODEL, since, before, limit)?;
+        let out: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(d, run)| {
+                serde_json::json!({
+                    "profile": d.profile, "slot": d.slot,
+                    "slot_utc": crate::score_history::iso_utc(d.slot),
+                    "trigger": d.trigger, "observed_at": d.observed_at,
+                    "observed_utc": crate::score_history::iso_utc(d.observed_at),
+                    "reason": d.reason, "stale_count": d.stale_count, "total": d.total,
+                    "stale_share": d.stale_share(), "next_run": run,
+                    "covers": d.covers, "covers_from": d.covers_from,
+                    "covers_from_utc": d.covers_from.map(crate::score_history::iso_utc),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "deferrals": out }))
+    }
+
+    /// Annotations of one run.
+    pub fn annotations(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::score_history::RunAnnotation>, String> {
+        let run_id = crate::score_history::validate_run_id(run_id)?;
+        self.history
+            .as_ref()
+            .ok_or("score history disabled (--history-interval-hours 0)")?
+            .annotations(&run_id)
+    }
+
+    fn quote_times_map(&self) -> std::collections::HashMap<String, i64> {
+        self.state
+            .screener
+            .lock()
+            .unwrap()
+            .snapshots
+            .iter()
+            .filter_map(|(k, v)| v.quote_fetched_at.map(|t| (k.clone(), t)))
+            .collect()
+    }
+
+    fn last_full_pass(&self) -> Option<i64> {
+        Some(self.state.last_full_pass_at.load(Ordering::SeqCst)).filter(|v| *v > 0)
     }
 
     /// Daily verified backup of the score tables when configured.
@@ -1467,6 +1595,16 @@ impl HeadlessEngine {
     pub fn status(&self) -> EngineStatus {
         let fs = self.state.feed_status.lock().unwrap().clone();
         let (snap, source) = self.current_snapshot();
+        let quote = if source == "live" {
+            quote_age_summary(
+                &snap,
+                &self.quote_times_map(),
+                crate::commands::wall_epoch(),
+                self.cfg.quote_stale_secs,
+            )
+        } else {
+            (None, Vec::new())
+        };
         EngineStatus {
             year_charts_loaded: self.year.lock().unwrap().len(),
             profile: self.profile(),
@@ -1480,6 +1618,11 @@ impl HeadlessEngine {
             score_panics: SCORE_PANICS.load(Ordering::Relaxed),
             source,
             snapshot_captured_at_epoch: Some(snap.captured_at_epoch),
+            oldest_quote_age_secs: quote.0,
+            stale_symbols: quote.1,
+            last_full_pass_at_epoch: self.last_full_pass(),
+            deferred_since_epoch: self.clock.deferred().map(|d| d.0),
+            deferred_reason: self.clock.deferred().map(|d| d.1),
         }
     }
 }
@@ -1494,6 +1637,49 @@ pub trait HistorySource {
     /// The ONE snapshot a run is computed from (ranking, evaluations and stored inputs),
     /// its source (`live` / `persisted`) and the universe the ranking filters on.
     fn history_snapshot(&self) -> (Arc<OpportunitySnapshot>, &'static str, Option<Vec<String>>);
+    /// Wall-clock epoch of each symbol's last quote fetch. `None` = not tracked (no
+    /// freshness gating, rows stored without `quote_ts`).
+    fn quote_times(&self) -> Option<std::collections::HashMap<String, i64>> {
+        None
+    }
+    /// Wall-clock end of the feed's last full quote pass. `None` = not tracked.
+    fn last_full_pass_at(&self) -> Option<i64> {
+        None
+    }
+}
+
+/// `(oldest quote age, symbols older than stale_after)` over the snapshot's priced rows.
+pub fn quote_age_summary(
+    snap: &OpportunitySnapshot,
+    times: &std::collections::HashMap<String, i64>,
+    now: i64,
+    stale_after: i64,
+) -> (Option<i64>, Vec<String>) {
+    let mut oldest: Option<i64> = None;
+    let mut stale = Vec::new();
+    for r in &snap.rows {
+        if r.row.market_price_cents <= 0 {
+            continue;
+        }
+        // Fails closed: a priced row without a quote time counts as stale.
+        let Some(ts) = times.get(&r.row.symbol) else {
+            stale.push(r.row.symbol.clone());
+            continue;
+        };
+        // Future quote time (clock stepped back): no trustworthy age, so stale.
+        if *ts > now {
+            stale.push(r.row.symbol.clone());
+            continue;
+        }
+        let age = now - ts;
+        oldest = Some(oldest.map_or(age, |o| o.max(age)));
+        if age > stale_after {
+            stale.push(r.row.symbol.clone());
+        }
+    }
+    stale.sort();
+    stale.dedup();
+    (oldest, stale)
 }
 
 impl HistorySource for HeadlessEngine {
@@ -1515,6 +1701,13 @@ impl HistorySource for HeadlessEngine {
         let (snap, source) = self.current_snapshot();
         let u = android_universe(&snap.profile);
         (snap, source, u)
+    }
+    fn quote_times(&self) -> Option<std::collections::HashMap<String, i64>> {
+        Some(self.quote_times_map())
+    }
+    fn last_full_pass_at(&self) -> Option<i64> {
+        // Tracked: 0 (no pass yet) is reported as epoch 0 so the gate waits for one.
+        Some(self.last_full_pass().unwrap_or(0))
     }
 }
 
@@ -1675,6 +1868,7 @@ pub fn snapshot_parts(snap: &OpportunitySnapshot) -> Result<SnapshotParts, Strin
 
 /// One history tick: gathers [`crate::score_history::DueInputs`] from `src`, asks
 /// `history_due`, and appends the run when due.
+#[cfg(test)]
 pub fn record_history_tick(
     src: &dyn HistorySource,
     store: &crate::score_history::ScoreHistoryStore,
@@ -1683,7 +1877,86 @@ pub fn record_history_tick(
     market_context: bool,
     now: i64,
 ) -> Result<HistoryWrite, String> {
-    use crate::score_history::{history_due, Due, DueInputs, RecordOutcome, RunMeta};
+    let clock =
+        crate::score_history::TickClock::new(crate::score_history::DEFAULT_QUOTE_STALE_SECS);
+    record_history_tick_fresh(src, store, pass_seen, &clock, interval, market_context, now)
+}
+
+/// Why a recorder tick failed: writing its deferral row (`Note`) or anything on the
+/// run path (evaluation, `last_run_at`, the run write).
+enum TickError {
+    Note(String),
+    Run(String),
+}
+
+/// [`record_history_tick`] with quote-freshness gating: `clock` tracks recorder ticks
+/// across calls (suspend / clock-jump detection) and carries the stale threshold.
+///
+/// A run-path error on a scheduled slot leaves a best-effort `record_failed` deferral
+/// row for that slot (first wins, so a failure repeating inside one slot adds nothing).
+/// If that row cannot be written either, both errors are returned (the serve loop logs
+/// them, rate-limited); there is no retry and the next tick proceeds normally.
+pub fn record_history_tick_fresh(
+    src: &dyn HistorySource,
+    store: &crate::score_history::ScoreHistoryStore,
+    pass_seen: &Mutex<Option<(u64, i64)>>,
+    clock: &crate::score_history::TickClock,
+    interval: i64,
+    market_context: bool,
+    now: i64,
+) -> Result<HistoryWrite, String> {
+    match record_history_tick_inner(src, store, pass_seen, clock, interval, market_context, now) {
+        Ok(w) => Ok(w),
+        Err(TickError::Note(e)) => Err(e),
+        Err(TickError::Run(e)) => Err(match note_record_failed(src, store, interval, now) {
+            Ok(true) => format!("{e} (slot recorded as record_failed)"),
+            Ok(false) => e,
+            Err(e2) => format!("{e}; the record_failed deferral row could not be written: {e2}"),
+        }),
+    }
+}
+
+/// Best-effort `record_failed` row for the slot due at `now` (`Ok(false)`: no slot is
+/// scheduled, or that slot already has a row).
+fn note_record_failed(
+    src: &dyn HistorySource,
+    store: &crate::score_history::ScoreHistoryStore,
+    interval: i64,
+    now: i64,
+) -> Result<bool, String> {
+    let profile = src.history_profile();
+    let last_run = store.last_run_at(&profile, HISTORY_MODEL)?;
+    let Some((slot, trigger)) = crate::score_history::due_slot(now, last_run, interval) else {
+        return Ok(false);
+    };
+    store.record_deferral(&crate::score_history::RunDeferral {
+        profile,
+        slot,
+        trigger: trigger.into(),
+        observed_at: now,
+        reason: crate::score_history::SkipReason::RecordFailed.code().into(),
+        stale_count: 0,
+        total: 0,
+        covers: 1,
+        covers_from: None,
+    })
+}
+
+fn record_history_tick_inner(
+    src: &dyn HistorySource,
+    store: &crate::score_history::ScoreHistoryStore,
+    pass_seen: &Mutex<Option<(u64, i64)>>,
+    clock: &crate::score_history::TickClock,
+    interval: i64,
+    market_context: bool,
+    now: i64,
+) -> Result<HistoryWrite, TickError> {
+    use crate::score_history::{
+        freshness_gate, history_due, Due, DueInputs, FreshInputs, QuoteFreshness, RecordOutcome,
+        RunMeta,
+    };
+    let last_full_pass_at = src.last_full_pass_at();
+    let jump_at = clock.tick(now, last_full_pass_at);
     let gen = src.pass_generation();
     let pass_completed = gen != u64::MAX;
     let since_pass = if pass_completed {
@@ -1716,8 +1989,12 @@ pub fn record_history_tick(
             None,
         )
     };
-    let (android, eval) = run_evaluation(&snap, rank_universe.as_deref(), &universe)?;
+    let (android, eval) =
+        run_evaluation(&snap, rank_universe.as_deref(), &universe).map_err(TickError::Run)?;
     let ranked = android_to_ranked(&android);
+    let last_run = store
+        .last_run_at(&profile, HISTORY_MODEL)
+        .map_err(TickError::Run)?;
     let due = history_due(&DueInputs {
         now,
         pass_completed,
@@ -1725,14 +2002,67 @@ pub fn record_history_tick(
         charts_ready,
         live: source == "live",
         rows: ranked.len(),
-        last_run: store.last_run_at(&profile, HISTORY_MODEL)?,
+        last_run,
         interval,
     });
+    let fresh = src.quote_times().map(|quote_ts| QuoteFreshness {
+        quote_ts,
+        stale_after_secs: clock.stale_after,
+    });
+    let priced: Vec<&RankedRow> = ranked
+        .iter()
+        .filter(|r| r.price.is_finite() && r.price > 0.0)
+        .collect();
+    let stale_rows = fresh.as_ref().map_or(0, |f| {
+        priced.iter().filter(|r| f.of(&r.symbol, now).2).count()
+    });
+    // A scheduled slot that does not record leaves one durable `run_deferrals` row
+    // (first tick wins; later ticks in the same slot add nothing).
+    let note_slot = |why: &'static str| -> Result<(), String> {
+        let (Some(reason), Some((slot, trigger))) = (
+            crate::score_history::SkipReason::from_message(why),
+            crate::score_history::due_slot(now, last_run, interval),
+        ) else {
+            return Ok(());
+        };
+        store
+            .record_deferral(&crate::score_history::RunDeferral {
+                profile: profile.clone(),
+                slot,
+                trigger: trigger.into(),
+                observed_at: now,
+                reason: reason.code().into(),
+                stale_count: stale_rows as i64,
+                total: priced.len() as i64,
+                covers: 1,
+                covers_from: None,
+            })
+            .map(|_| ())
+    };
     let trigger = match due {
-        Due::No(why) => return Ok(HistoryWrite::Skipped(why)),
+        Due::No(why) => {
+            // Not due is not a freshness deferral: drop any stale deferral episode.
+            clock.clear_deferred();
+            note_slot(why).map_err(TickError::Note)?;
+            return Ok(HistoryWrite::Skipped(why));
+        }
         Due::Interval => "interval",
         Due::Close(_) => "close",
     };
+    if let Some(why) = freshness_gate(&FreshInputs {
+        now,
+        rows: priced.len(),
+        stale_rows,
+        last_full_pass_at,
+        jump_at,
+        stale_after: clock.stale_after,
+        max_stale_share: clock.max_stale_share,
+    }) {
+        clock.note_deferred(now, why);
+        note_slot(why).map_err(TickError::Note)?;
+        return Ok(HistoryWrite::Skipped(why));
+    }
+    clock.clear_deferred();
     let have: std::collections::HashSet<&str> =
         snap.rows.iter().map(|r| r.row.symbol.as_str()).collect();
     let incomplete: Vec<String> = universe
@@ -1751,14 +2081,19 @@ pub fn record_history_tick(
         symbols_total: universe.len(),
         incomplete_symbols: incomplete,
     };
-    Ok(match store.record_run_full(&meta, &ranked, Some(&eval))? {
-        RecordOutcome::Recorded { rows, skipped } => HistoryWrite::Recorded {
-            trigger,
-            rows,
-            skipped,
+    Ok(
+        match store
+            .record_run_quotes(&meta, &ranked, Some(&eval), fresh.as_ref())
+            .map_err(TickError::Run)?
+        {
+            RecordOutcome::Recorded { rows, skipped } => HistoryWrite::Recorded {
+                trigger,
+                rows,
+                skipped,
+            },
+            RecordOutcome::Duplicate => HistoryWrite::Duplicate(meta.run_id()),
         },
-        RecordOutcome::Duplicate => HistoryWrite::Duplicate(meta.run_id()),
-    })
+    )
 }
 
 /// Shared by the daemon route and tests: history for `symbol` as JSON.
@@ -1806,7 +2141,19 @@ pub fn history_all_json(
         if limit == 0 || limit > HISTORY_ALL_MAX_LIMIT {
             return Err(format!("limit must be 1..={HISTORY_ALL_MAX_LIMIT}"));
         }
-        let ev = store.symbol_evaluations(&sym, profile, HISTORY_MODEL, since, limit)?;
+        let mut ev = store.symbol_evaluations(&sym, profile, HISTORY_MODEL, since, limit)?;
+        // `stale`: the stored row's quote was over the threshold (excluded from /history).
+        let stale = store.stale_pairs(None, Some(&sym))?;
+        let mut notes: std::collections::HashMap<String, Vec<String>> = Default::default();
+        for v in &mut ev {
+            let run = v["run_id"].as_str().unwrap_or("").to_string();
+            if !notes.contains_key(&run) {
+                notes.insert(run.clone(), annotation_reasons(store, &run)?);
+            }
+            // `annotations`: operator notes on the row's run (always present; `[]` = none).
+            v["annotations"] = notes[&run].clone().into();
+            v["stale"] = stale.contains(&(run, sym.clone())).into();
+        }
         return Ok(serde_json::json!({
             "symbol": sym, "profile": profile, "model": HISTORY_MODEL,
             "since": since, "limit": limit, "evaluations": ev
@@ -1829,11 +2176,38 @@ pub fn history_all_json(
     let stats = store
         .run_stats(&run_id)?
         .ok_or_else(|| format!("run {run_id} has no evaluations"))?;
-    let evals = store.evaluations(&run_id)?;
+    let stale = store.stale_pairs(Some(&run_id), None)?;
+    // `annotations`: operator notes on this run (always present; `[]` = none), on the
+    // run and on every evaluation so a consumer can exclude annotated runs explicitly.
+    let notes = annotation_reasons(store, &run_id)?;
+    let evals: Vec<serde_json::Value> = store
+        .evaluations(&run_id)?
+        .into_iter()
+        .map(|e| {
+            let key = (run_id.clone(), e.symbol.clone());
+            let mut v = serde_json::to_value(e).unwrap();
+            v["stale"] = stale.contains(&key).into();
+            v["annotations"] = notes.clone().into();
+            v
+        })
+        .collect();
     Ok(serde_json::json!({
         "run_id": run_id, "profile": profile, "model": HISTORY_MODEL,
+        "annotations": notes,
         "stats": stats, "rows": evals.len(), "evaluations": evals
     }))
+}
+
+/// Reasons of a run's `run_annotations`, oldest first (same order as `/history`).
+fn annotation_reasons(
+    store: &crate::score_history::ScoreHistoryStore,
+    run_id: &str,
+) -> Result<Vec<String>, String> {
+    Ok(store
+        .annotations(run_id)?
+        .into_iter()
+        .map(|a| a.reason)
+        .collect())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2364,6 +2738,8 @@ mod history_tick_tests {
         year: Cell<usize>,
         source: Cell<&'static str>,
         snap: Arc<OpportunitySnapshot>,
+        quotes: std::cell::RefCell<Option<std::collections::HashMap<String, i64>>>,
+        pass: Cell<Option<i64>>,
     }
 
     /// The fixture snapshot with its rows relabelled S0, S1, … (universe S0..S99).
@@ -2373,6 +2749,20 @@ mod history_tick_tests {
         for (k, r) in snap.rows.iter_mut().enumerate() {
             r.row.symbol = format!("S{k}");
         }
+        Arc::new(snap)
+    }
+
+    /// The fixture rows repeated as S0..S19 (enough rows for a sub-10% stale share).
+    fn wide_snap() -> Arc<OpportunitySnapshot> {
+        let base = fixture_snap();
+        let mut snap = (*base).clone();
+        snap.rows = (0..20)
+            .map(|k| {
+                let mut r = base.rows[k % base.rows.len()].clone();
+                r.row.symbol = format!("S{k}");
+                r
+            })
+            .collect();
         Arc::new(snap)
     }
 
@@ -2398,6 +2788,1008 @@ mod history_tick_tests {
         ) -> (Arc<OpportunitySnapshot>, &'static str, Option<Vec<String>>) {
             (self.snap.clone(), self.source.get(), Some(universe()))
         }
+        fn quote_times(&self) -> Option<std::collections::HashMap<String, i64>> {
+            self.quotes.borrow().clone()
+        }
+        fn last_full_pass_at(&self) -> Option<i64> {
+            self.pass.get()
+        }
+    }
+
+    fn live_fake() -> Fake {
+        Fake {
+            gen: Cell::new(1),
+            year: Cell::new(100),
+            source: Cell::new("live"),
+            snap: fixture_snap(),
+            quotes: Default::default(),
+            pass: Cell::new(None),
+        }
+    }
+
+    /// Priced symbols the run would store, in rank order.
+    fn priced(f: &Fake) -> Vec<String> {
+        rank_android_v3(&f.snap, Some(&universe()))
+            .iter()
+            .filter(|r| r.price_cents > 0)
+            .map(|r| r.symbol.clone())
+            .collect()
+    }
+
+    /// Quote times: the first `old` priced symbols at `old_ts`, the rest at `new_ts`.
+    fn set_quotes(f: &Fake, old: usize, old_ts: i64, new_ts: i64) {
+        let m = priced(f)
+            .into_iter()
+            .enumerate()
+            .map(|(k, s)| (s, if k < old { old_ts } else { new_ts }))
+            .collect();
+        *f.quotes.borrow_mut() = Some(m);
+    }
+
+    fn ftick(
+        f: &Fake,
+        s: &ScoreHistoryStore,
+        seen: &Mutex<Option<(u64, i64)>>,
+        c: &crate::score_history::TickClock,
+        now: i64,
+    ) -> HistoryWrite {
+        record_history_tick_fresh(f, s, seen, c, H6, false, now).unwrap()
+    }
+
+    /// Reproduces 11/04: frozen 10/29 21:10 EDT -> woke 11/04 ~17:18 EST, the close
+    /// catch-up fired ~1 min later on a half-refreshed feed (56% of quotes 6 days old).
+    #[test]
+    fn wake_race_half_stale_feed_is_deferred_then_recorded() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let f = live_fake();
+        let n = priced(&f).len();
+        let old = (n * 56).div_ceil(100);
+        let frozen = 1_793_409_000; // Thu 2026-10-29 21:10 EDT
+        f.pass.set(Some(frozen - 60));
+        set_quotes(&f, 0, frozen - 30, frozen - 30);
+        // Before the freeze: a normal interval run on fresh quotes.
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, frozen),
+            HistoryWrite::Recorded {
+                trigger: "interval",
+                ..
+            }
+        ));
+        // Wake (the real run id was sp500-1793830789-v3): half the feed refreshed.
+        let wake = 1_793_830_789;
+        set_quotes(&f, old, frozen - 30, wake - 5);
+        assert_eq!(
+            ftick(&f, &s, &seen, &clock, wake),
+            HistoryWrite::Skipped("clock jump: waiting for a quote pass after wake")
+        );
+        assert_eq!(
+            clock.deferred(),
+            Some((wake, "clock jump: waiting for a quote pass after wake")),
+            "/status deferred_since + deferred_reason"
+        );
+        // Still before a post-wake pass: keeps waiting (close catch-up included).
+        assert_eq!(
+            ftick(&f, &s, &seen, &clock, wake + 60),
+            HistoryWrite::Skipped("clock jump: waiting for a quote pass after wake")
+        );
+        // A pass ended after the wake but 56% of quotes are still stale: deferred.
+        f.pass.set(Some(wake + 90));
+        assert_eq!(
+            ftick(&f, &s, &seen, &clock, wake + 120),
+            HistoryWrite::Skipped("too many stale quotes")
+        );
+        // Feed fully refreshed: the close catch-up records, with no stale rows.
+        set_quotes(&f, 0, 0, wake + 150);
+        let t = wake + 180;
+        let w = ftick(&f, &s, &seen, &clock, t);
+        assert!(
+            matches!(w, HistoryWrite::Recorded { trigger: "close", rows, .. } if rows == n),
+            "{w:?}"
+        );
+        assert_eq!(clock.deferred(), None, "cleared once recorded");
+        assert_eq!(
+            s.stale_counts(&format!("sp500-{t}-v3")).unwrap(),
+            (n as i64, 0)
+        );
+    }
+
+    fn defs(s: &ScoreHistoryStore) -> Vec<crate::score_history::RunDeferral> {
+        s.deferrals(None, HISTORY_MODEL, None, None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect()
+    }
+
+    /// One recorded interval run at `NOW` on fresh quotes (the schedule's anchor).
+    fn anchored(f: &Fake, s: &ScoreHistoryStore) {
+        use crate::score_history::TickClock;
+        f.pass.set(Some(NOW - 10));
+        set_quotes(f, 0, NOW - 5, NOW - 5);
+        let w = ftick(f, s, &Mutex::new(None), &TickClock::new(1800), NOW);
+        assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+    }
+
+    #[test]
+    fn stale_share_deferral_writes_one_record_with_counts_per_slot() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let mut f = live_fake();
+        f.snap = wide_snap();
+        let total = priced(&f).len();
+        anchored(&f, &s);
+        // Next slot (NOW + H6): 8 priced rows 2 h old (> 10%). Retry ticks every 60 s
+        // inside the slot (a fresh TickClock each: no clock-jump gate).
+        let t = NOW + H6 + 60;
+        for k in 0..5 {
+            let at = t + 60 * k;
+            f.pass.set(Some(at - 10));
+            set_quotes(&f, 8, at - 7200, at - 5);
+            assert_eq!(
+                ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), at),
+                HistoryWrite::Skipped("too many stale quotes")
+            );
+        }
+        let d = defs(&s);
+        assert_eq!(d.len(), 1, "retry ticks in one slot: one record");
+        assert_eq!(
+            (
+                d[0].slot,
+                d[0].trigger.as_str(),
+                d[0].observed_at,
+                d[0].reason.as_str()
+            ),
+            (NOW + H6, "interval", t, "stale_share_too_high")
+        );
+        assert_eq!((d[0].stale_count, d[0].total), (8, total as i64));
+        assert_eq!(d[0].profile, "sp500");
+        // Still stale one interval later: the next slot gets its own record.
+        let t2 = NOW + 2 * H6 + 30;
+        f.pass.set(Some(t2 - 10));
+        set_quotes(&f, 8, t2 - 7200, t2 - 5);
+        let _ = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t2);
+        assert_eq!(
+            defs(&s).iter().map(|x| x.slot).collect::<Vec<_>>(),
+            [NOW + 2 * H6, NOW + H6]
+        );
+        // Fresh again: recorded; the deferrals stay (append-only), and the newer one
+        // points at the run that closed the gap.
+        let t3 = t2 + 60;
+        set_quotes(&f, 0, t3 - 5, t3 - 5);
+        f.pass.set(Some(t3 - 10));
+        let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t3);
+        assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+        let all = s.deferrals(None, HISTORY_MODEL, None, None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all
+            .iter()
+            .all(|(_, r)| r.as_deref() == Some(format!("sp500-{t3}-v3").as_str())));
+    }
+
+    #[test]
+    fn clock_jump_deferral_is_recorded() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let f = live_fake();
+        let total = priced(&f).len() as i64;
+        f.pass.set(Some(NOW - 10));
+        set_quotes(&f, 0, NOW - 5, NOW - 5);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, NOW),
+            HistoryWrite::Recorded { .. }
+        ));
+        // Same clock, next tick 6 h later (> CLOCK_JUMP_SECS): quotes fresh, still deferred.
+        let t = NOW + H6 + 60;
+        f.pass.set(Some(t - 10));
+        set_quotes(&f, 0, t - 5, t - 5);
+        assert_eq!(
+            ftick(&f, &s, &seen, &clock, t),
+            HistoryWrite::Skipped("clock jump: waiting for a quote pass after wake")
+        );
+        let _ = ftick(&f, &s, &seen, &clock, t + 60);
+        let d = defs(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            (
+                d[0].slot,
+                d[0].reason.as_str(),
+                d[0].stale_count,
+                d[0].total
+            ),
+            (NOW + H6, "clock_jump", 0, total)
+        );
+    }
+
+    #[test]
+    fn no_fresh_full_pass_deferral_is_recorded() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        let t = NOW + H6 + 60;
+        // Quotes fresh, but the last completed full pass is 1 h old (> 30 min).
+        f.pass.set(Some(t - 3600));
+        set_quotes(&f, 0, t - 5, t - 5);
+        assert_eq!(
+            ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t),
+            HistoryWrite::Skipped("waiting for a fresh quote pass")
+        );
+        let d = defs(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            (d[0].slot, d[0].reason.as_str()),
+            (NOW + H6, "no_fresh_full_pass")
+        );
+    }
+
+    #[test]
+    fn scheduler_skips_of_a_due_slot_are_recorded_with_their_codes() {
+        use crate::score_history::{next_close_snapshot, TickClock};
+        let clock = || TickClock::new(1800);
+        let t = NOW + H6 + 60;
+        let fresh = |f: &Fake, at: i64| {
+            f.pass.set(Some(at - 10));
+            set_quotes(f, 0, at - 5, at - 5);
+        };
+        // Initial pass in progress.
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        f.gen.set(u64::MAX);
+        let _ = ftick(&f, &s, &Mutex::new(None), &clock(), t);
+        // Year charts pending (pass just seen, coverage below 95%).
+        let s2 = ScoreHistoryStore::open_in_memory().unwrap();
+        let f2 = live_fake();
+        anchored(&f2, &s2);
+        f2.year.set(0);
+        fresh(&f2, t);
+        let _ = ftick(&f2, &s2, &Mutex::new(None), &clock(), t);
+        // Not a live ranking.
+        let s3 = ScoreHistoryStore::open_in_memory().unwrap();
+        let f3 = live_fake();
+        anchored(&f3, &s3);
+        f3.source.set("persisted");
+        fresh(&f3, t);
+        let _ = ftick(&f3, &s3, &Mutex::new(None), &clock(), t);
+        let one = |s: &ScoreHistoryStore| {
+            let d = defs(s);
+            assert_eq!(d.len(), 1, "{d:?}");
+            (d[0].slot, d[0].reason.clone())
+        };
+        assert_eq!(one(&s), (NOW + H6, "initial_pass_in_progress".into()));
+        assert_eq!(one(&s2), (NOW + H6, "year_charts_pending".into()));
+        assert_eq!(one(&s3), (NOW + H6, "no_live_ranking".into()));
+        // Close imminent: the interval slot 15 min before the close is skipped.
+        let s4 = ScoreHistoryStore::open_in_memory().unwrap();
+        let f4 = live_fake();
+        let close = next_close_snapshot(NOW);
+        let at = close - 15 * 60;
+        fresh(&f4, at - H6);
+        let w = ftick(&f4, &s4, &Mutex::new(None), &clock(), at - H6);
+        assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+        fresh(&f4, at);
+        assert_eq!(
+            ftick(&f4, &s4, &Mutex::new(None), &clock(), at),
+            HistoryWrite::Skipped("close snapshot imminent")
+        );
+        assert_eq!(one(&s4), (at, "close_snapshot_imminent".into()));
+        // Not due at all ("interval not elapsed") writes nothing.
+        let s5 = ScoreHistoryStore::open_in_memory().unwrap();
+        let f5 = live_fake();
+        anchored(&f5, &s5);
+        fresh(&f5, NOW + 600);
+        assert_eq!(
+            ftick(&f5, &s5, &Mutex::new(None), &clock(), NOW + 600),
+            HistoryWrite::Skipped("interval not elapsed")
+        );
+        assert!(defs(&s5).is_empty());
+    }
+
+    /// Fault injection: every INSERT into `table` aborts.
+    fn fail_inserts(s: &ScoreHistoryStore, table: &str) {
+        s.exec_for_test(&format!(
+            "CREATE TRIGGER inject_fail_{table} BEFORE INSERT ON {table} \
+             BEGIN SELECT RAISE(ABORT, 'injected {table} failure'); END;"
+        ));
+    }
+
+    fn heal(s: &ScoreHistoryStore, table: &str) {
+        s.exec_for_test(&format!("DROP TRIGGER inject_fail_{table};"));
+    }
+
+    #[test]
+    fn a_failed_deferral_write_is_an_error_not_a_silent_skip() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "run_deferrals");
+        // Due, but the last full pass is old: a freshness deferral whose row cannot be
+        // written. The tick must report the error (the serve loop logs it, rate-limited).
+        let t = NOW + H6 + 60;
+        f.pass.set(Some(t - 3600));
+        let e = record_history_tick_fresh(
+            &f,
+            &s,
+            &Mutex::new(None),
+            &TickClock::new(1800),
+            H6,
+            false,
+            t,
+        )
+        .unwrap_err();
+        assert!(e.contains("injected run_deferrals failure"), "{e}");
+        assert!(defs(&s).is_empty());
+        heal(&s, "run_deferrals");
+        let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t + 10);
+        assert_eq!(w, HistoryWrite::Skipped("waiting for a fresh quote pass"));
+        assert_eq!(defs(&s).len(), 1);
+    }
+
+    fn fresh_due_tick(f: &Fake, s: &ScoreHistoryStore, t: i64) -> Result<HistoryWrite, String> {
+        use crate::score_history::TickClock;
+        f.pass.set(Some(t - 10));
+        set_quotes(f, 0, t - 5, t - 5);
+        record_history_tick_fresh(f, s, &Mutex::new(None), &TickClock::new(1800), H6, false, t)
+    }
+
+    #[test]
+    fn a_failed_due_run_leaves_one_record_failed_row_then_recovers() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "score_runs");
+        let t = NOW + H6 + 60;
+        let e = fresh_due_tick(&f, &s, t).unwrap_err();
+        assert!(e.contains("injected score_runs failure"), "{e}");
+        assert!(e.contains("record_failed"), "{e}");
+        let d = defs(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            (d[0].slot, d[0].trigger.as_str(), d[0].reason.as_str()),
+            (NOW + H6, "interval", "record_failed")
+        );
+        assert_eq!((d[0].observed_at, d[0].stale_count, d[0].total), (t, 0, 0));
+        // The same failure on the next tick of that slot: no second row.
+        let e = fresh_due_tick(&f, &s, t + 60).unwrap_err();
+        assert!(e.contains("injected score_runs failure"), "{e}");
+        assert_eq!(defs(&s).len(), 1);
+        // Fixed: the next tick records normally.
+        heal(&s, "score_runs");
+        assert!(matches!(
+            fresh_due_tick(&f, &s, t + 120).unwrap(),
+            HistoryWrite::Recorded { .. }
+        ));
+        assert_eq!(
+            defs(&s).len(),
+            1,
+            "the record_failed row stays (append-only)"
+        );
+    }
+
+    #[test]
+    fn a_failed_due_run_whose_record_failed_row_also_fails_is_an_error_only() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "score_runs");
+        fail_inserts(&s, "run_deferrals");
+        let t = NOW + H6 + 60;
+        for k in 0..3 {
+            // No panic, no retry loop: one error per tick, naming both failures.
+            let e = fresh_due_tick(&f, &s, t + k * 60).unwrap_err();
+            assert!(e.contains("injected score_runs failure"), "{e}");
+            assert!(
+                e.contains("record_failed deferral row could not be written")
+                    && e.contains("injected run_deferrals failure"),
+                "{e}"
+            );
+        }
+        assert!(defs(&s).is_empty());
+        heal(&s, "score_runs");
+        heal(&s, "run_deferrals");
+        assert!(matches!(
+            fresh_due_tick(&f, &s, t + 300).unwrap(),
+            HistoryWrite::Recorded { .. }
+        ));
+        assert!(defs(&s).is_empty());
+    }
+
+    #[test]
+    fn a_run_error_off_schedule_writes_no_record_failed_row() {
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let f = live_fake();
+        anchored(&f, &s);
+        fail_inserts(&s, "score_runs");
+        // Interval not elapsed: no slot is scheduled, so nothing to record as failed.
+        assert_eq!(
+            fresh_due_tick(&f, &s, NOW + 600).unwrap(),
+            HistoryWrite::Skipped("interval not elapsed")
+        );
+        assert!(defs(&s).is_empty());
+    }
+
+    #[test]
+    fn deferral_record_survives_a_restart() {
+        use crate::score_history::TickClock;
+        let dir = std::env::temp_dir().join(format!(
+            "ds-defer-restart-{}-{}",
+            std::process::id(),
+            crate::commands::wall_epoch()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("history.sqlite");
+        let f = live_fake();
+        let t = NOW + H6 + 60;
+        {
+            let s = ScoreHistoryStore::open(&p, None).unwrap();
+            anchored(&f, &s);
+            f.pass.set(Some(t - 3600));
+            let _ = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t);
+            assert_eq!(defs(&s).len(), 1);
+        }
+        // Restart: reopen (init + migrations again), retry in the same slot.
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        let before = defs(&s);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].reason, "no_fresh_full_pass");
+        f.pass.set(Some(t + 50));
+        set_quotes(&f, priced(&f).len(), t - 7200, t);
+        let _ = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t + 60);
+        assert_eq!(
+            defs(&s),
+            before,
+            "same slot after restart: unchanged, no new row"
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_start_backfills_process_down_once() {
+        use crate::score_history::{process_down_plan, TickClock};
+        let dir = std::env::temp_dir().join(format!(
+            "ds-pd-eng-{}-{}",
+            std::process::id(),
+            crate::commands::wall_epoch()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A run 3.5 intervals ago, then the process was down.
+        let t0 = crate::commands::wall_epoch() - 3 * H6 - H6 / 2;
+        {
+            let s = ScoreHistoryStore::open(&dir.join("history.sqlite"), None).unwrap();
+            let f = live_fake();
+            f.pass.set(Some(t0 - 10));
+            set_quotes(&f, 0, t0 - 5, t0 - 5);
+            let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t0);
+            assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+        }
+        let cfg = || EngineConfig {
+            data_dir: dir.clone(),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: H6,
+            history_backup_dir: None,
+            no_feed: true,
+            quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+            clock_jump_secs: crate::score_history::CLOCK_JUMP_SECS,
+            max_stale_share: crate::score_history::MAX_STALE_SHARE,
+        };
+        let before = crate::commands::wall_epoch();
+        let eng = HeadlessEngine::start(cfg()).unwrap();
+        let after = crate::commands::wall_epoch();
+        let rows = |e: &HeadlessEngine| e.deferrals(Some("sp500"), None, None, 1000).unwrap();
+        let v = rows(&eng);
+        let list = v["deferrals"].as_array().unwrap().clone();
+        let want = process_down_plan(Some(t0), None, H6, before).slots.len();
+        assert_eq!(
+            want,
+            process_down_plan(Some(t0), None, H6, after).slots.len()
+        );
+        assert!(want >= 2, "t0+6h and t0+12h at least: {want}");
+        assert_eq!(list.len(), want, "{v}");
+        for d in &list {
+            assert_eq!(d["reason"], "process_down");
+            assert_eq!(
+                (d["covers"].as_i64(), d["covers_from"].is_null()),
+                (Some(1), true)
+            );
+            assert_eq!(
+                (d["stale_count"].as_i64(), d["total"].as_i64()),
+                (Some(0), Some(0))
+            );
+            assert!(d["stale_share"].is_null());
+        }
+        assert!(list.iter().any(|d| d["slot"] == t0 + H6));
+        assert!(
+            !list.iter().any(|d| d["slot"] == t0 + 3 * H6),
+            "due now: left live"
+        );
+        drop(eng);
+        // Restart: nothing new.
+        let eng = HeadlessEngine::start(cfg()).unwrap();
+        assert_eq!(rows(&eng)["deferrals"].as_array().unwrap().len(), want);
+        drop(eng);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_start_on_an_empty_store_writes_no_process_down() {
+        let dir = std::env::temp_dir().join(format!(
+            "ds-pd-empty-{}-{}",
+            std::process::id(),
+            crate::commands::wall_epoch()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let eng = HeadlessEngine::start(EngineConfig {
+            data_dir: dir.clone(),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: H6,
+            history_backup_dir: None,
+            no_feed: true,
+            quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+            clock_jump_secs: crate::score_history::CLOCK_JUMP_SECS,
+            max_stale_share: crate::score_history::MAX_STALE_SHARE,
+        })
+        .unwrap();
+        assert!(eng.deferrals(None, None, None, 10).unwrap()["deferrals"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        drop(eng);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Run notes are machine-readable: `annotations` (reasons, oldest first) on every
+    /// `/history` point and in the `/history?all=1` export (run + each evaluation, and
+    /// per evaluation in the symbol form). Annotated runs are NOT hidden.
+    #[test]
+    fn annotations_are_machine_readable_in_history_and_export() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let mut f = live_fake();
+        f.snap = wide_snap();
+        let syms = priced(&f);
+        f.pass.set(Some(NOW - 10));
+        set_quotes(&f, 0, NOW - 5, NOW - 5);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, NOW),
+            HistoryWrite::Recorded { .. }
+        ));
+        let run = format!("sp500-{NOW}-v3");
+        let none = serde_json::json!([]);
+        let v = history_all_json(&s, None, Some(&run), "sp500", None, None).unwrap();
+        assert_eq!(v["annotations"], none, "always present");
+        let rows_before = v["rows"].clone();
+        let j = history_json(&s, &syms[0], None, false, NOW + 60, "sp500").unwrap();
+        assert_eq!(j["points"][0]["annotations"], none, "always present");
+        s.annotate_run(&run, "made-up note one", NOW + 60).unwrap();
+        s.annotate_run(&run, "made-up note two", NOW + 120).unwrap();
+        let want = serde_json::json!(["made-up note one", "made-up note two"]);
+        // /history?all=1&run= (and the latest-run form without run=).
+        for v in [
+            history_all_json(&s, None, Some(&run), "sp500", None, None).unwrap(),
+            history_all_json(&s, None, None, "sp500", None, None).unwrap(),
+        ] {
+            assert_eq!(v["run_id"], run.as_str());
+            assert_eq!(v["annotations"], want);
+            assert_eq!(v["rows"], rows_before, "annotated run is not filtered");
+            let ev = v["evaluations"].as_array().unwrap();
+            assert!(!ev.is_empty());
+            assert!(ev.iter().all(|e| e["annotations"] == want), "{}", ev[0]);
+        }
+        // /history?all=1&symbol=
+        let v = history_all_json(&s, Some(&syms[0]), None, "sp500", None, None).unwrap();
+        let ev = v["evaluations"].as_array().unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(
+            (&ev[0]["run_id"], &ev[0]["annotations"]),
+            (&run.as_str().into(), &want)
+        );
+        // /history?symbol=
+        let j = history_json(&s, &syms[0], None, true, NOW + 200, "sp500").unwrap();
+        let pts = j["points"].as_array().unwrap();
+        assert_eq!(pts.len(), 1, "annotated run still in /history");
+        assert_eq!(
+            (&pts[0]["run_id"], &pts[0]["annotations"]),
+            (&run.as_str().into(), &want)
+        );
+    }
+
+    /// RC demo driven by try.sh (ignored): made-up data in `RC_DEMO_DIR`, no port, no
+    /// network. `RC_DEMO_PHASE=setup` records a run 9 days ago, then a stale-share
+    /// deferral one interval later ("the box went down" after that).
+    /// `RC_DEMO_PHASE=restart` starts the real engine twice on that dir (the `serve`
+    /// startup path) and prints the deferral rows and the run's `annotations` fields.
+    #[test]
+    #[ignore]
+    fn rc_deferral_and_annotation_demo() {
+        use crate::score_history::TickClock;
+        let dir = std::path::PathBuf::from(std::env::var("RC_DEMO_DIR").expect("RC_DEMO_DIR"));
+        let wall = crate::commands::wall_epoch();
+        match std::env::var("RC_DEMO_PHASE").as_deref() {
+            Ok("setup") => {
+                let t0 = (wall - 9 * 86_400) / 3600 * 3600;
+                let s = ScoreHistoryStore::open(&dir.join("history.sqlite"), None).unwrap();
+                let mut f = live_fake();
+                f.snap = wide_snap();
+                f.pass.set(Some(t0 - 10));
+                set_quotes(&f, 0, t0 - 5, t0 - 5);
+                let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t0);
+                assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
+                let t1 = t0 + H6 + 60;
+                f.pass.set(Some(t1 - 10));
+                let n = priced(&f).len();
+                set_quotes(&f, n / 2, t1 - 7200, t1 - 5);
+                let w = ftick(&f, &s, &Mutex::new(None), &TickClock::new(1800), t1);
+                let d: Vec<_> = s
+                    .deferrals(None, HISTORY_MODEL, None, None, 10)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(d, _)| d)
+                    .collect();
+                println!(
+                    "RC_DEMO_SETUP {}",
+                    serde_json::json!({
+                        "run_id": format!("sp500-{t0}-v3"),
+                        "run_utc": crate::score_history::iso_utc(t0),
+                        "second_tick": format!("{w:?}"),
+                        "deferrals": d,
+                    })
+                );
+            }
+            Ok("restart") => {
+                let cfg = || EngineConfig {
+                    data_dir: dir.clone(),
+                    profile: "sp500".into(),
+                    market_context: false,
+                    fetch_year_charts: false,
+                    android_universe: true,
+                    history_interval_secs: H6,
+                    history_backup_dir: None,
+                    no_feed: true,
+                    quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+                    clock_jump_secs: crate::score_history::CLOCK_JUMP_SECS,
+                    max_stale_share: crate::score_history::MAX_STALE_SHARE,
+                };
+                let eng = HeadlessEngine::start(cfg()).unwrap();
+                let v = eng.deferrals(Some("sp500"), None, None, 10_000).unwrap();
+                let rows = v["deferrals"].as_array().unwrap().clone();
+                drop(eng);
+                let eng = HeadlessEngine::start(cfg()).unwrap();
+                let again = eng.deferrals(Some("sp500"), None, None, 10_000).unwrap()["deferrals"]
+                    .as_array()
+                    .unwrap()
+                    .len();
+                let mut by_reason: std::collections::BTreeMap<String, usize> = Default::default();
+                for r in &rows {
+                    *by_reason
+                        .entry(r["reason"].as_str().unwrap().to_string())
+                        .or_default() += 1;
+                }
+                let pd: Vec<&serde_json::Value> = rows
+                    .iter()
+                    .filter(|r| r["reason"] == "process_down")
+                    .collect();
+                let summary: Vec<&serde_json::Value> = pd
+                    .iter()
+                    .copied()
+                    .filter(|r| r["covers"].as_i64() > Some(1))
+                    .collect();
+                let export = eng.history_all_json(None, None, None, None, None).unwrap();
+                let hist = eng.history_json("S0", None, false, wall, None).unwrap();
+                println!(
+                    "RC_DEMO_RESTART {}",
+                    serde_json::json!({
+                        "rows_by_reason": by_reason,
+                        "rows_after_second_restart": again,
+                        "rows_after_first_restart": rows.len(),
+                        "process_down_summary": summary,
+                        "process_down_newest": pd.first(),
+                        "process_down_oldest_detail": pd.iter().rev().find(|r| r["covers"] == 1),
+                        "stale_share_row": rows.iter().find(|r| r["reason"] == "stale_share_too_high"),
+                        "export_run_id": export["run_id"],
+                        "export_annotations": export["annotations"],
+                        "export_first_evaluation_annotations": export["evaluations"][0]["annotations"],
+                        "history_points": hist["points"].as_array().unwrap().iter().map(|p| {
+                            serde_json::json!({"run_id": p["run_id"], "annotations": p["annotations"]})
+                        }).collect::<Vec<_>>(),
+                    })
+                );
+            }
+            other => panic!("RC_DEMO_PHASE must be setup or restart, got {other:?}"),
+        }
+    }
+
+    /// No-feed engine in a temp dir with the given gate limits (no port, no network).
+    fn engine_with(jump: i64, share: f64) -> (Arc<HeadlessEngine>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "ds-gate-eng-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let eng = HeadlessEngine::start(EngineConfig {
+            data_dir: dir.clone(),
+            profile: "sp500".into(),
+            market_context: false,
+            fetch_year_charts: false,
+            android_universe: true,
+            history_interval_secs: 0,
+            history_backup_dir: None,
+            no_feed: true,
+            quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+            clock_jump_secs: jump,
+            max_stale_share: share,
+        })
+        .unwrap();
+        (eng, dir)
+    }
+
+    #[test]
+    fn engine_status_reports_deferral_during_wake_race() {
+        use crate::score_history::{CLOCK_JUMP_SECS, MAX_STALE_SHARE};
+        let (eng, dir) = engine_with(CLOCK_JUMP_SECS, MAX_STALE_SHARE);
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let seen = Mutex::new(None);
+        let f = live_fake();
+        let frozen = 1_793_409_000;
+        f.pass.set(Some(frozen - 60));
+        set_quotes(&f, 0, frozen - 30, frozen - 30);
+        ftick(&f, &s, &seen, &eng.clock, frozen);
+        let st = eng.status();
+        assert_eq!((st.deferred_since_epoch, st.deferred_reason), (None, None));
+        let wake = 1_793_830_789;
+        let why = "clock jump: waiting for a quote pass after wake";
+        assert_eq!(
+            ftick(&f, &s, &seen, &eng.clock, wake),
+            HistoryWrite::Skipped(why)
+        );
+        ftick(&f, &s, &seen, &eng.clock, wake + 60);
+        let st = eng.status();
+        assert_eq!(st.deferred_since_epoch, Some(wake), "first deferral time");
+        assert_eq!(st.deferred_reason, Some(why));
+        f.pass.set(Some(wake + 90));
+        set_quotes(&f, 0, 0, wake + 150);
+        ftick(&f, &s, &seen, &eng.clock, wake + 180);
+        let st = eng.status();
+        assert_eq!((st.deferred_since_epoch, st.deferred_reason), (None, None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn engine_gate_limits_come_from_config() {
+        use crate::score_history::{CLOCK_JUMP_SECS, MAX_STALE_SHARE};
+        let t0 = 1_800_000_000;
+        // 600 s gap with no pass after it: default 300 defers, 1000 does not.
+        let jump_case = |jump: i64| {
+            let (eng, dir) = engine_with(jump, MAX_STALE_SHARE);
+            let (s, seen) = (
+                ScoreHistoryStore::open_in_memory().unwrap(),
+                Mutex::new(None),
+            );
+            let mut f = live_fake();
+            f.snap = wide_snap();
+            f.pass.set(Some(t0 - 60));
+            set_quotes(&f, 0, 0, t0 + 590);
+            eng.clock.tick(t0, Some(t0 - 60));
+            let w = ftick(&f, &s, &seen, &eng.clock, t0 + 600);
+            let _ = std::fs::remove_dir_all(dir);
+            w
+        };
+        assert_eq!(
+            jump_case(CLOCK_JUMP_SECS),
+            HistoryWrite::Skipped("clock jump: waiting for a quote pass after wake")
+        );
+        assert!(matches!(jump_case(1000), HistoryWrite::Recorded { .. }));
+        // 8/20 stale: default 10% defers, 0.5 records.
+        let share_case = |share: f64| {
+            let (eng, dir) = engine_with(CLOCK_JUMP_SECS, share);
+            let (s, seen) = (
+                ScoreHistoryStore::open_in_memory().unwrap(),
+                Mutex::new(None),
+            );
+            let mut f = live_fake();
+            f.snap = wide_snap();
+            let n = priced(&f).len();
+            f.pass.set(Some(t0 - 60));
+            set_quotes(&f, n * 2 / 5, t0 - 5_000, t0 - 10);
+            let w = ftick(&f, &s, &seen, &eng.clock, t0);
+            let _ = std::fs::remove_dir_all(dir);
+            w
+        };
+        assert_eq!(
+            share_case(MAX_STALE_SHARE),
+            HistoryWrite::Skipped("too many stale quotes")
+        );
+        assert!(matches!(share_case(0.5), HistoryWrite::Recorded { .. }));
+    }
+
+    #[test]
+    fn not_due_clears_a_deferral_episode() {
+        let clock = crate::score_history::TickClock::new(1800);
+        let (s, seen) = (
+            ScoreHistoryStore::open_in_memory().unwrap(),
+            Mutex::new(None),
+        );
+        let f = live_fake();
+        let t0 = 1_800_000_000;
+        f.pass.set(Some(t0 - 60));
+        set_quotes(&f, 0, t0 - 30, t0 - 30);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, t0),
+            HistoryWrite::Recorded { .. }
+        ));
+        clock.note_deferred(t0 + 10, "too many stale quotes");
+        let w = ftick(&f, &s, &seen, &clock, t0 + 60);
+        assert!(matches!(w, HistoryWrite::Skipped(_)), "{w:?}");
+        assert_eq!(clock.deferred(), None, "Due::No clears the deferral");
+    }
+
+    #[test]
+    fn status_quote_ages_boundary_and_unknown_is_stale() {
+        let mut f = live_fake();
+        f.snap = wide_snap();
+        let syms = priced(&f);
+        assert!(syms.len() >= 3);
+        let now = 50_000;
+        let mut t: std::collections::HashMap<String, i64> = f
+            .snap
+            .rows
+            .iter()
+            .map(|r| (r.row.symbol.clone(), now - 5))
+            .collect();
+        t.insert(syms[0].clone(), now - 1800);
+        t.insert(syms[1].clone(), now - 1801);
+        t.remove(&syms[2]); // no quote time
+        let (oldest, stale) = quote_age_summary(&f.snap, &t, now, 1800);
+        assert_eq!(oldest, Some(1801));
+        let mut want = vec![syms[1].clone(), syms[2].clone()];
+        want.sort();
+        assert_eq!(stale, want);
+        // A future quote time (clock stepped back) is stale and has no age.
+        t.insert(syms[0].clone(), now + 60);
+        let (oldest, stale) = quote_age_summary(&f.snap, &t, now, 1800);
+        assert_eq!(oldest, Some(1801));
+        assert!(stale.contains(&syms[0]), "future = stale");
+    }
+
+    #[test]
+    fn unknown_quote_time_fails_closed_and_defers() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let f = live_fake();
+        f.pass.set(Some(NOW - 10));
+        *f.quotes.borrow_mut() = Some(Default::default());
+        assert_eq!(
+            ftick(&f, &s, &seen, &clock, NOW),
+            HistoryWrite::Skipped("too many stale quotes")
+        );
+        assert_eq!(s.run_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn clock_jump_defers_until_a_pass_after_it() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let f = live_fake();
+        f.pass.set(Some(NOW - 10));
+        set_quotes(&f, 0, NOW - 5, NOW - 5);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, NOW),
+            HistoryWrite::Recorded { .. }
+        ));
+        // Regular ticks: not due yet.
+        let t1 = NOW + H6 - 100;
+        f.pass.set(Some(t1 - 10));
+        set_quotes(&f, 0, t1 - 5, t1 - 5);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, t1),
+            HistoryWrite::Skipped(_)
+        ));
+        // A 400 s gap (> CLOCK_JUMP_SECS): due by interval, quotes and pass fresh,
+        // yet deferred until a pass ends after the jump.
+        let t2 = t1 + 400;
+        set_quotes(&f, 0, t2 - 5, t2 - 5);
+        assert_eq!(
+            ftick(&f, &s, &seen, &clock, t2),
+            HistoryWrite::Skipped("clock jump: waiting for a quote pass after wake")
+        );
+        f.pass.set(Some(t2 + 10));
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, t2 + 20),
+            HistoryWrite::Recorded {
+                trigger: "interval",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stale_row_is_stored_flagged_and_excluded_from_history() {
+        use crate::score_history::TickClock;
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        let (seen, clock) = (Mutex::new(None), TickClock::new(1800));
+        let mut f = live_fake();
+        f.snap = wide_snap();
+        let syms = priced(&f);
+        assert!(syms.len() >= 10, "{}", syms.len());
+        f.pass.set(Some(NOW - 10));
+        set_quotes(&f, 0, NOW - 5, NOW - 5);
+        assert!(matches!(
+            ftick(&f, &s, &seen, &clock, NOW),
+            HistoryWrite::Recorded { .. }
+        ));
+        // Next run: one quote (under the 10% share) is 2 h old.
+        let t = NOW + H6 + 60;
+        f.pass.set(Some(t - 10));
+        set_quotes(&f, 1, t - 7200, t - 5);
+        // Keep the ticks continuous (no jump).
+        let mut k = NOW + 200;
+        while k < NOW + H6 {
+            let _ = ftick(&f, &s, &seen, &clock, k);
+            k += 200;
+        }
+        let w = ftick(&f, &s, &seen, &clock, t);
+        assert!(
+            matches!(w, HistoryWrite::Recorded { rows, .. } if rows == syms.len()),
+            "{w:?}"
+        );
+        assert_eq!(
+            s.stale_counts(&format!("sp500-{t}-v3")).unwrap(),
+            (syms.len() as i64, 1)
+        );
+        let pts = |sym: &str| {
+            s.history(sym, None, t, Some(HISTORY_MODEL), Some("sp500"))
+                .unwrap()
+                .iter()
+                .map(|p| p.captured_at)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pts(&syms[0]), vec![NOW], "stale row excluded");
+        assert_eq!(pts(&syms[1]), vec![NOW, t]);
+        let j = history_json(&s, &syms[0], None, true, t, "sp500").unwrap();
+        assert_eq!(j["changes"].as_array().unwrap().len(), 0);
+        // /history?all=1 carries the per-evaluation stale flag (run and symbol forms).
+        let run = format!("sp500-{t}-v3");
+        let v = history_all_json(&s, None, Some(&run), "sp500", None, None).unwrap();
+        let flag = |sym: &str| {
+            v["evaluations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["symbol"] == sym)
+                .unwrap()["stale"]
+                .clone()
+        };
+        assert_eq!(
+            (flag(&syms[0]), flag(&syms[1])),
+            (true.into(), false.into())
+        );
+        let v = history_all_json(&s, Some(&syms[0]), None, "sp500", None, None).unwrap();
+        let flags: Vec<_> = v["evaluations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["stale"].as_bool().unwrap())
+            .collect();
+        assert_eq!(flags, [false, true]);
     }
 
     const NOW: i64 = 1_793_538_000; // Sun 2026-11-01 13:00 UTC: no close slot nearby
@@ -2421,6 +3813,8 @@ mod history_tick_tests {
             year: Cell::new(100),
             source: Cell::new("live"),
             snap: fixture_snap(),
+            quotes: Default::default(),
+            pass: Cell::new(None),
         };
         let expect = rank_android_v3(&f.snap, Some(&universe()))
             .iter()
@@ -2496,6 +3890,8 @@ mod history_tick_tests {
             year: Cell::new(100),
             source: Cell::new("live"),
             snap: fixture_snap(),
+            quotes: Default::default(),
+            pass: Cell::new(None),
         };
         let w = tick(&f, &s, &seen, NOW);
         assert!(matches!(w, HistoryWrite::Recorded { .. }), "{w:?}");
@@ -2854,6 +4250,9 @@ mod full_universe_parity_tests {
             history_interval_secs: 0,
             history_backup_dir: None,
             no_feed: true,
+            quote_stale_secs: crate::score_history::DEFAULT_QUOTE_STALE_SECS,
+            clock_jump_secs: crate::score_history::CLOCK_JUMP_SECS,
+            max_stale_share: crate::score_history::MAX_STALE_SHARE,
         })
         .unwrap();
         // Seed via the real year-publish path (bumps rank_input).
@@ -2992,6 +4391,203 @@ mod full_universe_parity_tests {
             .iter()
             .map(|x| format!("{x:02x}"))
             .collect()
+    }
+
+    /// Release-candidate driver for #74 (ignored; run by the RC's try.sh): ranking
+    /// parity against main's verbatim `rank_android_v3_main` when the stale-quote gate
+    /// is in play. Synthetic universe (RC_N symbols, default 501), in-memory store, the
+    /// real recorder (`record_history_tick_fresh`). Scenarios (RC_STALE_PCTS, default
+    /// "0,5,9,10,11,50", % of priced symbols with a 2 h old quote). Prints one
+    /// `RC_STALE {json}` line per scenario and asserts:
+    /// - the live ranking is byte-identical to main in every scenario;
+    /// - a recorded run stores exactly main's ranking (symbols, order, ranks, scores),
+    ///   stale rows included and flagged; only the stale rows are hidden from /history;
+    /// - a deferred run (> 10% stale) stores nothing.
+    #[test]
+    #[ignore]
+    fn rc_stale_ranking_parity() {
+        use crate::score_history::{ScoreHistoryStore, TickClock, DEFAULT_QUOTE_STALE_SECS};
+        use std::collections::{HashMap, HashSet};
+        struct RcSrc {
+            snap: Arc<OpportunitySnapshot>,
+            universe: Vec<String>,
+            quotes: HashMap<String, i64>,
+            pass: i64,
+        }
+        impl HistorySource for RcSrc {
+            fn pass_generation(&self) -> u64 {
+                1
+            }
+            fn year_charts_loaded(&self) -> usize {
+                self.universe.len()
+            }
+            fn history_universe(&self) -> Vec<String> {
+                self.universe.clone()
+            }
+            fn history_profile(&self) -> String {
+                "sp500".into()
+            }
+            fn history_snapshot(
+                &self,
+            ) -> (Arc<OpportunitySnapshot>, &'static str, Option<Vec<String>>) {
+                (self.snap.clone(), "live", Some(self.universe.clone()))
+            }
+            fn quote_times(&self) -> Option<HashMap<String, i64>> {
+                Some(self.quotes.clone())
+            }
+            fn last_full_pass_at(&self) -> Option<i64> {
+                Some(self.pass)
+            }
+        }
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let n: usize = env("RC_N").map_or(501, |v| v.parse().unwrap());
+        let pcts: Vec<usize> = env("RC_STALE_PCTS")
+            .unwrap_or_else(|| "0,5,9,10,11,50".into())
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        let base = OpportunitySnapshot::capture(
+            &crate::commands::opportunity_projection_tests::fixture_state(),
+            "sp500",
+        );
+        let now: i64 = 1_793_538_000; // Sun 13:00 UTC: no close slot nearby.
+        let missing = (n / 100).max(1);
+        let mut snap = OpportunitySnapshot {
+            profile: "sp500".into(),
+            captured_at_epoch: now,
+            rows: Vec::new(),
+        };
+        for k in 0..n - missing {
+            let mut r = base.rows[k % base.rows.len()].clone();
+            r.row.symbol = format!("SYN{k:04}");
+            if r.year.is_none() && k % 50 != 49 {
+                r.year = Some(synthetic_year(r.row.market_price_cents, k));
+            }
+            snap.rows.push(r);
+        }
+        let universe: Vec<String> = (0..n).map(|k| format!("SYN{k:04}")).collect();
+        let snap = Arc::new(snap);
+        let main = rank_android_v3_main(&snap, Some(&universe));
+        let main_sha = sha_hex(&serde_json::to_vec(&main).unwrap());
+        // Priced rows are the ones the recorder stores (and gates on), in main's order.
+        let priced: Vec<String> = main
+            .iter()
+            .filter(|r| r.price_cents > 0)
+            .map(|r| r.symbol.clone())
+            .collect();
+        for pct in pcts {
+            let k_stale = priced.len() * pct / 100;
+            // Spread the stale quotes over the ranking (every j-th priced symbol).
+            let stale: HashSet<String> = if k_stale == 0 {
+                HashSet::new()
+            } else {
+                let step = priced.len() as f64 / k_stale as f64;
+                (0..k_stale)
+                    .map(|i| priced[(i as f64 * step) as usize].clone())
+                    .collect()
+            };
+            assert_eq!(stale.len(), k_stale);
+            let quotes: HashMap<String, i64> = snap
+                .rows
+                .iter()
+                .map(|r| {
+                    let s = r.row.symbol.clone();
+                    let ts = if stale.contains(&s) {
+                        now - 7_200
+                    } else {
+                        now - 60
+                    };
+                    (s, ts)
+                })
+                .collect();
+            let src = RcSrc {
+                snap: snap.clone(),
+                universe: universe.clone(),
+                quotes,
+                pass: now - 30,
+            };
+            let store = ScoreHistoryStore::open_in_memory().unwrap();
+            let seen = Mutex::new(Some((1, now - 3_600)));
+            let clock = TickClock::new(DEFAULT_QUOTE_STALE_SECS);
+            let (live, _) = run_evaluation(&snap, Some(&universe), &universe).unwrap();
+            let live_sha = sha_hex(&serde_json::to_vec(&live).unwrap());
+            let w = record_history_tick_fresh(&src, &store, &seen, &clock, 6 * 3600, false, now)
+                .unwrap();
+            let run_id = format!("sp500-{now}-v3");
+            let recorded = matches!(w, HistoryWrite::Recorded { .. });
+            let mut line = serde_json::json!({
+                "stale_pct": pct, "stale_quotes": k_stale, "priced": priced.len(),
+                "ranked_rows": main.len(), "outcome": format!("{w:?}"),
+                "ranking_sha256_branch": live_sha, "ranking_sha256_main": main_sha,
+            });
+            assert_eq!(
+                live_sha, main_sha,
+                "live ranking must equal main ({pct}% stale)"
+            );
+            let over = k_stale as f64 > priced.len() as f64 * crate::score_history::MAX_STALE_SHARE;
+            if over {
+                assert!(
+                    matches!(w, HistoryWrite::Skipped("too many stale quotes")),
+                    "{pct}%: {w:?}"
+                );
+                assert_eq!(store.counts().unwrap().0, 0, "deferred run stores nothing");
+            } else {
+                assert!(recorded, "{pct}%: {w:?}");
+                let (stored, stored_stale) = store.stale_counts(&run_id).unwrap();
+                // Stored ranking == main: ok evaluations in rank order.
+                let ok: Vec<_> = store
+                    .evaluations(&run_id)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|e| e.status == "ok")
+                    .collect();
+                let got: Vec<(String, Option<i64>, Option<i64>, Option<String>)> = ok
+                    .iter()
+                    .map(|e| (e.symbol.clone(), e.rank, e.composite, e.decision.clone()))
+                    .collect();
+                let want: Vec<(String, Option<i64>, Option<i64>, Option<String>)> = main
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        (
+                            r.symbol.clone(),
+                            Some(i as i64 + 1),
+                            Some(r.composite_score as i64),
+                            r.decision.clone(),
+                        )
+                    })
+                    .collect();
+                let flagged: HashSet<String> = store
+                    .stale_pairs(Some(&run_id), None)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, s)| s)
+                    .collect();
+                let hidden: HashSet<String> = priced
+                    .iter()
+                    .filter(|s| {
+                        store
+                            .history(s, None, now, Some(HISTORY_MODEL), Some("sp500"))
+                            .unwrap()
+                            .is_empty()
+                    })
+                    .cloned()
+                    .collect();
+                line["stored_rows"] = stored.into();
+                line["stored_stale"] = stored_stale.into();
+                line["stored_ranking_equals_main"] = (got == want).into();
+                line["flagged_equals_stale_set"] = (flagged == stale).into();
+                line["hidden_from_history_equals_stale_set"] = (hidden == stale).into();
+                println!("RC_STALE {line}");
+                assert_eq!(got, want, "stored ranking must equal main ({pct}% stale)");
+                assert_eq!(stored as usize, priced.len());
+                assert_eq!(stored_stale as usize, k_stale);
+                assert_eq!(flagged, stale);
+                assert_eq!(hidden, stale);
+                continue;
+            }
+            println!("RC_STALE {line}");
+        }
     }
 
     /// Release-candidate driver (ignored; run by the RC's try.sh). Env:
