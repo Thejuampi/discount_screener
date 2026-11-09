@@ -310,12 +310,16 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let live = data_dir.join("history.sqlite");
             let v = verify_file(&live, true)?;
             println!(
-                "merged {file} into {} (append-only): +{} runs, +{} rows, +{} shadow rows; \
-                 now score_runs={} score_history={} score_shadow={}",
+                "merged {file} into {} (append-only): +{} runs, +{} rows, +{} shadow rows, \
+                 +{} evaluations, +{} run stats, +{} input blobs, +{} run inputs; now score_runs={} score_history={} score_shadow={}",
                 live.display(),
                 r.runs_added,
                 r.rows_added,
                 r.shadow_added,
+                r.evaluations_added,
+                r.run_stats_added,
+                r.inputs_added,
+                r.run_inputs_added,
                 v.score_runs,
                 v.score_history,
                 v.score_shadow
@@ -873,6 +877,27 @@ fn route(engine: &HeadlessEngine, method: &str, target: &str) -> (&'static str, 
         .collect();
     let expected = if path == "/persist" { "POST" } else { "GET" };
     if path == "/history" && method == "GET" {
+        if matches!(q.get("all").copied(), Some("1" | "true")) {
+            return to_http((|| {
+                let dec = |k: &str| q.get(k).map(|v| pct_decode(v)).transpose();
+                let (sym, run, prof) = (dec("symbol")?, dec("run")?, dec("profile")?);
+                let since = q
+                    .get("since")
+                    .map(|v| v.parse::<i64>().map_err(|_| format!("bad since: {v}")))
+                    .transpose()?;
+                let limit = q
+                    .get("limit")
+                    .map(|v| v.parse::<usize>().map_err(|_| format!("bad limit: {v}")))
+                    .transpose()?;
+                engine.history_all_json(
+                    sym.as_deref(),
+                    run.as_deref(),
+                    prof.as_deref(),
+                    since,
+                    limit,
+                )
+            })());
+        }
         return to_http(history_endpoint(&q, |sym, days, changes, profile| {
             engine.history_json(sym, days, changes, now_epoch(), profile)
         }));
