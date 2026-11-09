@@ -1980,11 +1980,25 @@ pub fn wall_epoch() -> i64 {
 mod pass_start_seal {
     /// Epoch seconds at which a quote pass began. See the module docs.
     ///
-    /// Deliberately **not** `Copy`: each pass consumes its own start, so reusing the
-    /// first pass's start for a later pass (fail-open: old quotes would count toward
-    /// that pass's 90% rule) is a use-of-moved-value compile error.
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    /// Deliberately **neither `Copy` nor `Clone`**, and every consumer takes it by
+    /// value: each pass consumes its own start, so reusing the first pass's start for a
+    /// later pass (fail-open: old quotes would count toward that pass's 90% rule) is a
+    /// use-of-moved-value compile error; `.clone()` does not exist to dodge it. The
+    /// only way to get another one is a fresh [`PassStart::now`].
+    #[derive(Debug, PartialEq, Eq)]
     pub struct PassStart(i64);
+
+    /// Build-time guard: if `PassStart` ever becomes `Clone` (or `Copy`), both impls
+    /// below apply, the `_` is ambiguous, and the crate stops compiling.
+    const _: fn() = || {
+        trait AmbiguousIfClone<A> {
+            fn some_item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        struct IsClone;
+        impl<T: ?Sized + Clone> AmbiguousIfClone<IsClone> for T {}
+        let _ = <PassStart as AmbiguousIfClone<_>>::some_item;
+    };
 
     impl PassStart {
         /// Capture the wall clock as the pass start.
@@ -2008,7 +2022,8 @@ mod pass_start_seal {
             Self(epoch)
         }
 
-        pub fn epoch(self) -> i64 {
+        /// Read-only view; consumers still take the `PassStart` itself by value.
+        pub fn epoch(&self) -> i64 {
             self.0
         }
     }
@@ -2037,6 +2052,51 @@ mod pass_start_seal {
                 (before..=after).contains(&got),
                 "PassStart::now() = {got}, wall clock was {before}..={after}"
             );
+        }
+
+        /// Each coordinator pass mints its own start: the initial pass mints one before
+        /// its first round and hands it to exactly one full-pass mark; the refresh loop
+        /// mints a fresh one after each sleep, before any worker runs, and hands it to
+        /// that pass's completion. (Reusing the initial start is also a compile error:
+        /// it is moved into the first mark and `PassStart` is not `Clone`.)
+        #[test]
+        fn each_feed_pass_mints_a_fresh_pass_start() {
+            let src = include_str!("commands.rs");
+            let at = src
+                .find("\nfn spawn_feed_workers(")
+                .expect("spawn_feed_workers");
+            let body = &src[at..at + 1 + src[at + 1..].find("\n}\n").unwrap()];
+            assert_eq!(
+                body.matches("PassStart::now()").count(),
+                2,
+                "one start for the initial pass, one per refresh pass"
+            );
+            assert_eq!(
+                body.matches("PassStart::").count(),
+                2,
+                "no other constructor"
+            );
+            let init = body
+                .find("let initial_start = PassStart::now();")
+                .expect("initial pass mints its start");
+            assert_eq!(
+                body.matches("initial_start").count(),
+                2,
+                "initial_start: minted once, consumed once"
+            );
+            let first_mark = body.find("mark_full_pass_if_current(").unwrap();
+            let used = init + body[init..].find("initial_start,").unwrap();
+            assert!(init < first_mark && first_mark < used);
+            let lp = used + body[used..].find("loop {").expect("refresh loop");
+            let lb = &body[lp..];
+            let sleep = lb.find("thread::sleep(").unwrap();
+            let mint = lb.find("let pass_start = PassStart::now();").unwrap();
+            let spawn = lb.find(".spawn(").unwrap();
+            let done = lb.find("complete_coordinator_quote_pass(").unwrap();
+            let passed = done + lb[done..].find("pass_start,").unwrap();
+            assert!(sleep < mint && mint < spawn && spawn < done && done < passed);
+            assert!(!lb[..passed].contains("initial_start"));
+            assert!(!body.contains("pass_start.clone()") && !body.contains("start.clone()"));
         }
 
         #[test]
