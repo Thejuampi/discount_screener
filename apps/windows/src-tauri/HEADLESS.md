@@ -37,10 +37,17 @@ $B -V           # same
 `/status` reports the same value as `build_sha`.
 
 **`-dirty` can go stale.** Cargo only reruns the build script when watched
-paths or env vars change (HEAD, the branch ref, `packed-refs`, `version.ps1`,
-`VANTAGE_BUILD_SHA`). It has no hook for working-tree dirtiness, so a
-clean↔dirty flip without a commit keeps the previous `-dirty` suffix until one
-of those inputs changes. That is a Cargo limitation, not a missing `rerun-if-changed`.
+paths or env vars change (HEAD, the branch ref, `refs/heads`, `packed-refs`,
+`version.ps1`, `VANTAGE_BUILD_SHA`). It has no hook for working-tree dirtiness,
+so a clean↔dirty flip without a commit keeps the previous `-dirty` suffix until
+one of those inputs changes. That is a Cargo limitation, not a missing
+`rerun-if-changed`.
+
+**`refs/heads` tradeoff.** Watching the whole `refs/heads` directory (not just
+this branch's loose ref) is required so a nested ref like `feat/foo` that was
+removed by `git pack-refs --prune` still dirties the build when the next commit
+recreates it. Side effect: creating or updating an **unrelated** branch also
+marks `vantage-headless` Dirty and restamps `DS_BUILD_SHA`.
 
 ## How it reuses the app
 
