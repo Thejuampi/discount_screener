@@ -1,0 +1,39 @@
+.detail-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.detail-actions .btn-ghost:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.detail-cache-message {
+  font-size: 13px;
+  margin: 0;
+}
+
+.detail-cache-message p {
+  margin: 0;
+}
+
+.detail-cache-message--issue {
+  color: var(--warning);
+}
+
+.detail-related-action {
+  align-self: flex-start;
+}
+
+.chart-container.detail-chart--empty {
+  min-height: 0;
+}
+
+.detail-chart-status {
+  padding: var(--space-4) var(--space-2);
+  text-align: center;
+  color: var(--text-3);
+  font-size: 13px;
+}

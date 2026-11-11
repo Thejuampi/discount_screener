@@ -3,6 +3,7 @@ import { api, fmt } from "../api";
 import type { PortfolioPosition, OpportunityRow, AccuracyRow, SetupLabel, PortfolioRiskResponse } from "../api";
 import { useT } from "../i18n";
 import { JournalPanel } from "./JournalPanel";
+import { projectPortfolioExposure, usableQuoteCents, type ExposureCoverage } from "../portfolioExposure";
 import {
   BOOK_AS_OF_STORAGE_KEY,
   parseAnyCsv,
@@ -56,6 +57,24 @@ const money = (cents: number) => {
   if (Math.abs(d) >= 10_000) return `$${(d / 1_000).toFixed(1)}k`;
   return `$${d.toFixed(2)}`;
 };
+
+const signedMoney = (cents: number) => `${cents >= 0 ? "+" : ""}${money(cents)}`;
+const signedPct = (pct: number) => `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+
+function LotCoverage({ coverage, label, t }: {
+  coverage: ExposureCoverage;
+  label: string;
+  t: ReturnType<typeof useT>["t"];
+}) {
+  if (coverage.totalLots === 0) return null;
+  return (
+    <span style={{ fontSize: 12, color: "var(--text-3)" }}>
+      {t(label, { eligible: coverage.eligibleLots, total: coverage.totalLots })}
+      {coverage.rangeExcludedLots > 0 && ` · ${t("advisor.coverage.rangeExcluded", { count: coverage.rangeExcludedLots })}`}
+      {coverage.kind === "outOfRange" && ` · ${t("advisor.coverage.outOfRange")}`}
+    </span>
+  );
+}
 
 const daysOpen = (openedAt: string | null): number | null => {
   if (!openedAt) return null;
@@ -119,51 +138,38 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     [rows]
   );
 
-  // Fetch prices for symbols outside the screener universe (on demand, cached)
+  // Fetch prices for held symbols with no usable screener quote.
   useEffect(() => {
-    const missing = positions
-      .map((p) => p.symbol)
-      .filter((s) => !rowsBySymbol.has(s))
-      .filter((s) => extraPricesRef.current[s] === undefined);
+    const requestCache = extraPricesRef.current;
+    const missing = [...new Set(positions.map((p) => p.symbol))]
+      .filter((s) => usableQuoteCents(rowsBySymbol.get(s)?.market_price_cents) == null)
+      .filter((s) => requestCache[s] === undefined);
     if (missing.length === 0) return;
     // Mark as in-flight (null) immediately to avoid duplicate fetches
-    for (const s of missing) extraPricesRef.current[s] = null;
+    for (const s of missing) requestCache[s] = null;
     api.getQuotePrices(missing)
       .then((map) => {
+        if (extraPricesRef.current !== requestCache) return;
         for (const s of missing) {
-          extraPricesRef.current[s] = map[s] ?? null;
+          requestCache[s] = map[s] ?? null;
         }
-        setExtraPrices({ ...extraPricesRef.current });
+        setExtraPrices({ ...requestCache });
       })
       .catch(console.error);
   }, [positions, rowsBySymbol]);
 
   // ── Enriched holdings ─────────────────────────────────────────────────────
-  const holdings = useMemo(() => {
-    const enriched = positions.map((p) => {
-      const row = rowsBySymbol.get(p.symbol) ?? null;
-      const price = row?.market_price_cents ?? extraPrices[p.symbol] ?? null;
-      const value = price != null ? Math.round(p.quantity * price) : null;
-      const cost = Math.round(p.quantity * p.avg_cost_cents);
-      const pnl = value != null ? value - cost : null;
-      const pnlPct = value != null && cost > 0 ? ((value - cost) / cost) * 100 : null;
-      return { pos: p, row, price, value, cost, pnl, pnlPct, days: daysOpen(p.opened_at) };
-    });
-    const totalValue = enriched.reduce((s, h) => s + (h.value ?? h.cost), 0);
-    return enriched.map((h) => ({
-      ...h,
-      weightPct: totalValue > 0 ? ((h.value ?? h.cost) / totalValue) * 100 : 0,
-    }));
-  }, [positions, rowsBySymbol, extraPrices]);
-
-  const totals = useMemo(() => {
-    const value = holdings.reduce((s, h) => s + (h.value ?? 0), 0);
-    const cost = holdings.reduce((s, h) => s + h.cost, 0);
-    const knownCost = holdings.filter(h => h.value != null).reduce((s, h) => s + h.cost, 0);
-    const pnl = value - knownCost;
-    const pnlPct = knownCost > 0 ? (pnl / knownCost) * 100 : 0;
-    return { value, cost, pnl, pnlPct };
-  }, [holdings]);
+  const exposure = useMemo(
+    () => projectPortfolioExposure(positions, rowsBySymbol, extraPrices),
+    [positions, rowsBySymbol, extraPrices],
+  );
+  const holdings = useMemo(() => positions.map((pos, index) => ({
+    ...exposure.rows[index],
+    pos,
+    row: rowsBySymbol.get(pos.symbol) ?? null,
+    days: daysOpen(pos.opened_at),
+  })), [positions, rowsBySymbol, exposure.rows]);
+  const completeValue = exposure.completeValueCents;
 
   // ── Risk engine: fetch ATR + correlation for held symbols ─────────────────
   const heldKey = useMemo(
@@ -190,8 +196,8 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
   // Per-holding stop + risk-at-stop, using ATR (cents).
   const riskRows = useMemo(() => holdings.map((h) => {
     const atr = atrBySym.get(h.pos.symbol) ?? h.row?.atr_cents ?? null;
-    const price = h.price;
-    if (atr == null || atr <= 0 || price == null || price <= 0) {
+    const price = h.priceCents;
+    if (atr == null || atr <= 0 || price == null || h.valueCents == null) {
       return { h, atr: null as number | null, atrPct: null as number | null,
                stop: null as number | null, riskCents: null as number | null,
                riskPct: null as number | null };
@@ -199,15 +205,15 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     const stopDist = Math.round(stopMult * atr);
     const stop = Math.max(0, price - stopDist);
     const riskCents = Math.round(h.pos.quantity * stopDist);
-    const riskPctOfPort = totals.value > 0 ? (riskCents / totals.value) * 100 : null;
+    const riskPctOfPort = completeValue != null ? (riskCents / completeValue) * 100 : null;
     return { h, atr, atrPct: (atr / price) * 100, stop, riskCents, riskPct: riskPctOfPort };
-  }), [holdings, atrBySym, stopMult, totals.value]);
+  }), [holdings, atrBySym, stopMult, completeValue]);
 
   const totalRiskCents = useMemo(
     () => riskRows.reduce((s, r) => s + (r.riskCents ?? 0), 0),
     [riskRows]
   );
-  const totalRiskPct = totals.value > 0 ? (totalRiskCents / totals.value) * 100 : 0;
+  const totalRiskPct = completeValue != null ? (totalRiskCents / completeValue) * 100 : null;
 
   // ── Regime-aware portfolio policy (same intel as RegimeBanner) ────────────
   const regimeEval = useMemo(
@@ -229,8 +235,8 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
 
   // Position sizing: effective risk % (base × regime mult), stop at stopMult × ATR.
   const suggestSize = useCallback((atrCents: number | null, priceCents: number) => {
-    const capital = totals.value;
-    if (!atrCents || atrCents <= 0 || priceCents <= 0 || capital <= 0) return null;
+    const capital = completeValue;
+    if (!atrCents || atrCents <= 0 || priceCents <= 0 || capital == null) return null;
     const stopDist = stopMult * atrCents;
     const budget = capital * (regimeEval.effectiveRiskPct / 100);
     let shares = budget / stopDist;
@@ -238,7 +244,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     const maxAlloc = capital * 0.25;
     if (alloc > maxAlloc) { alloc = maxAlloc; shares = alloc / priceCents; }
     return { shares, allocCents: Math.round(alloc), stopCents: Math.round(priceCents - stopDist) };
-  }, [totals.value, stopMult, regimeEval.effectiveRiskPct]);
+  }, [completeValue, stopMult, regimeEval.effectiveRiskPct]);
 
   // ── Risk warnings ─────────────────────────────────────────────────────────
   const warnings = useMemo(() => {
@@ -246,23 +252,24 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     for (const w of regimeEval.warnings) {
       out.push(t(w.key, w.params));
     }
-    for (const h of holdings) {
-      if (h.weightPct > 25) {
-        out.push(t("advisor.warn.position", { symbol: h.pos.symbol, pct: h.weightPct.toFixed(0) }));
-      }
+    if (holdings.length > 0 && completeValue == null) {
+      out.push(t("advisor.coverage.weightsUnavailable"));
     }
     const sectorWeights = new Map<string, number>();
+    let cryptoPct = 0;
     for (const h of holdings) {
-      const sector = h.row?.sector_name ?? null;
-      if (!sector || h.value == null) continue;
-      sectorWeights.set(sector, (sectorWeights.get(sector) ?? 0) + h.weightPct);
+      const weight = h.weightPct;
+      if (weight == null) continue;
+      if (weight > 25) {
+        out.push(t("advisor.warn.position", { symbol: h.pos.symbol, pct: weight.toFixed(0) }));
+      }
+      const sector = h.row?.sector_name;
+      if (sector) sectorWeights.set(sector, (sectorWeights.get(sector) ?? 0) + weight);
+      if (h.row?.asset_type === "crypto") cryptoPct += weight;
     }
     for (const [sector, pct] of sectorWeights) {
       if (pct > 40) out.push(t("advisor.warn.sector", { sector, pct: pct.toFixed(0) }));
     }
-    const cryptoPct = holdings
-      .filter(h => h.row?.asset_type === "crypto")
-      .reduce((s, h) => s + h.weightPct, 0);
     if (cryptoPct > 30) out.push(t("advisor.warn.crypto", { pct: cryptoPct.toFixed(0) }));
     for (const h of holdings) {
       const label = h.row?.setup_label;
@@ -274,7 +281,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
       }
     }
     return out;
-  }, [holdings, presentation, regimeEval.warnings, t]);
+  }, [holdings, completeValue, presentation, regimeEval.warnings, t]);
 
   // ── Opportunities not owned ───────────────────────────────────────────────
   const ownedSymbols = useMemo(() => new Set(positions.map(p => p.symbol)), [positions]);
@@ -422,6 +429,8 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
 
   const decisionRows = accuracy.filter(a => a.bucket_type === "decision");
   const scoreRows = accuracy.filter(a => a.bucket_type === "score");
+  const { value, pnl } = exposure;
+  const overRiskCeiling = totalRiskPct != null && totalRiskPct > regimeEval.totalRiskCeilingPct;
 
   return (
     <UiInspectable
@@ -454,16 +463,16 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
       <div className="congress-stats">
         <div className="congress-stat-card">
           <span className="congress-stat-label">{t("advisor.totalValue")}</span>
-          <span className="congress-stat-value">{money(totals.value)}</span>
+          <span className="congress-stat-value">{value.cents != null ? money(value.cents) : "—"}</span>
+          <LotCoverage coverage={value.coverage} label="advisor.coverage.value" t={t} />
         </div>
         <div className="congress-stat-card">
           <span className="congress-stat-label">{t("advisor.totalPnl")}</span>
-          <span className="congress-stat-value" style={{ color: totals.pnl >= 0 ? "var(--success)" : "var(--danger)" }}>
-            {totals.pnl >= 0 ? "+" : ""}{money(totals.pnl)}
-            <span style={{ fontSize: 13, marginLeft: 6 }}>
-              ({totals.pnlPct >= 0 ? "+" : ""}{totals.pnlPct.toFixed(1)}%)
-            </span>
+          <span className="congress-stat-value" style={{ color: pnl.cents == null ? undefined : pnl.cents >= 0 ? "var(--success)" : "var(--danger)" }}>
+            {pnl.cents != null ? signedMoney(pnl.cents) : "—"}
+            {pnl.pct != null && <span style={{ fontSize: 13, marginLeft: 6 }}>({signedPct(pnl.pct)})</span>}
           </span>
+          <LotCoverage coverage={pnl.coverage} label="advisor.coverage.pnl" t={t} />
         </div>
         <div className="congress-stat-card">
           <span className="congress-stat-label">{t("advisor.positions")}</span>
@@ -709,23 +718,26 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                       </strong>
                     </td>
                     <td className="num-cell" style={{ textAlign: "right" }}>{h.pos.quantity}</td>
-                    <td className="num-cell" style={{ textAlign: "right" }}>{fmt.dollars(h.pos.avg_cost_cents)}</td>
                     <td className="num-cell" style={{ textAlign: "right" }}>
-                      {h.price != null ? fmt.dollars(h.price) : "—"}
+                      {h.unitCostCents != null ? fmt.dollars(h.unitCostCents) : "—"}
                     </td>
                     <td className="num-cell" style={{ textAlign: "right" }}>
-                      {h.value != null ? money(h.value) : "—"}
+                      {h.priceCents != null ? fmt.dollars(h.priceCents) : "—"}
+                    </td>
+                    <td className="num-cell" style={{ textAlign: "right" }} title={h.valueOutOfRange ? t("advisor.coverage.amountOutOfRange") : undefined}>
+                      {h.valueCents != null ? money(h.valueCents) : "—"}
                     </td>
                     <td className="num-cell" style={{
                       textAlign: "right",
-                      color: h.pnl == null ? "var(--text-4)" : h.pnl >= 0 ? "var(--success)" : "var(--danger)",
+                      color: h.pnlCents == null ? "var(--text-4)" : h.pnlCents >= 0 ? "var(--success)" : "var(--danger)",
                       fontWeight: 700,
-                    }}>
-                      {h.pnl != null
-                        ? `${h.pnl >= 0 ? "+" : ""}${money(h.pnl)} (${h.pnlPct! >= 0 ? "+" : ""}${h.pnlPct!.toFixed(1)}%)`
-                        : "—"}
+                    }} title={h.pnlOutOfRange ? t("advisor.coverage.amountOutOfRange") : undefined}>
+                      {h.pnlCents != null ? signedMoney(h.pnlCents) : "—"}
+                      {h.pnlPct != null && ` (${signedPct(h.pnlPct)})`}
                     </td>
-                    <td className="num-cell" style={{ textAlign: "right" }}>{h.weightPct.toFixed(1)}%</td>
+                    <td className="num-cell" style={{ textAlign: "right" }}>
+                      {h.weightPct != null ? `${h.weightPct.toFixed(2)}%` : "—"}
+                    </td>
                     <td className="num-cell" style={{ textAlign: "right" }}>
                       {h.days != null ? `${h.days}d` : "—"}
                     </td>
@@ -786,8 +798,8 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
           <div className="advisor-risk-total" style={{
             display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
             padding: "10px 14px", borderRadius: 8, marginBottom: 12,
-            background: totalRiskPct > regimeEval.totalRiskCeilingPct ? "rgba(244,63,94,0.12)" : "rgba(34,197,94,0.10)",
-            border: `1px solid ${totalRiskPct > regimeEval.totalRiskCeilingPct ? "rgba(244,63,94,0.4)" : "rgba(34,197,94,0.3)"}`,
+            background: totalRiskPct == null ? "var(--surface-2)" : overRiskCeiling ? "rgba(244,63,94,0.12)" : "rgba(34,197,94,0.10)",
+            border: `1px solid ${totalRiskPct == null ? "var(--border-default)" : overRiskCeiling ? "rgba(244,63,94,0.4)" : "rgba(34,197,94,0.3)"}`,
           }}>
             <div>
               <div style={{ fontSize: 11, color: "var(--text-3)" }}>{t("advisor.risk.totalAtRisk")}</div>
@@ -800,12 +812,12 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
               </div>
             </div>
             <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-              <span style={{ fontSize: 20, fontWeight: 800, color: totalRiskPct > regimeEval.totalRiskCeilingPct ? "var(--danger)" : "var(--success)" }}>
-                {money(totalRiskCents)}
+              <span style={{ fontSize: 20, fontWeight: 800, color: totalRiskPct == null ? "var(--text-3)" : overRiskCeiling ? "var(--danger)" : "var(--success)" }}>
+                {totalRiskPct != null ? money(totalRiskCents) : "—"}
               </span>
-              <span style={{ fontSize: 13, marginLeft: 6, color: "var(--text-3)" }}>
-                ({totalRiskPct.toFixed(1)}%)
-              </span>
+              {totalRiskPct != null && (
+                <span style={{ fontSize: 13, marginLeft: 6, color: "var(--text-3)" }}>({totalRiskPct.toFixed(1)}%)</span>
+              )}
             </div>
           </div>
 
@@ -824,7 +836,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                 <tr key={r.h.pos.id}>
                   <td><strong>{r.h.pos.symbol}</strong></td>
                   <td className="num-cell" style={{ textAlign: "right" }}>
-                    {r.h.price != null ? fmt.dollars(r.h.price) : "—"}
+                    {r.h.priceCents != null ? fmt.dollars(r.h.priceCents) : "—"}
                   </td>
                   <td className="num-cell" style={{ textAlign: "right" }}>
                     {r.atrPct != null
@@ -916,7 +928,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                           stop: fmt.dollars(size.stopCents),
                         })}
                       </>
-                    ) : t("advisor.risk.needValue")}
+                    ) : t(positions.length > 0 && completeValue == null ? "advisor.coverage.sizingUnavailable" : "advisor.risk.needValue")}
                   </div>
                 </div>
               );

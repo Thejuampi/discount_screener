@@ -73,8 +73,26 @@ impl std::error::Error for ForwardForecastFetchError {}
 
 /// Android `ChartMetaProbe` — lightweight recovery from chart meta.
 struct ChartMetaProbe {
-    market_price_cents: Option<i64>,
+    latest_close_cents: Option<i64>,
+    regular_market_price_cents: Option<i64>,
     company_name: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum SymbolPriceMode {
+    Progressive,
+    Quote,
+}
+
+impl ChartMetaProbe {
+    fn price(&self, mode: SymbolPriceMode) -> Option<i64> {
+        match mode {
+            SymbolPriceMode::Progressive => {
+                self.latest_close_cents.or(self.regular_market_price_cents)
+            }
+            SymbolPriceMode::Quote => self.regular_market_price_cents,
+        }
+    }
 }
 
 // Markers for JSON blobs embedded in the Yahoo Finance quote page HTML.
@@ -294,6 +312,19 @@ impl YahooClient {
     /// 2) optional HTML (off by default)
     /// 3) lightweight chart meta probe for missing price/name
     pub fn fetch_symbol(&self, symbol: &str) -> io::Result<FetchResult> {
+        self.fetch_symbol_with_price_mode(symbol, SymbolPriceMode::Progressive)
+    }
+
+    /// A detail refresh must preserve a saved quote when Yahoo returns only bars.
+    pub(crate) fn fetch_symbol_quote(&self, symbol: &str) -> io::Result<FetchResult> {
+        self.fetch_symbol_with_price_mode(symbol, SymbolPriceMode::Quote)
+    }
+
+    fn fetch_symbol_with_price_mode(
+        &self,
+        symbol: &str,
+        price_mode: SymbolPriceMode,
+    ) -> io::Result<FetchResult> {
         let display = symbol.trim().to_uppercase();
         let request_symbol = yahoo_request_symbol(&display);
 
@@ -346,7 +377,7 @@ impl YahooClient {
                 .unwrap_or(true);
         if needs_probe {
             if let Some(probe) = self.fetch_chart_meta_probe(&request_symbol, &display) {
-                result = with_price_fallback(result, probe.market_price_cents, is_crypto(&display));
+                result = with_price_fallback(result, probe.price(price_mode), is_crypto(&display));
                 if let Some(snap) = result.snapshot.as_mut() {
                     if snap
                         .company_name
@@ -357,7 +388,7 @@ impl YahooClient {
                         snap.company_name = probe.company_name;
                     }
                 }
-            } else {
+            } else if matches!(price_mode, SymbolPriceMode::Progressive) {
                 // Last resort: stooq cents (Windows-only soft recovery).
                 let stooq = crate::stooq::fetch_quote_cents(&display);
                 result = with_price_fallback(result, stooq, is_crypto(&display));
@@ -416,8 +447,8 @@ impl YahooClient {
             .json::<Value>()
             .ok()?;
         Some(ChartMetaProbe {
-            market_price_cents: parse_chart_latest_close_cents(&resp)
-                .or_else(|| parse_chart_regular_market_price_cents(&resp)),
+            latest_close_cents: parse_chart_latest_close_cents(&resp),
+            regular_market_price_cents: parse_chart_regular_market_price_cents(&resp),
             company_name: parse_chart_company_name(&resp, display_symbol),
         })
     }
@@ -1249,6 +1280,21 @@ mod list_ready_tests {
     use super::*;
     use crate::engine::{FundamentalSnapshot, MarketSnapshot};
     use crate::quote_summary::{is_enrichment_complete, is_list_ready, FetchResult};
+
+    #[test]
+    fn explicit_quote_probe_refuses_a_historical_bar_without_a_provider_quote() {
+        let mut probe = ChartMetaProbe {
+            latest_close_cents: Some(1_000),
+            regular_market_price_cents: None,
+            company_name: None,
+        };
+        assert_eq!(probe.price(SymbolPriceMode::Quote), None);
+        assert_eq!(probe.price(SymbolPriceMode::Progressive), Some(1_000));
+
+        probe.regular_market_price_cents = Some(1_100);
+        assert_eq!(probe.price(SymbolPriceMode::Quote), Some(1_100));
+        assert_eq!(probe.price(SymbolPriceMode::Progressive), Some(1_000));
+    }
 
     fn price_only(sym: &str) -> FetchResult {
         FetchResult {

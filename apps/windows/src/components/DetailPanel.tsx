@@ -1,4 +1,4 @@
-import { useState, useEffect, useId } from "react";
+import { useState, useEffect, useId, useRef } from "react";
 import { api, fmt } from "../api";
 import type { SymbolDetail, OpportunityRow, PriceProvenance } from "../api";
 import { CandleChart } from "./CandleChart";
@@ -31,6 +31,7 @@ import { buildMarketContextNarrative } from "../marketContextNarrative";
 import { buildConditionalPlan, type PlanStance } from "../conditionalPlan";
 import { verdictFromTechnicalScore } from "../technicalVerdict";
 import { UI, UiInspectable } from "../uiInspect";
+import { createDetailLoader, INITIAL_DETAIL, VALUATION_READ_DELAYS, type DetailLoadState } from "../detailLoader";
 import {
   detailValuationPresentation,
   dcfMarketRelation,
@@ -40,6 +41,7 @@ import {
   nextValuationTooltipState,
   valuationTooltipDescribedBy,
 } from "../valuationTooltipState";
+import "./DetailPanel.css";
 
 function toneColor(tone: DirectionalTone): string {
   if (tone === "favorable") return "#22c55e";
@@ -98,80 +100,67 @@ interface Props {
 
 const RANGES = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"];
 
+const ISSUE_LABEL = {
+  cache_read_failed: "detail.cacheReadFailed",
+  refresh_failed: "detail.refreshFailed",
+  quote_unavailable: "detail.quoteUnavailable",
+  chart_unavailable: "detail.chartUnavailable",
+} as const;
+
 export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChange, onClose }: Props) {
   const { t } = useT();
   const presentation = getScoringPresentation(scoringModel);
-  const [detail, setDetail] = useState<SymbolDetail | null>(null);
-  const [range, setRange] = useState("3mo");
-  const [loading, setLoading] = useState(true);
-  /** EDGAR/valuation worker is async — keep a reserved DCF slot until timeout. */
-  const [dcfWaitTimedOut, setDcfWaitTimedOut] = useState(false);
+  const [load, setLoad] = useState<DetailLoadState<SymbolDetail>>(INITIAL_DETAIL);
+  const loaderRef = useRef<ReturnType<typeof createDetailLoader<SymbolDetail>> | null>(null);
+  const [chartRange, setChartRange] = useState({ range: "3mo", request: 0, revision: 0 });
+  const { range } = chartRange;
+  const [valuationWaitEnded, setValuationWaitEnded] = useState(0);
+  const [relatedLoaded, setRelatedLoaded] = useState(false);
   const [showPat, setShowPat] = useState(() => localStorage.getItem("ds_detail_pat") !== "0");
   const [showFib, setShowFib] = useState(() => localStorage.getItem("ds_detail_fib") !== "0");
   const [showEma, setShowEma] = useState(() => localStorage.getItem("ds_detail_ema") !== "0");
   const [showVol, setShowVol] = useState(() => localStorage.getItem("ds_detail_vol") !== "0");
 
-  // Reset detail state immediately when symbol changes so we never show stale
-  // data from the previously selected symbol. Use a cancellation flag so rapid
-  // symbol changes don't race-condition the latest fetch.
   useEffect(() => {
-    setLoading(true);
-    setDetail(null);   // ← clear stale data
-    setDcfWaitTimedOut(false);
-    let cancelled = false;
-
-    api.getSymbolDetail(symbol)
-      .then((d) => {
-        if (!cancelled) { setDetail(d); setLoading(false); }
-      })
-      .catch(console.error);
-
-    // Fast path (quote + daily) returns ASAP; multi-TF + DCF continue in background.
-    // Poll longer than before so EDGAR valuation can land without the slot vanishing.
-    const refreshDetail = () =>
-      api.getSymbolDetail(symbol).then((d) => {
-        if (!cancelled) {
-          if (d) setDetail(d);
-          setLoading(false);
-        }
-      });
-
-    api.ensureSymbolLoaded(symbol)
-      .then(() => refreshDetail())
-      .catch(() =>
-        api.refreshSymbol(symbol)
-          .then(() => refreshDetail())
-          .catch(console.error),
-      );
-
-    const t1 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 1200);
-    const t2 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 3500);
-    const t3 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 8000);
-    const t4 = window.setTimeout(() => { void refreshDetail().catch(() => {}); }, 15000);
-    // After this, stop implying "still computing" — show unavailable if no DCF.
-    const tOut = window.setTimeout(() => {
-      if (!cancelled) setDcfWaitTimedOut(true);
-    }, 20000);
-
+    const loader = createDetailLoader({
+      read: () => api.getSymbolDetail(symbol),
+      refresh: (range) => api.refreshSymbolDetail(symbol, range),
+      publish: setLoad,
+    });
+    loaderRef.current = loader;
+    void loader.open();
     return () => {
-      cancelled = true;
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-      window.clearTimeout(t3);
-      window.clearTimeout(t4);
-      window.clearTimeout(tOut);
+      loader.close();
+      loaderRef.current = null;
     };
   }, [symbol]);
 
-  // ── Render with whatever data is available immediately ──────────────────────
-  // We prefer row data (synchronous from the parent's list) over detail.
-  // Only the deep analyst/fundamentals/technical sections wait for `detail`.
+  const { detail, status, issues, chartRevision, valuationRevision } = load;
+  useEffect(() => {
+    if (!valuationRevision) return;
+    const loader = loaderRef.current;
+    let cancelled = false;
+    const timers = VALUATION_READ_DELAYS.map((delay, index) => window.setTimeout(async () => {
+      await loader?.reread();
+      if (!cancelled && index === VALUATION_READ_DELAYS.length - 1) setValuationWaitEnded(valuationRevision);
+    }, delay));
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [symbol, valuationRevision]);
 
-  const companyName = row?.company_name ?? detail?.company_name ?? "";
-  const marketPrice = row?.market_price_cents ?? detail?.market_price_cents ?? 0;
-  const targetPrice = row?.intrinsic_value_cents ?? detail?.intrinsic_value_cents ?? 0;
-  const gap = row ? row.gap_bps : detail?.gap_bps ?? null;
-  const confidence = row?.confidence ?? detail?.confidence ?? "Low";
+  const quote = detail && detail.market_price_cents > 0 ? detail : row;
+  const companyName = detail?.company_name ?? row?.company_name ?? "";
+  const marketPrice = quote?.market_price_cents ?? 0;
+  const targetPrice = quote?.intrinsic_value_cents ?? 0;
+  const gap = quote?.gap_bps ?? null;
+  const confidence = quote?.confidence ?? "Low";
+  const dailyChange = row && row.market_price_cents === marketPrice ? row.daily_change_bps : null;
+  const hasSavedDetail = detail != null || marketPrice > 0;
+  const refreshing = status === "refreshing";
+  const updatedQuote = valuationRevision > 0 && !refreshing
+    && !issues.some((issue) => issue !== "chart_unavailable");
   // Prefer live detail analysis over list-row cache (row can hold stale FCFF for financials).
   const dcfAnalysis = detail?.dcf_analysis ?? null;
   const valuation = detailValuationPresentation(detail);
@@ -189,30 +178,16 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
   const isCrypto = row?.asset_type === "crypto" || symbol.endsWith("-USD");
   const gapPresentation = presentation.gap(gap);
   const hasValidData = marketPrice > 0;
-  // Prefer a reserved loading slot over appear/disappear when EDGAR is slow.
-  // Classification refuse is immediate unavailable (no timeout theater).
   const dcfSlotState: "hidden" | "loading" | "ready" | "disputed" | "unavailable" = technicalOnly
     ? "hidden"
     : valuation.kind === "selected"
       ? "ready"
       : valuation.kind === "disputed"
         ? "disputed"
-      : valuation.kind === "unavailable" || valuationReason || dcfWaitTimedOut
-        ? "unavailable"
-        : "loading";
-
-  // If we have absolutely nothing yet (no row, no detail) show a loader
-  if (!hasValidData && !detail && loading) {
-    return (
-      <div className="detail-panel">
-        <div className="detail-header">
-          <span>{symbol}</span>
-          <button className="close-btn" onClick={onClose}>✕</button>
-        </div>
-        <div className="loading-msg">{t("detail.loading")} {symbol}…</div>
-      </div>
-    );
-  }
+      : valuation.kind !== "unavailable" && !valuationReason
+        && (status === "reading" || refreshing || valuationRevision > valuationWaitEnded)
+        ? "loading"
+        : "unavailable";
 
   return (
     <UiInspectable
@@ -239,28 +214,54 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
           <span className="detail-symbol">{symbol}</span>
           {companyName && <span className="detail-company">{companyName}</span>}
         </div>
-        <button className="close-btn" onClick={onClose}>✕</button>
+        <div className="detail-actions">
+          <button
+            type="button"
+            className="btn-ghost"
+            data-ui-action="refresh-detail"
+            disabled={status !== "ready"}
+            onClick={() => void loaderRef.current?.refresh(range)}
+          >
+            {t(refreshing ? "detail.updating" : hasSavedDetail ? "detail.refresh" : "detail.load")}
+          </button>
+          <button type="button" className="close-btn" aria-label={t("detail.close")} onClick={onClose}>✕</button>
+        </div>
       </div>
 
-      {/* Price summary — uses row data (immediate) when available */}
+      {!hasSavedDetail && status === "reading" && (
+        <div className="loading-msg" role="status">{t("detail.loading")} {symbol}…</div>
+      )}
+      {!hasSavedDetail && status === "ready" && issues.length === 0 && (
+        <p className="detail-cache-message muted" role="status">{t("detail.cacheEmpty")}</p>
+      )}
+      {issues.length > 0 && (
+        <div className="detail-cache-message detail-cache-message--issue" role="status">
+          {issues.map((issue) => <p key={issue}>{t(ISSUE_LABEL[issue])}</p>)}
+        </div>
+      )}
+
+      {hasSavedDetail && (
       <div className="price-summary">
         <div className="price-main">
           <span className="price-value">
             {hasValidData ? fmt.dollars(marketPrice) : "—"}
-            {row?.daily_change_bps != null && (
+            {dailyChange != null && (
               <span style={{
                 fontSize: 13,
                 marginLeft: 8,
                 fontWeight: 600,
-                color: row.daily_change_bps > 0 ? "var(--success)"
-                  : row.daily_change_bps < 0 ? "var(--danger)" : "var(--text-4)",
+                color: dailyChange > 0 ? "var(--success)"
+                  : dailyChange < 0 ? "var(--danger)" : "var(--text-4)",
               }}>
-                {row.daily_change_bps > 0 ? "▲ +" : row.daily_change_bps < 0 ? "▼ " : ""}
-                {(row.daily_change_bps / 100).toFixed(2)}%
+                {dailyChange > 0 ? "▲ +" : dailyChange < 0 ? "▼ " : ""}
+                {(dailyChange / 100).toFixed(2)}%
               </span>
             )}
           </span>
           <span className="price-label">{t("detail.marketPrice")}</span>
+          {hasValidData && (
+            <span className="muted small">{t(updatedQuote ? "detail.updatedQuote" : "detail.savedQuote")}</span>
+          )}
         </div>
         {!technicalOnly && <>
           <div className="price-arrow">→</div>
@@ -378,9 +379,10 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
           </div>
         )}
       </div>
+      )}
 
       {/* Price provenance — cross-source verification badge */}
-      <ProvenanceBadge symbol={symbol} />
+      {relatedLoaded && <ProvenanceBadge symbol={symbol} />}
 
       {/* Earnings warning — only when a date is known and upcoming within 21 days */}
       {(() => {
@@ -403,7 +405,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       })()}
 
       {/* Crypto cycle analysis — shown only for crypto symbols, right after price */}
-      <CryptoCyclePanel symbol={symbol} isCrypto={isCrypto} scoringModel={scoringModel} />
+      {relatedLoaded && <CryptoCyclePanel symbol={symbol} isCrypto={isCrypto} scoringModel={scoringModel} />}
 
       {/* ── Analysis summary — needs both row and detail for full narrative ── */}
       {row && detail && <AnalysisSummary row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}
@@ -414,8 +416,11 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
           {RANGES.map((r) => (
             <button
               key={r}
+              type="button"
               className={`range-tab ${range === r ? "active" : ""}`}
-              onClick={() => setRange(r)}
+              aria-pressed={range === r}
+              disabled={refreshing}
+              onClick={() => setChartRange((prior) => ({ range: r, request: prior.request + 1, revision: chartRevision }))}
             >
               {r}
             </button>
@@ -439,7 +444,16 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
             </label>
           </div>
         </div>
-        <CandleChart symbol={symbol} range={range} patterns={showPat ? detail?.chart_patterns : undefined} fib={showFib ? detail?.fib : null} ema={showEma} volume={showVol} />
+        <CandleChart
+          symbol={symbol}
+          range={range}
+          cacheRevision={chartRevision}
+          loadRequest={chartRange.revision === chartRevision ? chartRange.request : 0}
+          patterns={showPat ? detail?.chart_patterns : undefined}
+          fib={showFib ? detail?.fib : null}
+          ema={showEma}
+          volume={showVol}
+        />
       </div>
 
       <AnalystForecastsPanel symbol={symbol} />
@@ -468,7 +482,14 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       <HistoryChart symbol={symbol} />
 
       {/* News + sentiment */}
-      <NewsPanel symbol={symbol} />
+      {relatedLoaded && <NewsPanel symbol={symbol} />}
+      {!relatedLoaded && (
+        <div className="detail-related-action">
+          <button type="button" className="btn-ghost" onClick={() => setRelatedLoaded(true)}>
+            {t("detail.loadRelated")}
+          </button>
+        </div>
+      )}
 
       {/* Schwab Equity Ratings (if imported) */}
       <SchwabPanel symbol={symbol} />
@@ -529,7 +550,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         </div>
       )}
 
-      <QuantLensPanel symbol={symbol} />
+      <QuantLensPanel symbol={symbol} valuationRevision={valuationRevision} />
 
       {/* ── Full analysis breakdown (bottom) ── */}
       {row && detail && <AnalysisBuckets row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}

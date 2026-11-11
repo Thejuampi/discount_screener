@@ -312,6 +312,12 @@ export type ForecastPanelState =
 
 export type CacheFreshness = "fresh" | "aging" | "stale";
 export type ObservationFreshness = "current" | "aging" | "stale" | "empty";
+export interface SymbolDetailRefreshResult {
+  quote_updated: boolean;
+  chart_updated: boolean;
+  issues: ("quote_unavailable" | "chart_unavailable")[];
+}
+
 export type ForecastActionKind = "none" | "load" | "refresh";
 
 export interface ForecastObservation {
@@ -803,8 +809,11 @@ export const api = {
   tipranksDeleteKey: () => invoke<TipRanksSettingsStatus>("tipranks_delete_key"),
   tipranksTestKey: () => invoke<AnalystForecastPanel>("tipranks_test_key"),
   getCandles: (symbol: string, range: string) => invoke<Candle[]>("get_candles", { symbol, range }),
+  loadSymbolCandles: (symbol: string, range: string) => invoke<Candle[]>("load_symbol_candles", { symbol, range }),
   getAlerts: () => invoke<AlertEvent[]>("get_alerts"),
   refreshSymbol: (symbol: string) => invoke<string>("refresh_symbol", { symbol }),
+  refreshSymbolDetail: (symbol: string, range: string) =>
+    invoke<SymbolDetailRefreshResult>("refresh_symbol_detail", { symbol, range }),
   searchTickers: (query: string, limit?: number) =>
     invoke<TickerSearchSuggestion[]>("search_tickers", { query, limit: limit ?? 8 }),
   resolveTickerSearchSubmit: (query: string, suggestions: TickerSearchSuggestion[]) =>

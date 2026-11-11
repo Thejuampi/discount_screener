@@ -97,11 +97,6 @@ export function CommandPalette({ rows, onNavigate, onOpenSymbol, onOpenSettings,
     { id: "act-theme", icon: "🌓", label: t("cmd.theme"), kind: "action", run: onToggleTheme },
   ];
 
-  const openAndLoad = (symbol: string) => {
-    onOpenSymbol(symbol);
-    void api.ensureSymbolLoaded(symbol).catch(console.error);
-  };
-
   const ql = q.trim().toLowerCase();
   const navMatches = ql.length === 0 ? nav : nav.filter((a) => a.label.toLowerCase().includes(ql));
 
@@ -112,7 +107,7 @@ export function CommandPalette({ rows, onNavigate, onOpenSymbol, onOpenSettings,
     label: r.symbol,
     sub: r.company_name ?? r.exchange ?? undefined,
     kind: "symbol" as const,
-    run: () => openAndLoad(r.symbol),
+    run: () => onOpenSymbol(r.symbol),
   }));
 
   const symFromRows: Action[] =
@@ -131,7 +126,7 @@ export function CommandPalette({ rows, onNavigate, onOpenSymbol, onOpenSettings,
             label: r.symbol,
             sub: r.company_name ?? undefined,
             kind: "symbol" as const,
-            run: () => openAndLoad(r.symbol),
+            run: () => onOpenSymbol(r.symbol),
           }));
 
   const results = [...navMatches, ...symFromRemote, ...symFromRows];

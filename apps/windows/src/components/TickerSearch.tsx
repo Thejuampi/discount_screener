@@ -29,11 +29,7 @@ export function TickerSearch({ onOpenSymbol, onQueryChange }: Props) {
       setQuery("");
       onQueryChange?.("");
       setSuggestions([]);
-      // Open UI immediately; detail panel drives the load + progressive refresh.
       onOpenSymbol(symbol);
-      void api.ensureSymbolLoaded(symbol).catch((e) => {
-        console.error("ensureSymbolLoaded failed", e);
-      });
     },
     [onOpenSymbol, onQueryChange],
   );

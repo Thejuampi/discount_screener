@@ -50,7 +50,12 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - Opportunity scoring, Quant Lens, and residual-income / FCFF valuation.
 - Advisor CSV import: holdings snapshot vs Chase 90-day blotter. Warn, then confirm.
 - Vantage requests compact Yahoo summaries and batches missing Advisor prices.
-- Detail requests monthly charts on demand. Chart controls reuse recent candles for the same range.
+- Advisor shows quote coverage and withholds portfolio weights when the quote coverage is incomplete.
+- Advisor calculates unrealized P/L from lots that have both a quote and a usable cost basis.
+- Portfolio risk percentages and position sizing require a complete portfolio value.
+- Detail opens with available session data. It shows Load without cached data and Refresh when data is available.
+- Load and Refresh request data for the selected ticker. Detail keeps available data when a request fails.
+- Chart range controls request missing candles on demand. Additional provider data also needs an explicit request.
 - SEC insider results follow a bounded freshness interval. Financial residual income reruns when its inputs change.
 - Vantage scores opportunity rows outside the shared screener lock after it captures one input view.
 - Vantage queues chart enrichment when each symbol becomes visible, including symbols that arrive late.

@@ -11,12 +11,14 @@ import {
 import type { AnalystMethodPresentation } from "../detailValuationPresentation";
 import { useT } from "../i18n";
 import { UI, UiInspectable } from "../uiInspect";
+import { VALUATION_READ_DELAYS } from "../detailLoader";
 
 interface Props {
   symbol: string;
+  valuationRevision: number;
 }
 
-export function QuantLensPanel({ symbol }: Props) {
+export function QuantLensPanel({ symbol, valuationRevision }: Props) {
   const { t } = useT();
   const [result, setResult] = useState<{ symbol: string; report: QuantLensReport } | null>(null);
   const [analystResult, setAnalystResult] = useState<{
@@ -54,17 +56,17 @@ export function QuantLensPanel({ symbol }: Props) {
         });
     };
     refresh();
-    // The first command starts the bounded demand valuation. Re-read the
-    // cache while that worker resolves instead of leaving Quant Lens frozen
-    // on its pre-route report until the panel is reopened.
-    for (const delay of [1_200, 3_500, 8_000, 15_000, 20_000]) {
-      timers.push(window.setTimeout(refresh, delay));
+    // After an explicit refresh, read the cache while valuation settles.
+    if (valuationRevision > 0) {
+      for (const delay of VALUATION_READ_DELAYS) {
+        timers.push(window.setTimeout(refresh, delay));
+      }
     }
     return () => {
       cancelled = true;
       for (const timer of timers) window.clearTimeout(timer);
     };
-  }, [symbol]);
+  }, [symbol, valuationRevision]);
 
   useEffect(() => {
     let cancelled = false;

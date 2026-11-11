@@ -25,7 +25,7 @@ export type RegimeWarning = {
 
 export type HoldingForRegimeEval = {
   symbol: string;
-  weightPct: number;
+  weightPct: number | null;
   setupLabel: SetupLabel | null;
   /** From OpportunityRow when screener knows the name. */
   regimeScore?: number | null;
@@ -97,9 +97,9 @@ function clamp(n: number, lo: number, hi: number): number {
 /** Base recommendation from setup label + concentration (regime-blind). */
 export function recommendBase(
   label: SetupLabel | null,
-  weightPct: number,
+  weightPct: number | null,
 ): PortfolioActionKey {
-  if (weightPct > 25) return "concentration";
+  if (weightPct != null && weightPct > 25) return "concentration";
   if (label == null) return "noData";
   if (STRONG_NEGATIVE.includes(label)) return "exit";
   if (NEGATIVE_LABELS.includes(label)) return "trim";
@@ -196,8 +196,13 @@ export function evaluatePortfolioAgainstRegime(
   const weightBySymbol = new Map<string, number>();
   const labelBySymbol = new Map<string, SetupLabel | null>();
   const scoreBySymbol = new Map<string, number | null>();
+  let weightsComplete = true;
   for (const h of holdings) {
-    weightBySymbol.set(h.symbol, (weightBySymbol.get(h.symbol) ?? 0) + h.weightPct);
+    if (h.weightPct == null) {
+      weightsComplete = false;
+    } else {
+      weightBySymbol.set(h.symbol, (weightBySymbol.get(h.symbol) ?? 0) + h.weightPct);
+    }
     if (!labelBySymbol.has(h.symbol)) {
       labelBySymbol.set(h.symbol, h.setupLabel);
     }
@@ -207,8 +212,8 @@ export function evaluatePortfolioAgainstRegime(
   }
 
   const actionsBySymbol: Record<string, PortfolioActionKey> = {};
-  for (const [symbol, weightPct] of weightBySymbol) {
-    const label = labelBySymbol.get(symbol) ?? null;
+  for (const [symbol, label] of labelBySymbol) {
+    const weightPct = weightsComplete ? weightBySymbol.get(symbol) ?? null : null;
     var base = recommendBase(label, weightPct);
     // Match Advisor: shortRisk only when the name has screener data.
     if (isShort && label != null) base = "shortRisk";

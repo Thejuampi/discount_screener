@@ -49,13 +49,13 @@ describe("TipRanks analyst forecasts", () => {
     expect(backend.loadForecasts).toHaveBeenCalledTimes(0);
   });
 
-  it("shows an explicit unload action without auto-calling TipRanks", async () => {
+  it("shows an explicit load action without auto-calling TipRanks", async () => {
     const backend = await startApp("unloaded");
     await $("tr.stock-row").click();
     const panel = await $(".analyst-forecasts");
     await panel.waitForDisplayed();
     await expect(panel).toHaveText(
-      expect.stringContaining("TipRanks analyst targets are not loaded for this symbol yet."),
+      expect.stringContaining("No local TipRanks cache for this symbol this month."),
     );
     await expect(panel.$("button")).toHaveText("Load TipRanks analyst targets");
     await backend.analystForecasts.update();

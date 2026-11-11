@@ -149,9 +149,6 @@ export default function App() {
         if (!sym) return;
         setFilter("");
         openSymbol(sym);
-        void api.ensureSymbolLoaded(sym).catch((e) => {
-          console.error("agent ensureSymbolLoaded failed", e);
-        });
       },
       closeDetail: () => setSelectedSymbol(null),
       setViewMode: (mode: ViewMode) => handleViewModeChange(mode),
@@ -718,6 +715,7 @@ export default function App() {
             {selectedSymbol && (
               <div className="detail-pane">
                 <DetailPanel
+                  key={selectedSymbol}
                   symbol={selectedSymbol}
                   row={rows.find((r) => r.symbol === selectedSymbol) ?? null}
                   scoringModel={scoringModel}

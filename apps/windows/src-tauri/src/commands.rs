@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 use crate::tauri_compat::State;
 use serde::Serialize;
 
+#[cfg(test)]
+mod detail_refresh_tests;
+
 use crate::analyst_forecasts::{AnalystForecastPanel, ForecastPricePoint, TipRanksSettingsStatus};
 use crate::db::{BacktestResult, HistorySnapshot, SnapshotInsert};
 use crate::edgar;
@@ -902,14 +905,6 @@ pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool
 #[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<SymbolDetail> {
     let symbol = symbol.trim().to_uppercase();
-    {
-        let mut screener = state.screener.lock().unwrap();
-        // Replace stale FCFF-for-financials caches (e.g. ACGL $875) before serving detail.
-        screener.ensure_model_routed_valuation(&symbol);
-    }
-    // Universe EDGAR worker can take minutes on SP500. Opening detail must not
-    // leave the valuation slot stuck on loading→timeout — demand-drive one symbol.
-    request_demand_valuation_if_needed(&symbol, &state);
     let mut screener = state.screener.lock().unwrap();
     screener.ensure_model_routed_valuation(&symbol);
     screener.detail(&symbol)
@@ -953,12 +948,11 @@ pub(crate) fn seed_cof_native_e2e(state: &AppState) -> Result<SymbolDetail, Stri
         .ok_or_else(|| "COF detail missing after native E2E seed".to_string())
 }
 
-/// Kick a background valuation for one equity when detail is open and no DCF yet.
-fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
+/// Start an equity valuation after an explicit ticker refresh when needed.
+fn request_demand_valuation_if_needed(symbol: &str, state: &AppState, generation: u64) {
     if is_crypto(symbol) || is_etf(symbol) {
         return;
     }
-    let generation = state.feed_generation.load(Ordering::SeqCst);
     // Prep under the screener lock without ranking-affecting writes; refusal
     // publishes via ingest_operating_valuation_if_current so rank_input bumps.
     enum DemandPrep {
@@ -1972,12 +1966,14 @@ fn ingest_fetch_result(
 #[cfg_attr(feature = "gui", tauri::command)]
 pub fn refresh_symbol(symbol: String, state: State<AppState>) -> Result<String, String> {
     let generation = state.feed_generation.load(Ordering::SeqCst);
+    let started = Instant::now();
     let client = YahooClient::new().map_err(|e| e.to_string())?;
     let result = client.fetch_symbol(&symbol).map_err(|e| e.to_string())?;
 
     apply_refresh_quote_if_current(
         &EnrichmentGate::from_app(&state),
         generation,
+        started,
         result,
         is_crypto(&symbol),
         is_etf(&symbol),
@@ -2030,7 +2026,7 @@ pub fn get_quant_lens(
     symbol: String,
     state: State<AppState>,
 ) -> Result<crate::quant_lens::QuantLensReport, String> {
-    request_demand_valuation_if_needed(&symbol, &state);
+    let symbol = symbol.trim().to_uppercase();
     let mut screener = state.screener.lock().unwrap();
     screener.ensure_model_routed_valuation(&symbol);
 
@@ -2377,16 +2373,21 @@ pub(crate) fn ensure_symbol_loaded_inner(
     let client = YahooClient::new().map_err(|e| e.to_string())?;
     let _ = client.warm_session();
 
+    let started = Instant::now();
     match client.fetch_symbol(&symbol) {
         Ok(result) => {
-            apply_refresh_quote_if_current(
-        &EnrichmentGate::from_app(&state),
-        generation,
-        result,
-        is_crypto(&symbol),
-        is_etf(&symbol),
-    )
+            let outcome = apply_refresh_quote_if_current(
+                &EnrichmentGate::from_app(state),
+                generation,
+                started,
+                result,
+                is_crypto(&symbol),
+                is_etf(&symbol),
+            )
             .ok_or_else(|| "profile changed during detail load".to_string())?;
+            if outcome.visible {
+                request_demand_valuation_if_needed(&symbol, state, generation);
+            }
         }
         Err(_) => {
             // Quote may fail; candles below can still recover a price path.
@@ -2400,9 +2401,9 @@ pub(crate) fn ensure_symbol_loaded_inner(
     if let Ok(candles) = client.fetch_candles(&symbol, "1y", "1d") {
         if let Some(summary) = compute_chart_summary(&candles) {
             if !ingest_daily_chart_if_current(
-            &EnrichmentGate::from_app(&state),
-            generation,
-            symbol.clone(),
+                &EnrichmentGate::from_app(state),
+                generation,
+                symbol.clone(),
                 summary,
                 candles,
             ) {
@@ -2415,10 +2416,19 @@ pub(crate) fn ensure_symbol_loaded_inner(
         return Err("profile changed during detail load".into());
     }
 
-    // Deep multi-TF in background — detail UI already has price + daily chart.
+    spawn_detail_chart_enrichment(&symbol, state, generation, false);
+    Ok(symbol)
+}
+
+fn spawn_detail_chart_enrichment(
+    symbol: &str,
+    state: &AppState,
+    generation: u64,
+    fill_daily: bool,
+) {
     let fng_cache = Arc::clone(&state.fng_cache);
-    let gate = EnrichmentGate::from_app(&state);
-    let deep_symbol = symbol.clone();
+    let gate = EnrichmentGate::from_app(state);
+    let deep_symbol = symbol.to_string();
     let _ = thread::Builder::new()
         .name(format!("ensure-deep-{}", deep_symbol))
         .spawn(move || {
@@ -2429,94 +2439,136 @@ pub(crate) fn ensure_symbol_loaded_inner(
                 Ok(c) => c,
                 Err(_) => return,
             };
-            if let Ok(candles) = client.fetch_candles(&deep_symbol, "5y", "1wk") {
-                if let Some(summary) = compute_chart_summary(&candles) {
-                    let crypto = is_crypto(&deep_symbol);
-                    if !ingest_weekly_summary_if_current(
-            &gate,
-            generation,
-            deep_symbol.clone(),
-                        summary,
-                        crypto.then(|| candles.clone()),
-                    ) {
-                        return;
-                    }
-                    if crypto {
-                        let fng = fng_cache.get_cached().or_else(|| {
-                            let http = crate::crypto_cycle::crypto_client();
-                            let v = crate::crypto_cycle::fetch_fear_greed(&http).ok();
-                            if let Some(ref fng) = v {
-                                fng_cache.put(fng.clone());
-                            }
-                            v
-                        });
-                        let now_e = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        let metrics = crate::crypto_cycle::compute_crypto_score(
-                            &deep_symbol,
-                            &candles,
-                            Some(0),
-                            fng,
-                            now_e,
-                        );
-                        if !ingest_crypto_metrics_if_current(
-            &gate,
-            generation,
-            deep_symbol.clone(),
-                            metrics,
-                        ) {
-                            return;
+            let fetch_missing_chart = |part, request: ChartRequest| {
+                let needed = {
+                    let screener = gate.screener.lock().unwrap();
+                    generation_is_current(&gate.active_generation, generation)
+                        && detail_chart_missing(&screener, &deep_symbol, part)
+                };
+                if !needed {
+                    return None;
+                }
+                let candles = client
+                    .fetch_candles(&deep_symbol, request.range, request.interval)
+                    .ok()?;
+                let summary = compute_chart_summary(&candles)?;
+                Some((summary, candles))
+            };
+            if fill_daily {
+                let request = ChartRequest {
+                    range: "1y",
+                    interval: "1d",
+                };
+                if let Some((summary, candles)) =
+                    fetch_missing_chart(DetailChartPart::Daily, request)
+                {
+                    seed_missing_detail_daily(&gate, generation, &deep_symbol, summary, candles);
+                }
+            }
+            if let Some((summary, candles)) =
+                fetch_missing_chart(DetailChartPart::Weekly, BULK_CHART_REQUESTS[0].0)
+            {
+                let crypto = is_crypto(&deep_symbol);
+                if !ingest_weekly_summary_if_current(
+                    &gate,
+                    generation,
+                    deep_symbol.clone(),
+                    summary,
+                    crypto.then(|| candles.clone()),
+                ) {
+                    return;
+                }
+                if crypto {
+                    let fng = fng_cache.get_cached().or_else(|| {
+                        let http = crate::crypto_cycle::crypto_client();
+                        let v = crate::crypto_cycle::fetch_fear_greed(&http).ok();
+                        if let Some(ref fng) = v {
+                            fng_cache.put(fng.clone());
                         }
-                    }
-                }
-            }
-            if !generation_is_current(gate.active_generation.as_ref(), generation) {
-                return;
-            }
-            if let Ok(candles) = client.fetch_candles(&deep_symbol, "1mo", "1h") {
-                if let Some(summary) = compute_chart_summary(&candles) {
-                    if !ingest_hourly_summary_if_current(
-            &gate,
-            generation,
-            deep_symbol.clone(),
-                        summary,
-                    ) {
-                        return;
-                    }
-                }
-            }
-            if !generation_is_current(gate.active_generation.as_ref(), generation) {
-                return;
-            }
-            if let Ok(candles) = client.fetch_candles(
-                &deep_symbol,
-                DETAIL_MONTHLY_CHART_REQUEST.range,
-                DETAIL_MONTHLY_CHART_REQUEST.interval,
-            ) {
-                if let Some(summary) = compute_chart_summary(&candles) {
-                    let _ = ingest_monthly_summary_if_current(
-            &gate,
-            generation,
-            deep_symbol.clone(),
-                        summary,
+                        v
+                    });
+                    let now_e = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let metrics = crate::crypto_cycle::compute_crypto_score(
+                        &deep_symbol,
+                        &candles,
+                        Some(0),
+                        fng,
+                        now_e,
+                    );
+                    ingest_crypto_metrics_if_current(
+                        &gate,
+                        generation,
+                        deep_symbol.clone(),
+                        metrics,
                     );
                 }
             }
+            if let Some((summary, _)) =
+                fetch_missing_chart(DetailChartPart::Hourly, BULK_CHART_REQUESTS[1].0)
+            {
+                ingest_hourly_summary_if_current(&gate, generation, deep_symbol.clone(), summary);
+            }
+            if let Some((summary, _)) =
+                fetch_missing_chart(DetailChartPart::Monthly, DETAIL_MONTHLY_CHART_REQUEST)
+            {
+                ingest_monthly_summary_if_current(&gate, generation, deep_symbol, summary);
+            }
         });
+}
 
-    Ok(symbol)
+fn seed_missing_detail_daily(
+    gate: &EnrichmentGate,
+    generation: u64,
+    symbol: &str,
+    summary: crate::engine::ChartSummary,
+    candles: Vec<HistoricalCandle>,
+) {
+    gate.mutate(generation, |screener| {
+        if detail_chart_missing(screener, symbol, DetailChartPart::Daily) {
+            screener.ingest_chart_summary(symbol.to_string(), summary);
+            screener.ingest_daily_candles(symbol.to_string(), candles);
+        }
+    });
+}
+
+enum DetailChartPart {
+    Daily,
+    Weekly,
+    Hourly,
+    Monthly,
+}
+
+fn detail_chart_missing(
+    screener: &crate::engine::ScreenerState,
+    symbol: &str,
+    chart: DetailChartPart,
+) -> bool {
+    let charts = match chart {
+        DetailChartPart::Daily => &screener.chart_summaries,
+        DetailChartPart::Weekly => &screener.weekly_summaries,
+        DetailChartPart::Hourly => &screener.hourly_summaries,
+        DetailChartPart::Monthly => &screener.monthly_summaries,
+    };
+    !charts.contains_key(symbol)
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_candles(
     symbol: String,
     range: String,
-    _state: State<AppState>,
+    state: State<AppState>,
 ) -> Result<Vec<HistoricalCandle>, String> {
-    let client = YahooClient::new().map_err(|e| e.to_string())?;
-    let (range_str, interval_str) = match range.as_str() {
+    let symbol = symbol.trim().to_uppercase();
+    let range = detail_chart_request(&range)?.range;
+    let screener = state.screener.lock().unwrap();
+    Ok(cached_detail_candles(&screener, &symbol, range))
+}
+
+fn detail_chart_request(range: &str) -> Result<ChartRequest, String> {
+    let (range, interval) = match range {
         "1d" => ("1d", "5m"),
         "5d" => ("5d", "15m"),
         "1mo" => ("1mo", "1d"),
@@ -2525,11 +2577,214 @@ pub fn get_candles(
         "1y" => ("1y", "1wk"),
         "2y" => ("2y", "1wk"),
         "5y" => ("5y", "1mo"),
-        _ => ("3mo", "1d"),
+        _ => return Err("unsupported ticker chart range".into()),
     };
-    client
-        .fetch_candles(&symbol, range_str, interval_str)
-        .map_err(|e| e.to_string())
+    Ok(ChartRequest { range, interval })
+}
+
+fn candles_in_detail_range<'a>(
+    candles: &'a [HistoricalCandle],
+    range: &str,
+) -> &'a [HistoricalCandle] {
+    let months = match range {
+        "1mo" => 1,
+        "3mo" => 3,
+        _ => return candles,
+    };
+    let Some(cutoff) = candles
+        .last()
+        .and_then(|candle| chrono::DateTime::from_timestamp(candle.epoch_seconds, 0))
+        .and_then(|latest| latest.checked_sub_months(chrono::Months::new(months)))
+    else {
+        return candles;
+    };
+    let first = candles.partition_point(|candle| candle.epoch_seconds < cutoff.timestamp());
+    &candles[first..]
+}
+
+fn cached_detail_candles(
+    screener: &crate::engine::ScreenerState,
+    symbol: &str,
+    range: &str,
+) -> Vec<HistoricalCandle> {
+    if let Some(exact) = screener.detail_charts.get(symbol, range) {
+        return exact.to_vec();
+    }
+    if matches!(range, "1mo" | "3mo") {
+        if let Some(daily) = screener.daily_candles.get(symbol) {
+            return candles_in_detail_range(daily, range).to_vec();
+        }
+    }
+    Vec::new()
+}
+
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn load_symbol_candles(
+    symbol: String,
+    range: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<HistoricalCandle>, String> {
+    let symbol = detail_symbol(&symbol)?;
+    let range = detail_chart_request(&range)?;
+    let gate = EnrichmentGate::from_app(&state);
+    let generation = state.feed_generation.load(Ordering::SeqCst);
+    let started = Instant::now();
+    crate::tauri_compat::async_runtime::spawn_blocking(move || {
+        if !generation_is_current(&gate.active_generation, generation) {
+            return Err("profile changed before ticker chart load".into());
+        }
+        let client = YahooClient::new().map_err(|error| error.to_string())?;
+        let candles = client
+            .fetch_candles(&symbol, range.range, range.interval)
+            .map_err(|error| error.to_string())?;
+        store_detail_candles(&gate, generation, &symbol, range, started, candles)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn store_detail_candles(
+    gate: &EnrichmentGate,
+    generation: u64,
+    symbol: &str,
+    range: ChartRequest,
+    started: Instant,
+    mut candles: Vec<HistoricalCandle>,
+) -> Result<Vec<HistoricalCandle>, String> {
+    let mut screener = gate.screener.lock().unwrap();
+    if !generation_is_current(&gate.active_generation, generation) {
+        return Err("profile changed during ticker chart load".into());
+    }
+    if candles.is_empty() {
+        return Err("provider returned no ticker chart candles".into());
+    }
+    trim_detail_candles(&mut candles, range.range);
+    screener
+        .detail_charts
+        .insert(symbol, range.range, started, candles);
+    Ok(cached_detail_candles(&screener, symbol, range.range))
+}
+
+fn trim_detail_candles(candles: &mut Vec<HistoricalCandle>, range: &str) {
+    let trim = candles.len() - candles_in_detail_range(candles, range).len();
+    candles.drain(..trim);
+}
+
+fn detail_symbol(symbol: &str) -> Result<String, String> {
+    let symbol = symbol.trim().to_uppercase();
+    if symbol.is_empty() {
+        return Err("empty symbol".into());
+    }
+    Ok(symbol)
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DetailRefreshIssue {
+    QuoteUnavailable,
+    ChartUnavailable,
+}
+
+#[derive(Default, Serialize)]
+pub struct DetailRefreshOutcome {
+    quote_updated: bool,
+    chart_updated: bool,
+    issues: Vec<DetailRefreshIssue>,
+}
+
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn refresh_symbol_detail(
+    symbol: String,
+    range: String,
+    state: State<'_, AppState>,
+) -> Result<DetailRefreshOutcome, String> {
+    let symbol = detail_symbol(&symbol)?;
+    let range = detail_chart_request(&range)?;
+    let gate = EnrichmentGate::from_app(&state);
+    let generation = state.feed_generation.load(Ordering::SeqCst);
+    let started = Instant::now();
+    let requested_symbol = symbol.clone();
+    let outcome = crate::tauri_compat::async_runtime::spawn_blocking(move || {
+        if !generation_is_current(&gate.active_generation, generation) {
+            return Err("profile changed before ticker refresh".into());
+        }
+        let client = YahooClient::new().map_err(|error| error.to_string())?;
+        let quote = client.fetch_symbol_quote(&requested_symbol).ok();
+        if !generation_is_current(&gate.active_generation, generation) {
+            return Err("profile changed during ticker refresh".into());
+        }
+        let candles = client
+            .fetch_candles(&requested_symbol, range.range, range.interval)
+            .unwrap_or_default();
+        apply_detail_refresh(
+            &gate,
+            generation,
+            DetailRefresh {
+                symbol: &requested_symbol,
+                range,
+                started,
+                quote,
+                candles,
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if outcome.quote_updated {
+        request_demand_valuation_if_needed(&symbol, &state, generation);
+    }
+    if outcome.quote_updated || outcome.chart_updated {
+        spawn_detail_chart_enrichment(&symbol, &state, generation, true);
+    }
+    Ok(outcome)
+}
+
+struct DetailRefresh<'a> {
+    symbol: &'a str,
+    range: ChartRequest,
+    started: Instant,
+    quote: Option<crate::fetcher::FetchResult>,
+    candles: Vec<HistoricalCandle>,
+}
+
+fn apply_detail_refresh(
+    gate: &EnrichmentGate,
+    generation: u64,
+    refresh: DetailRefresh<'_>,
+) -> Result<DetailRefreshOutcome, String> {
+    let DetailRefresh {
+        symbol,
+        range,
+        started,
+        quote,
+        mut candles,
+    } = refresh;
+    let quote = quote.filter(|quote| {
+        quote.symbol == symbol
+            && quote.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.symbol == symbol && snapshot.market_price_cents > 0
+            })
+    });
+    let mut result = DetailRefreshOutcome::default();
+    if quote.is_none() {
+        result.issues.push(DetailRefreshIssue::QuoteUnavailable);
+    }
+    if candles.is_empty() {
+        result.issues.push(DetailRefreshIssue::ChartUnavailable);
+    }
+    trim_detail_candles(&mut candles, range.range);
+    gate.mutate(generation, |screener| {
+        if let Some(quote) = quote {
+            let (_, updated) =
+                ingest_current_quote(screener, started, quote, is_crypto(symbol), is_etf(symbol));
+            result.quote_updated = updated;
+        }
+        result.chart_updated = screener
+            .detail_charts
+            .insert(symbol, range.range, started, candles);
+    })
+    .then_some(result)
+    .ok_or_else(|| "profile changed during ticker refresh".into())
 }
 
 // Android DefaultDashboardRepository constants — concurrency kept modest so
@@ -3492,7 +3747,9 @@ mod feed_coordinator_tests {
                 ..Default::default()
             }),
         };
-        assert!(apply_refresh_quote_if_current(&gate, 1, quote, false, false).is_some());
+        assert!(
+            apply_refresh_quote_if_current(&gate, 1, Instant::now(), quote, false, false).is_some()
+        );
         bump(rank_ref, "quote", before);
 
         let before = rank.load(Ordering::Relaxed);
@@ -3995,7 +4252,14 @@ mod feed_coordinator_tests {
             std::sync::Arc::clone(&rank),
         );
         assert_eq!(
-            super::apply_refresh_quote_if_current(&gate, 4, old_quote, false, false),
+            super::apply_refresh_quote_if_current(
+                &gate,
+                4,
+                Instant::now(),
+                old_quote,
+                false,
+                false
+            ),
             None
         );
         let old_chart = vec![crate::engine::HistoricalCandle {
@@ -5063,15 +5327,43 @@ struct RefreshOutcome {
 fn apply_refresh_quote_if_current(
     gate: &EnrichmentGate,
     generation: u64,
+    started: Instant,
     result: crate::fetcher::FetchResult,
     crypto: bool,
     etf: bool,
 ) -> Option<RefreshOutcome> {
     let mut outcome = RefreshOutcome::default();
     gate.mutate(generation, |state| {
-        outcome = ingest_fetch_result(state, result, crypto, etf);
+        (outcome, _) = ingest_current_quote(state, started, result, crypto, etf);
     })
     .then_some(outcome)
+}
+
+fn ingest_current_quote(
+    state: &mut crate::engine::ScreenerState,
+    started: Instant,
+    result: crate::fetcher::FetchResult,
+    crypto: bool,
+    etf: bool,
+) -> (RefreshOutcome, bool) {
+    let symbol = result.symbol.clone();
+    if state
+        .quote_request_starts
+        .get(&symbol)
+        .is_some_and(|last| *last > started)
+    {
+        let visible = state
+            .snapshots
+            .get(&symbol)
+            .is_some_and(|snap| snap.market_price_cents > 0);
+        let enriched = visible && (crypto || etf || state.fundamentals.contains_key(&symbol));
+        return (RefreshOutcome { visible, enriched }, false);
+    }
+    let outcome = ingest_fetch_result(state, result, crypto, etf);
+    if outcome.visible {
+        state.quote_request_starts.insert(symbol, started);
+    }
+    (outcome, outcome.visible)
 }
 
 fn apply_refresh_chart_if_current(
@@ -5162,15 +5454,11 @@ fn refresh_one_symbol(
     let mut outcome = RefreshOutcome::default();
     let active_generation = gate.active_generation.as_ref();
 
+    let started = Instant::now();
     match client.fetch_symbol(sym) {
         Ok(result) => {
-            outcome = apply_refresh_quote_if_current(
-            gate,
-            generation,
-            result,
-            crypto,
-            etf,
-        )?;
+            outcome =
+                apply_refresh_quote_if_current(gate, generation, started, result, crypto, etf)?;
             if outcome.enriched {
                 if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
                     s.last_error = None;

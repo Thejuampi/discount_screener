@@ -132,7 +132,7 @@ With **one** long-lived `npm run tauri:dev:qa` already running, from `apps/windo
 
 ```text
 npm run ds-ui -- status
-npm run ds-ui -- open-detail COF
+npm run ds-ui -- open-detail COF --refresh
 npm run ds-ui -- dcf-slot
 npm run ds-ui -- invoke get_symbol_detail "{\"symbol\":\"COF\"}"
 npm run ds-ui -- screenshot

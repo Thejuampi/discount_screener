@@ -80,7 +80,8 @@ COMMANDS
                                default css: tr.stock-row, button, a, [role=button]
   type <css> <text>            set input value + input event
   nav <index|name>             click sidebar item (0-based index or label substring)
-  open-detail <SYMBOL>         Open Detail (prefers window.__DS_AGENT__ in DEV)
+  open-detail <SYMBOL> [--refresh]
+                               Open cached Detail, then optionally use Load or Refresh
   close-detail                 Close Detail via agent bridge / close button
   agent-snap                   window.__DS_AGENT__.snapshot() JSON
   dcf-slot                     text of .price-summary .dcf-slot
@@ -377,7 +378,23 @@ async function cmdNav(target) {
   });
 }
 
-async function cmdOpenDetail(symbol) {
+async function refreshOpenDetail(client, symbol) {
+  const selected = JSON.stringify(symbol);
+  await waitUntil(
+    `${symbol} detail refresh action`,
+    () => client.evaluate(`(() => {
+      const detail = document.querySelector(".detail-panel");
+      if (detail?.querySelector(".detail-symbol")?.textContent !== ${selected}) return false;
+      const action = detail.querySelector('[data-ui-action="refresh-detail"]:enabled');
+      if (!action) return false;
+      action.click();
+      return true;
+    })()`),
+    15_000,
+  );
+}
+
+async function cmdOpenDetail(symbol, refresh) {
   if (!symbol) throw new Error("open-detail requires <SYMBOL>");
   const sym = symbol.toUpperCase();
   await withClient(async (client) => {
@@ -391,12 +408,6 @@ async function cmdOpenDetail(symbol) {
 
     if (!viaAgent?.ok) {
       // Fallback: DOM path (Spanish sidebar = Mercados; English = Screener/Markets).
-      try {
-        await tauriInvoke(client, "ensure_symbol_loaded", { symbol: sym });
-      } catch {
-        /* optional */
-      }
-
       await client.evaluate(`(() => {
         const items = [...document.querySelectorAll(".sidebar-nav .sidebar-item")];
         const byLabel = items.find((n) =>
@@ -461,6 +472,8 @@ async function cmdOpenDetail(symbol) {
         })()`),
       15_000,
     );
+
+    if (refresh) await refreshOpenDetail(client, sym);
 
     // Remount is async: wait until slot leaves loading while selection stays on symbol.
     let dcfSlot = null;
@@ -581,6 +594,7 @@ async function cmdSelfCheck() {
             ),
           15_000,
         );
+        await refreshOpenDetail(client, smokeSym);
         const slot = await waitUntil(
           `${smokeSym} slot`,
           async () =>
@@ -850,7 +864,7 @@ async function main() {
       await cmdNav(args[0]);
       break;
     case "open-detail":
-      await cmdOpenDetail(args[0]);
+      await cmdOpenDetail(args[0], args.includes("--refresh"));
       break;
     case "close-detail":
       await cmdCloseDetail();

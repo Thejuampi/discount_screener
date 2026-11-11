@@ -12,6 +12,7 @@ mod crypto_cycle;
 mod crypto_md;
 mod db;
 mod dcf_model;
+mod detail_chart_cache;
 mod driver_resolution;
 mod edgar;
 mod email;
@@ -277,8 +278,10 @@ pub fn run() {
             commands::tipranks_delete_key,
             commands::tipranks_test_key,
             commands::get_candles,
+            commands::load_symbol_candles,
             commands::get_alerts,
             commands::refresh_symbol,
+            commands::refresh_symbol_detail,
             commands::search_tickers,
             commands::resolve_ticker_search_submit,
             commands::ensure_symbol_loaded,

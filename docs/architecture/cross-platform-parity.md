@@ -1,11 +1,16 @@
 # Cross-Platform Parity
 
-## Android Positions UX
+## Position Exposure
 
 Android shows stock exposure, research labels, local position facts, and a dashboard header that returns on upward scroll.
-Windows and desktop keep their existing presentation. No import, valuation, or score policy changes accompany this Android view.
-Partial stock totals suppress all weights. P/L uses paired value and cost coverage.
+Android Positions and Windows Advisor withhold weights when quote coverage is incomplete.
+P/L uses lots with both a market value and a cost basis. The views keep separate quote and P/L coverage.
 See [Android Positions](../product/android-positions.md) for the field and interaction contract.
+
+## Ticker Detail
+
+Android and Windows open Detail with available data and request ticker updates on demand.
+Android restores ticker detail from local storage. Windows reads the current session cache.
 
 Discount Screener has four clients: Rust desktop, Windows Tauri, native Android, and Flutter.
 

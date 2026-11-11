@@ -2051,6 +2051,7 @@ pub fn decision_state(
 #[derive(Default)]
 pub struct ScreenerState {
     pub snapshots: HashMap<String, MarketSnapshot>,
+    pub(crate) quote_request_starts: HashMap<String, std::time::Instant>,
     pub signals: HashMap<String, ExternalValuationSignal>,
     pub fundamentals: HashMap<String, FundamentalSnapshot>,
     pub chart_summaries: HashMap<String, ChartSummary>, // daily
@@ -2058,6 +2059,7 @@ pub struct ScreenerState {
     pub hourly_summaries: HashMap<String, ChartSummary>,
     pub monthly_summaries: HashMap<String, ChartSummary>,
     pub daily_candles: HashMap<String, Vec<HistoricalCandle>>, // for pattern detection
+    pub(crate) detail_charts: crate::detail_chart_cache::DetailChartCache,
     pub weekly_candles: HashMap<String, Vec<HistoricalCandle>>, // for crypto ATH/drawdown
     pub crypto_metrics: HashMap<String, crate::crypto_cycle::CryptoMetrics>,
     pub dcf_values: HashMap<String, i64>, // symbol → base dcf value in cents/share

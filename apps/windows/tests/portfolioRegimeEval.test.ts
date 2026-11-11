@@ -63,6 +63,21 @@ test("recommendBase: concentration and labels", () => {
   assert.equal(recommendBase("Hold", 10), "hold");
 });
 
+test("missing weight suppresses concentration without dropping independent signals", () => {
+  const result = evaluatePortfolioAgainstRegime({
+    regime: null,
+    lens: "long",
+    baseRiskPct: 1,
+    holdings: [
+      { symbol: "A", weightPct: 100, setupLabel: "StrongAvoid" },
+      { symbol: "B", weightPct: null, setupLabel: null },
+    ],
+    isShort: false,
+  });
+
+  assert.deepEqual(result.actionsBySymbol, { A: "exit", B: "noData" });
+});
+
 test("mult 0.6825 → effectiveRisk and ceiling", () => {
   const eval_ = evaluatePortfolioAgainstRegime({
     regime: regime({ new_risk_multiplier_bps: 6825 }),

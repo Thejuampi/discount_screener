@@ -4439,18 +4439,17 @@ mod tests {
     }
 
     /// Re-check before rename: if the proposed `.bad` appeared after it was
-    /// proposed (lost race), it must be skipped, never clobbered (a plain
-    /// `rename` of a symlink onto an existing file would silently replace it).
+    /// proposed (lost race), it must be skipped and preserved.
     #[test]
     fn quarantine_recheck_skips_destination_that_appeared() {
         let dir = tmpdir("quarantine-recheck");
         let path = dir.join("blob");
-        std::os::unix::fs::symlink(dir.join("missing-target"), &path).unwrap();
+        std::fs::write(&path, b"source").unwrap();
         let raced = dir.join("blob.bad.raced");
         std::fs::write(&raced, b"keep").unwrap();
         let fresh = dir.join("blob.bad.fresh");
         let mut calls = 0usize;
-        quarantine_input_blob_aside_with(&path, "symlink", |_, _| {
+        quarantine_input_blob_aside_with(&path, "file", |_, _| {
             calls += 1;
             if calls == 1 {
                 raced.clone()
@@ -4461,7 +4460,7 @@ mod tests {
         .unwrap();
         assert_eq!(calls, 2, "raced destination skipped, then retried");
         assert_eq!(std::fs::read(&raced).unwrap(), b"keep", "existing .bad untouched");
-        assert!(fresh.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"source");
         assert!(path.symlink_metadata().is_err(), "original moved aside");
     }
 
@@ -4492,21 +4491,21 @@ mod tests {
 
         // Every proposal taken -> Err after exactly N attempts, source intact.
         let path2 = dir.join("blob2");
-        std::os::unix::fs::symlink(dir.join("missing-target"), &path2).unwrap();
+        std::fs::write(&path2, b"source").unwrap();
         let mut calls2 = 0usize;
-        let err = quarantine_input_blob_aside_with(&path2, "symlink", |_, _| {
+        let err = quarantine_input_blob_aside_with(&path2, "file", |_, _| {
             calls2 += 1;
             taken.clone()
         })
         .unwrap_err();
         assert_eq!(calls2, BAD_QUARANTINE_RENAME_ATTEMPTS);
         assert!(err.contains("quarantine exhausted"), "{err}");
-        assert!(path2.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&path2).unwrap(), b"source");
         assert_eq!(std::fs::read(&taken).unwrap(), b"keep");
     }
 
     #[test]
-    fn write_input_blob_quarantines_symlink_and_directory() {
+    fn write_input_blob_quarantines_directory() {
         let dir = tmpdir("blob-special");
         let inputs = dir.join("inputs");
         std::fs::create_dir_all(&inputs).unwrap();
@@ -4519,7 +4518,15 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"payload-dir");
         let bad = inputs.join(format!("{hash}.bad"));
         assert!(bad.is_dir(), "directory quarantined to .bad");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn write_input_blob_quarantines_symlinks() {
+        let dir = tmpdir("blob-symlink");
+        let inputs = dir.join("inputs");
+        std::fs::create_dir_all(&inputs).unwrap();
         // Symlink-to-file occupying the blob name.
         let hash2 = "c".repeat(64);
         let path2 = inputs.join(&hash2);

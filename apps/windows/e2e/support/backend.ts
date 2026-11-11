@@ -12,6 +12,11 @@ type ForecastState =
   | "provider_unavailable";
 
 export interface E2eBackend {
+  symbolDetail: WebdriverIO.Mock;
+  ensureSymbolLoaded: WebdriverIO.Mock;
+  refreshSymbolDetail: WebdriverIO.Mock;
+  news: WebdriverIO.Mock;
+  priceProvenance: WebdriverIO.Mock;
   analystForecasts: WebdriverIO.Mock;
   loadForecasts: WebdriverIO.Mock;
   saveKey: WebdriverIO.Mock;
@@ -312,6 +317,7 @@ export async function startApp(
     localStorage.setItem("ds_dashboard_edition", "legacy");
   }, view);
 
+  await mockResolved("get_app_version", "0.1.0");
   await mockResolved("get_autostart_enabled", false);
   await mockResolved("list_universe_profiles", [
     { name: "sp500", description: "S&P 500", symbol_count: 1 },
@@ -358,12 +364,18 @@ export async function startApp(
     stale_snapshots: false,
   });
 
-  await mockResolved("get_symbol_detail", detail);
-  await mockResolved("ensure_symbol_loaded", "AAPL");
+  const symbolDetail = await mockResolved("get_symbol_detail", detail);
+  const ensureSymbolLoaded = await mockResolved("ensure_symbol_loaded", "AAPL");
   await mockResolved("refresh_symbol", "AAPL");
+  const refreshSymbolDetail = await mockResolved("refresh_symbol_detail", {
+    quote_updated: true,
+    chart_updated: true,
+    issues: [],
+  });
   await mockResolved("get_candles", []);
+  await mockResolved("load_symbol_candles", []);
   await mockResolved("get_symbol_history", []);
-  await mockResolved("get_news", {
+  const news = await mockResolved("get_news", {
     items: [],
     aggregate_sentiment: 0,
     positive_count: 0,
@@ -379,7 +391,7 @@ export async function startApp(
     sections: [],
     model_version: 4,
   });
-  await mockResolved("get_price_provenance", {
+  const priceProvenance = await mockResolved("get_price_provenance", {
     symbol: "AAPL",
     schwab_cents: null,
     yahoo_cents: 19_500,
@@ -427,5 +439,8 @@ export async function startApp(
     await window.__startVantageE2e();
   });
 
-  return { analystForecasts, loadForecasts, saveKey, testKey, deleteKey };
+  return {
+    symbolDetail, ensureSymbolLoaded, refreshSymbolDetail, news, priceProvenance,
+    analystForecasts, loadForecasts, saveKey, testKey, deleteKey,
+  };
 }

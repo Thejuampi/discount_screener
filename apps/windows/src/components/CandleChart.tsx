@@ -6,16 +6,19 @@ import {
   LineSeries,
   ColorType,
 } from "lightweight-charts";
-import type { IChartApi } from "lightweight-charts";
+import type { IChartApi, UTCTimestamp } from "lightweight-charts";
 import { api } from "../api";
 import type { Candle, ChartPattern, FibAnalysis } from "../api";
 import { drawPatternLines, drawFibLevels } from "../chartPatternDraw";
 import { CandleRequestCache } from "../candleRequestCache";
 import { observeChartWidth } from "../chartResizeObserver";
+import { useT } from "../i18n";
 
 interface Props {
   symbol: string;
   range: string;
+  cacheRevision: number;
+  loadRequest: number;
   patterns?: ChartPattern[];
   fib?: FibAnalysis | null;
   ema?: boolean;
@@ -64,45 +67,44 @@ export function calcMACD(closes: number[]) {
   return { macd: macd.slice(26), signal: signal.slice(8), hist };
 }
 
-export function CandleChart({ symbol, range, patterns, fib, ema = true, volume = true }: Props) {
+export function CandleChart({ symbol, range, cacheRevision, loadRequest, patterns, fib, ema = true, volume = true }: Props) {
+  const { t } = useT();
   const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
   const [candleCache] = useState(() => new CandleRequestCache<Candle[]>({
     cacheValue: (candles) => candles.length > 0,
   }));
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ symbol: string; range: string; candles: Candle[] } | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "empty" | "failed">("loading");
+  const [drawFailed, setDrawFailed] = useState(false);
+  const candles = result?.symbol === symbol && result.range === range ? result.candles : null;
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    void candleCache.load(symbol, `${range}:${cacheRevision}:${loadRequest}`, async () => {
+      const saved = await api.getCandles(symbol, range);
+      if (saved.length > 0 || !loadRequest || cancelled) return saved;
+      return api.loadSymbolCandles(symbol, range);
+    }).then((next) => {
+      if (cancelled) return;
+      if (next.length > 0) {
+        setResult({ symbol, range, candles: next });
+        setStatus("ready");
+      } else {
+        setStatus(loadRequest ? "failed" : "empty");
+      }
+    }).catch(() => {
+      if (!cancelled) setStatus("failed");
+    });
+    return () => { cancelled = true; };
+  }, [symbol, range, cacheRevision, loadRequest, candleCache]);
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    if (!container || !candles) return;
 
-    // Cancellation flag: if this effect re-runs (symbol/range changed) before
-    // the async fetch resolves, we must NOT create a chart from the stale data,
-    // otherwise multiple charts pile up in the DOM.
-    let cancelled = false;
-    let stopObserving: (() => void) | null = null;
-
-    // Cleanup previous chart synchronously
-    if (chartRef.current) {
-      chartRef.current.remove();
-      chartRef.current = null;
-    }
-    // Belt-and-suspenders: clear any orphaned chart canvases from the container
-    // (in case prior fetches resolved out of order before this effect ran)
-    container.innerHTML = "";
-
-    setLoading(true);
-    setError(null);
-
-    candleCache.load(symbol, range, () => api.getCandles(symbol, range)).then((candles: Candle[]) => {
-      if (cancelled) return;   // ← stale fetch, drop it
-      if (candles.length === 0) {
-        setLoading(false);
-        setError("No candle data available");
-        return;
-      }
-
+    let startedChart: IChartApi | undefined;
+    try {
       const h = container.clientHeight || 400;
 
       const chart = createChart(container, {
@@ -120,7 +122,7 @@ export function CandleChart({ symbol, range, patterns, fib, ema = true, volume =
         rightPriceScale: { borderColor: "#334155" },
         timeScale: { borderColor: "#334155", timeVisible: true },
       });
-      chartRef.current = chart;
+      startedChart = chart;
 
       // Candlestick series
       const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -133,11 +135,11 @@ export function CandleChart({ symbol, range, patterns, fib, ema = true, volume =
       });
 
       const closes = candles.map((c) => c.close_cents / 100);
-      const times = candles.map((c) => c.epoch_seconds as any);
+      const times = candles.map((c) => c.epoch_seconds as UTCTimestamp);
 
       candleSeries.setData(
-        candles.map((c) => ({
-          time: c.epoch_seconds as any,
+        candles.map((c, i) => ({
+          time: times[i],
           open: c.open_cents / 100,
           high: c.high_cents / 100,
           low: c.low_cents / 100,
@@ -147,47 +149,47 @@ export function CandleChart({ symbol, range, patterns, fib, ema = true, volume =
 
       // EMA 20 + 50
       if (ema) {
-      const ema20 = calcEMA(closes, 20);
-      const emaSeries = chart.addSeries(LineSeries, {
-        color: "#f59e0b",
-        lineWidth: 1,
-        title: "EMA20",
-        priceLineVisible: false,
-      });
-      emaSeries.setData(
-        times.slice(19).map((t: any, i: number) => ({ time: t, value: ema20[i + 19] }))
-      );
-
-      if (closes.length > 50) {
-        const ema50 = calcEMA(closes, 50);
-        const ema50Series = chart.addSeries(LineSeries, {
-          color: "#818cf8",
+        const ema20 = calcEMA(closes, 20);
+        const emaSeries = chart.addSeries(LineSeries, {
+          color: "#f59e0b",
           lineWidth: 1,
-          title: "EMA50",
+          title: "EMA20",
           priceLineVisible: false,
         });
-        ema50Series.setData(
-          times.slice(49).map((t: any, i: number) => ({ time: t, value: ema50[i + 49] }))
+        emaSeries.setData(
+          times.slice(19).map((time, i) => ({ time, value: ema20[i + 19] }))
         );
-      }
+
+        if (closes.length > 50) {
+          const ema50 = calcEMA(closes, 50);
+          const ema50Series = chart.addSeries(LineSeries, {
+            color: "#818cf8",
+            lineWidth: 1,
+            title: "EMA50",
+            priceLineVisible: false,
+          });
+          ema50Series.setData(
+            times.slice(49).map((time, i) => ({ time, value: ema50[i + 49] }))
+          );
+        }
       }
 
       // Volume
       if (volume) {
-      chart.addPane();
-      const volSeries = chart.addSeries(HistogramSeries, {
-        color: "#334155",
-        priceFormat: { type: "volume" },
-        priceScaleId: "",
-      }, 1);
-      volSeries.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0 } });
-      volSeries.setData(
-        candles.map((c) => ({
-          time: c.epoch_seconds as any,
-          value: c.volume,
-          color: c.close_cents >= c.open_cents ? "#16a34a55" : "#dc262655",
-        }))
-      );
+        chart.addPane();
+        const volSeries = chart.addSeries(HistogramSeries, {
+          color: "#334155",
+          priceFormat: { type: "volume" },
+          priceScaleId: "",
+        }, 1);
+        volSeries.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0 } });
+        volSeries.setData(
+          candles.map((c, i) => ({
+            time: times[i],
+            value: c.volume,
+            color: c.close_cents >= c.open_cents ? "#16a34a55" : "#dc262655",
+          }))
+        );
       }
 
       // Chart patterns (detected on daily candles) — overlay only on
@@ -201,36 +203,28 @@ export function CandleChart({ symbol, range, patterns, fib, ema = true, volume =
       }
 
       chart.timeScale().fitContent();
-      setLoading(false);
-
-      // Resize observer
-      stopObserving = observeChartWidth(container, () => {
-        if (!cancelled) {
-          chart.applyOptions({ width: container.clientWidth });
-        }
+      const stopObserving = observeChartWidth(container, () => {
+        chart.applyOptions({ width: container.clientWidth });
       });
-    }).catch((e: any) => {
-      if (cancelled) return;
-      setLoading(false);
-      setError(String(e));
-    });
-
-    return () => {
-      cancelled = true;
-      stopObserving?.();
-      if (chartRef.current) {
-        chartRef.current.remove();
-        chartRef.current = null;
-      }
-      container.innerHTML = "";
-    };
-  }, [symbol, range, patterns, fib, ema, volume, candleCache]);
+      setDrawFailed(false);
+      return () => {
+        stopObserving();
+        chart.remove();
+      };
+    } catch {
+      startedChart?.remove();
+      setDrawFailed(true);
+    }
+  }, [candles, range, patterns, fib, ema, volume]);
 
   return (
-    <div className="chart-container">
-      {loading && <div className="chart-loading">Loading chart…</div>}
-      {error && <div className="chart-error">{error}</div>}
-      <div ref={containerRef} className="chart-inner" style={{ height: "470px" }} />
+    <div className={candles ? "chart-container" : "chart-container detail-chart--empty"}>
+      {status === "loading" && !candles && <div className="detail-chart-status" role="status">{t("detail.chartLoading")}</div>}
+      {status === "empty" && !candles && <div className="detail-chart-status">{t("detail.chartCacheEmpty")}</div>}
+      {(status === "failed" || (candles && drawFailed)) && (
+        <div className="detail-chart-status" role="status">{t("detail.chartUnavailable")}</div>
+      )}
+      {candles && <div ref={containerRef} className="chart-inner" style={{ height: "470px" }} />}
     </div>
   );
 }
