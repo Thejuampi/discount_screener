@@ -106,6 +106,12 @@ Read [the source architecture](docs/architecture/dcf-source-consistency.md) befo
 - Mutate numeric boundaries in both directions.
 - Name the consumer for every new engine field.
 
+| Rule | Review check |
+| --- | --- |
+| Start broad cross-platform ports with an inventory. | Before product edits, show Juan the missing features, partial equivalents, intentional differences, and proposed scope. Verify both normal entry points. |
+
+Use the [parity guide](docs/architecture/cross-platform-parity.md) for shared rules and documented exceptions.
+
 Before presenting a numerical conclusion:
 
 1. Compare it with a filing or fixture.

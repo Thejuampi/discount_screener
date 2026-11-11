@@ -5,6 +5,7 @@ Use this page to find the current source for each concern.
 ## Product
 
 - [Current functionality](product/current-functionality.md)
+- [Android and Vantage capability inventory](product/android-vantage-parity.md)
 - [Advisor CSV import](product/advisor-csv-import.md)
 - [Android Positions](product/android-positions.md)
 - [Android Earnings gate](product/earnings-gate.md)
