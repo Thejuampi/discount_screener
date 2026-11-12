@@ -1,4 +1,5 @@
 import { browser } from "@wdio/globals";
+import type { PortfolioPosition } from "../../src/api";
 
 type ForecastState =
   | "ready"
@@ -12,9 +13,26 @@ type ForecastState =
   | "provider_unavailable";
 
 export interface E2eBackend {
+  feedStatus: WebdriverIO.Mock;
+  opportunities: WebdriverIO.Mock;
+  androidLongV3: WebdriverIO.Mock;
+  setScoringModel: WebdriverIO.Mock;
+  portfolioList: WebdriverIO.Mock;
+  getWatchlist: WebdriverIO.Mock;
+  setWatchlistMember: WebdriverIO.Mock;
+  getTickerNote: WebdriverIO.Mock;
+  setTickerNote: WebdriverIO.Mock;
+  quotePrices: WebdriverIO.Mock;
+  savedUniverseRows: WebdriverIO.Mock;
+  getTrackedFeed: WebdriverIO.Mock;
+  setTrackedFeedMember: WebdriverIO.Mock;
+  requestFeedRefresh: WebdriverIO.Mock;
+  searchTickers: WebdriverIO.Mock;
   symbolDetail: WebdriverIO.Mock;
   ensureSymbolLoaded: WebdriverIO.Mock;
   refreshSymbolDetail: WebdriverIO.Mock;
+  candles: WebdriverIO.Mock;
+  loadCandles: WebdriverIO.Mock;
   news: WebdriverIO.Mock;
   priceProvenance: WebdriverIO.Mock;
   analystForecasts: WebdriverIO.Mock;
@@ -23,6 +41,26 @@ export interface E2eBackend {
   testKey: WebdriverIO.Mock;
   deleteKey: WebdriverIO.Mock;
 }
+
+export const initialFeedStatus = {
+  running: true,
+  symbols_loaded: 1,
+  symbols_total: 1,
+  last_error: null,
+  system_error: null,
+  profile_name: "sp500",
+  profile_locked: false,
+  stale_snapshots: false,
+  refresh: {
+    phase: "idle",
+    trigger: null,
+    processed: 0,
+    total: 0,
+    quote_failures: 0,
+    chart_failures: 0,
+    rate_limited: 0,
+  },
+};
 
 const quota = {
   provider_month: "2026-07",
@@ -162,7 +200,7 @@ function forecastPanel(state: ForecastState) {
   };
 }
 
-const opportunity = {
+export const opportunity = {
   symbol: "AAPL",
   company_name: "Apple Inc.",
   market_price_cents: 19_500,
@@ -198,8 +236,11 @@ const opportunity = {
   spark: [18_900, 19_100, 19_500],
 };
 
-const detail = {
+export const detail = {
   symbol: "AAPL",
+  detail_source: "session",
+  saved_at_epoch_seconds: null,
+  asset_type: "stock",
   company_name: "Apple Inc.",
   market_price_cents: 19_500,
   intrinsic_value_cents: 22_000,
@@ -307,23 +348,103 @@ async function mockResolved(command: string, value: unknown): Promise<WebdriverI
 
 export async function startApp(
   state: ForecastState = "ready",
-  view: "screener" | "settings" = "screener",
+  view: "screener" | "settings" | "estimates" | "advisor" = "screener",
   settingsStatusUnavailable = false,
+  overrides: {
+    opportunities?: readonly object[];
+    androidLongV3?: object;
+    savedUniverseRows?: readonly object[];
+    detail?: object | null;
+    candles?: object;
+    portfolioList?: readonly PortfolioPosition[] | null;
+    quotePrices?: Readonly<Record<string, number>>;
+    watchlist?: readonly string[] | null;
+    tickerNotes?: Readonly<Record<string, string>> | null;
+    trackedFeed?: { profile: string; symbols?: readonly string[]; editable?: boolean };
+  } = {},
 ): Promise<E2eBackend> {
-  await browser.execute((initialView) => {
+  const tracked = overrides.trackedFeed;
+  const rows = overrides.opportunities ?? [opportunity];
+  const profile = tracked?.profile ?? "sp500";
+  const editable = tracked?.editable ?? true;
+  const trackedSymbols = await browser.execute((initialView, initialWatchlist, initialTickerNotes, trackedFeed) => {
     localStorage.clear();
     localStorage.setItem("ds_lang", "en");
     localStorage.setItem("ds_view_mode", initialView);
     localStorage.setItem("ds_dashboard_edition", "legacy");
-  }, view);
+    if (initialWatchlist != null) {
+      sessionStorage.setItem("e2e_watchlist_backend", JSON.stringify(initialWatchlist));
+    }
+    if (initialTickerNotes != null) {
+      sessionStorage.setItem("e2e_ticker_notes_backend", JSON.stringify(initialTickerNotes));
+    }
+    if (trackedFeed === null) return null;
+    const key = `e2e_tracked_feed_members:${trackedFeed.profile}`;
+    if (trackedFeed.symbols !== null) {
+      sessionStorage.setItem(key, JSON.stringify(trackedFeed.symbols));
+    }
+    sessionStorage.setItem("e2e_tracked_feed_fixture", JSON.stringify(trackedFeed));
+    return JSON.parse(sessionStorage.getItem(key) ?? "[]") as string[];
+  }, view, overrides.watchlist ?? null, overrides.tickerNotes ?? null, tracked ? {
+    profile,
+    editable,
+    symbols: tracked.symbols ?? null,
+    rows: rows as readonly { symbol: string }[],
+  } : null);
 
   await mockResolved("get_app_version", "0.1.0");
   await mockResolved("get_autostart_enabled", false);
   await mockResolved("list_universe_profiles", [
-    { name: "sp500", description: "S&P 500", symbol_count: 1 },
+    { name: profile, description: profile === "qa" ? "QA" : "S&P 500", symbol_count: trackedSymbols?.length ?? 1 },
   ]);
   await mockResolved("get_market_regime", marketRegime);
-  await mockResolved("portfolio_list", []);
+  const portfolioList = await browser.tauri.mock("portfolio_list");
+  if (overrides.portfolioList === null) {
+    await portfolioList.mockRejectedValue("Saved positions unavailable");
+  } else {
+    await portfolioList.mockResolvedValue(overrides.portfolioList ?? []);
+  }
+  // The simulated database outlives the page. startApp clears app localStorage.
+  const getWatchlist = await browser.tauri.mock("get_watchlist");
+  if (overrides.watchlist === null) {
+    await getWatchlist.mockRejectedValue("Watchlist could not be read");
+  } else {
+    await getWatchlist.mockImplementation(() =>
+      JSON.parse(sessionStorage.getItem("e2e_watchlist_backend") ?? "[]"));
+  }
+  const setWatchlistMember = await browser.tauri.mock("set_watchlist_member");
+  await setWatchlistMember.mockImplementation(({ symbol, included }) => {
+    const members = new Set<string>(JSON.parse(sessionStorage.getItem("e2e_watchlist_backend") ?? "[]"));
+    if (included) members.add(symbol);
+    else members.delete(symbol);
+    sessionStorage.setItem("e2e_watchlist_backend", JSON.stringify([...members].sort()));
+    return null;
+  });
+  const getTickerNote = await browser.tauri.mock("get_ticker_note");
+  if (overrides.tickerNotes === null) {
+    await getTickerNote.mockRejectedValue("Ticker note could not be read");
+  } else {
+    await getTickerNote.mockImplementation(({ symbol }) => {
+      const notes = new Map<string, string>(Object.entries(
+        JSON.parse(sessionStorage.getItem("e2e_ticker_notes_backend") ?? "{}"),
+      ));
+      return notes.get(symbol) ?? null;
+    });
+  }
+  const setTickerNote = await browser.tauri.mock("set_ticker_note");
+  await setTickerNote.mockImplementation(({ symbol, note }) => {
+    const notes = new Map<string, string>(Object.entries(
+      JSON.parse(sessionStorage.getItem("e2e_ticker_notes_backend") ?? "{}"),
+    ));
+    if (note === null) notes.delete(symbol);
+    else notes.set(symbol, note);
+    sessionStorage.setItem("e2e_ticker_notes_backend", JSON.stringify(Object.fromEntries(notes)));
+    return null;
+  });
+  const quotePrices = await mockResolved("get_quote_prices", overrides.quotePrices ?? {});
+  await mockResolved("get_portfolio_risk", { per_symbol: [], correlation: [], high_corr_pairs: [], lookback_days: 120 });
+  await mockResolved("get_model_accuracy", []);
+  await mockResolved("journal_list", []);
   await mockResolved("email_config_get", {
     smtp_host: null,
     smtp_port: null,
@@ -338,33 +459,78 @@ export async function startApp(
     last_digest_date: null,
   });
   await mockResolved("get_scoring_model", "aggressive_v3");
+  const setScoringModel = await browser.tauri.mock("set_scoring_model");
+  await setScoringModel.mockImplementation(({ model }) => model);
   await mockResolved("set_regime_scoring_enabled", true);
-  await mockResolved("set_universe_profile", {
-    name: "sp500",
-    symbols_total: 1,
-    symbols_loaded: 1,
-    profile_locked: false,
+  const universe = {
+    name: profile,
+    symbols_total: trackedSymbols?.length ?? 1,
+    symbols_loaded: trackedSymbols?.length ?? 1,
+    profile_locked: !editable,
     stale_snapshots: false,
+  };
+  await mockResolved("set_universe_profile", universe);
+  await mockResolved("get_universe_profile", universe);
+  await mockResolved("start_feed", null);
+  const getTrackedFeed = await mockResolved("get_tracked_feed", { profile, symbols: ["AAPL"], editable });
+  const setTrackedFeedMember = await browser.tauri.mock("set_tracked_feed_member");
+  const opportunities = await browser.tauri.mock("get_opportunities");
+  const androidLongV3 = await mockResolved("get_android_long_v3", overrides.androidLongV3 ?? {
+    profile,
+    rows: [],
+    incomplete: [],
+    evaluated: 0,
+    eligible: 0,
   });
-  await mockResolved("get_universe_profile", {
-    name: "sp500",
-    symbols_total: 1,
-    symbols_loaded: 1,
-    profile_locked: false,
-    stale_snapshots: false,
+  const savedUniverseRows = await mockResolved("get_saved_universe_rows", overrides.savedUniverseRows ?? []);
+  const feedStatus = await mockResolved("get_feed_status", {
+    ...initialFeedStatus,
+    symbols_loaded: rows.length,
   });
-  await mockResolved("get_opportunities", [opportunity]);
-  await mockResolved("get_feed_status", {
-    running: true,
-    symbols_loaded: 1,
-    symbols_total: 1,
-    last_error: null,
-    profile_name: "sp500",
-    profile_locked: false,
-    stale_snapshots: false,
-  });
+  if (tracked) {
+    await getTrackedFeed.mockImplementation(({ profile }) => {
+      const fixture = JSON.parse(sessionStorage.getItem("e2e_tracked_feed_fixture")!);
+      if (profile !== fixture.profile) throw new Error("Unexpected profile");
+      const symbols = JSON.parse(sessionStorage.getItem(`e2e_tracked_feed_members:${profile}`) ?? "[]");
+      return { profile, symbols, editable: fixture.editable };
+    });
+    await setTrackedFeedMember.mockImplementation(({ profile, symbol, included }) => {
+      const fixture = JSON.parse(sessionStorage.getItem("e2e_tracked_feed_fixture")!);
+      if (profile !== fixture.profile || !fixture.editable) throw new Error("Feed edit refused");
+      const key = `e2e_tracked_feed_members:${profile}`;
+      const symbols = new Set<string>(JSON.parse(sessionStorage.getItem(key) ?? "[]"));
+      if (included) symbols.add(symbol);
+      else symbols.delete(symbol);
+      sessionStorage.setItem(key, JSON.stringify([...symbols]));
+      return { profile, symbols: [...symbols], editable: true };
+    });
+    await opportunities.mockImplementation(() => {
+      const fixture = JSON.parse(sessionStorage.getItem("e2e_tracked_feed_fixture")!);
+      const symbols = JSON.parse(sessionStorage.getItem(`e2e_tracked_feed_members:${fixture.profile}`) ?? "[]");
+      return fixture.rows.filter((row: { symbol: string }) => symbols.includes(row.symbol));
+    });
+    await feedStatus.mockImplementation(() => {
+      const fixture = JSON.parse(sessionStorage.getItem("e2e_tracked_feed_fixture")!);
+      const symbols = JSON.parse(sessionStorage.getItem(`e2e_tracked_feed_members:${fixture.profile}`) ?? "[]");
+      const loaded = fixture.rows.filter((row: { symbol: string }) => symbols.includes(row.symbol)).length;
+      return {
+        running: symbols.length > 0,
+        symbols_loaded: loaded,
+        symbols_total: symbols.length,
+        last_error: null,
+        system_error: null,
+        profile_name: fixture.profile,
+        profile_locked: !fixture.editable,
+        stale_snapshots: false,
+      };
+    });
+  } else {
+    await opportunities.mockResolvedValue(rows);
+  }
+  const requestFeedRefresh = await mockResolved("request_feed_refresh", null);
+  const searchTickers = await mockResolved("search_tickers", []);
 
-  const symbolDetail = await mockResolved("get_symbol_detail", detail);
+  const symbolDetail = await mockResolved("get_symbol_detail", overrides.detail === undefined ? detail : overrides.detail);
   const ensureSymbolLoaded = await mockResolved("ensure_symbol_loaded", "AAPL");
   await mockResolved("refresh_symbol", "AAPL");
   const refreshSymbolDetail = await mockResolved("refresh_symbol_detail", {
@@ -372,8 +538,8 @@ export async function startApp(
     chart_updated: true,
     issues: [],
   });
-  await mockResolved("get_candles", []);
-  await mockResolved("load_symbol_candles", []);
+  const candles = await mockResolved("get_candles", overrides.candles ?? null);
+  const loadCandles = await mockResolved("load_symbol_candles", []);
   await mockResolved("get_symbol_history", []);
   const news = await mockResolved("get_news", {
     items: [],
@@ -440,7 +606,10 @@ export async function startApp(
   });
 
   return {
-    symbolDetail, ensureSymbolLoaded, refreshSymbolDetail, news, priceProvenance,
+    feedStatus, opportunities, androidLongV3, setScoringModel, portfolioList, getWatchlist, setWatchlistMember,
+    getTickerNote, setTickerNote, quotePrices,
+    savedUniverseRows, getTrackedFeed, setTrackedFeedMember, requestFeedRefresh, searchTickers,
+    symbolDetail, ensureSymbolLoaded, refreshSymbolDetail, candles, loadCandles, news, priceProvenance,
     analystForecasts, loadForecasts, saveKey, testKey, deleteKey,
   };
 }

@@ -1,0 +1,66 @@
+.markets-upside {
+  margin: var(--space-3) var(--space-4);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.markets-upside p {
+  margin: 0;
+}
+
+.markets-upside__retry {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.markets-upside__scroll {
+  overflow-x: auto;
+}
+
+.markets-upside table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.markets-upside :is(th, td) {
+  padding: var(--space-2);
+  border-block-end: 1px solid var(--border-default);
+  vertical-align: top;
+}
+
+.markets-upside th {
+  text-align: left;
+}
+
+.markets-upside .markets-upside__amount {
+  text-align: right;
+}
+
+.markets-upside__ticker {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font: 600 12px var(--font-mono);
+  cursor: pointer;
+}
+
+.markets-upside__ticker:is(:hover, [aria-pressed="true"]) {
+  border-color: var(--accent);
+}
+
+.markets-upside__company {
+  display: block;
+  margin-block-start: var(--space-1);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.markets-upside__missing {
+  color: var(--text-3);
+}

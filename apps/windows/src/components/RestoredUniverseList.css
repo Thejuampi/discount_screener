@@ -1,0 +1,47 @@
+.restored-universe {
+  margin: var(--space-4);
+  overflow-x: auto;
+  color: var(--text-2);
+}
+
+.restored-universe h2,
+.restored-universe__status {
+  color: var(--warning);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.restored-universe h2 { margin: 0 0 var(--space-2); }
+.restored-universe__status { margin: var(--space-4); }
+
+.restored-universe table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 12px;
+}
+
+.restored-universe :is(th, td) {
+  border-bottom: 1px solid var(--border-default);
+  padding: var(--space-2);
+}
+
+.restored-universe .restored-universe__value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.restored-universe__ticker {
+  color: var(--text-1);
+  background: var(--surface-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  padding: var(--space-1) var(--space-2);
+  font: 600 12px var(--font-mono);
+  cursor: pointer;
+}
+
+.restored-universe__ticker:is(:hover, [aria-pressed="true"]) {
+  border-color: var(--accent);
+}

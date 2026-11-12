@@ -1,0 +1,87 @@
+.android-v3 {
+  margin: var(--space-3) var(--space-4);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.android-v3 p {
+  margin: 0 0 var(--space-2);
+}
+
+.android-v3__scroll {
+  overflow-x: auto;
+}
+
+.android-v3 table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.android-v3 :is(th, td) {
+  padding: var(--space-2);
+  border-block-end: 1px solid var(--border-default);
+  text-align: left;
+  vertical-align: top;
+}
+
+.android-v3 tbody td {
+  white-space: nowrap;
+}
+
+.android-v3 :is(th, td):nth-child(n+3):nth-child(-n+6) {
+  text-align: right;
+}
+
+.android-v3 th button,
+.android-v3 li button {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font: 600 12px var(--font-mono);
+  cursor: pointer;
+}
+
+.android-v3 button:is(:hover, [aria-pressed="true"]) {
+  border-color: var(--accent);
+}
+
+.android-v3__secondary {
+  display: block;
+  margin-block-start: var(--space-1);
+  color: var(--text-3);
+  font-weight: 400;
+  white-space: normal;
+}
+
+.android-v3__issue {
+  color: var(--warning-strong);
+  white-space: normal;
+}
+
+.android-v3 details {
+  margin-block: var(--space-3);
+}
+
+.android-v3 summary {
+  cursor: pointer;
+}
+
+.android-v3 ul {
+  margin: var(--space-2) 0;
+  padding: 0;
+  list-style: none;
+}
+
+.android-v3 li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-block-end: 1px solid var(--border-default);
+}

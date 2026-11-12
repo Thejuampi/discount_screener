@@ -1,0 +1,82 @@
+.detail-position-held {
+  display: inline-block;
+  margin-inline-end: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-full);
+  background: var(--accent-tint);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detail-position-read-failed {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.detail-position-lots {
+  min-inline-size: 0;
+  padding-block: var(--space-3);
+  border-block: 1px solid var(--border-default);
+}
+
+.detail-position-lots h2 {
+  margin: 0 0 var(--space-2);
+  color: var(--text-1);
+  font-size: 14px;
+}
+
+.detail-position-lots__scroll {
+  overflow-x: auto;
+}
+
+.detail-position-lots table {
+  width: 100%;
+  min-inline-size: 24rem;
+  border-collapse: collapse;
+  color: var(--text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail-position-lots th,
+.detail-position-lots td {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border-default);
+  text-align: right;
+  vertical-align: top;
+}
+
+.detail-position-lots th:first-child {
+  padding-inline-start: 0;
+  text-align: left;
+}
+
+.detail-position-lots thead th {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.detail-position-lots tbody th,
+.detail-position-lots td {
+  white-space: nowrap;
+}
+
+.detail-position-lots tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.detail-position-lots__secondary {
+  display: block;
+  margin-block-start: var(--space-1);
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.detail-position-lots p {
+  margin: var(--space-2) 0 0;
+  color: var(--text-3);
+  font-size: 12px;
+}

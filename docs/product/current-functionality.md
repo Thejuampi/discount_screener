@@ -48,18 +48,58 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 ### Windows Workstation
 
 - Opportunity scoring, Quant Lens, and residual-income / FCFF valuation.
+- Markets opens on Opportunities. It also has an Upside view for the active feed.
+- Both views number rows after filters and sorting. Restored rows and incomplete inputs appear in their own sections.
+- Upside divides the difference between the session target and price by the price.
+- Upside keeps zero and negative values. It places tickers with unavailable values after those with usable values.
+- Estimates withholds the index DCF projection. It shows DCF coverage and offers a per-ticker QA audit.
+- Estimates uses the active universe. Each analyst endpoint requires a positive target, session price, and market cap.
+- Each endpoint weights the covered companies' price gaps by market cap. The range requires coverage at both endpoints.
+- Estimates shows timed return as unavailable because the analyst targets have no dates in the report.
+- In Markets Opportunities, choose Android Long V3 to rank the active feed's equities with Android scoring.
+- Android Long V3 uses the current session, Headless ranking rules, and one-year weekly candles.
+- The mode shows incomplete valuation and unavailable inputs. Dashboard, Advisor, Detail, and alerts use Vantage scoring.
 - Advisor CSV import: holdings snapshot vs Chase 90-day blotter. Warn, then confirm.
-- Vantage requests compact Yahoo summaries and batches missing Advisor prices.
+- Advisor requests prices, signals, and risk inputs for each held ticker, including tickers outside the selected universe.
+- The feed and on-demand requests fill a shared session cache. Changing the universe keeps available Portfolio evidence.
+- Portfolio calculates setup and regime fit from session ticker evidence. The legacy model uses the portfolio for sector comparisons.
+- Portfolio shows unavailable signals when the required evidence is missing. It retries missing data while the page stays open.
 - Advisor shows quote coverage and withholds portfolio weights when the quote coverage is incomplete.
 - Advisor calculates unrealized P/L from lots that have both a quote and a usable cost basis.
 - Portfolio risk percentages and position sizing require a complete portfolio value.
-- Detail opens with available session data. It shows Load without cached data and Refresh when data is available.
+- Detail opens with available session data or a saved snapshot for the active universe. It shows Load or Refresh.
+- Detail loads one local multiline note per ticker, even when market data is unavailable.
+- Save note stores the draft in SQLite. Vantage restores saved notes after restart and across universe changes.
+- Use Delete note or save an empty draft to remove a note.
+- Use Watch or Unwatch in Detail to change Watchlist membership.
+- Open Watchlist from the sidebar. Each saved ticker opens Detail, even when its session price is unavailable.
+- Vantage stores Watchlist membership in SQLite. It keeps the same list after restart or a universe change.
+- The Watchlist uses available session quotes. Membership changes leave the active feed universe intact.
+- In Markets, open Feed tickers to add or remove a ticker from the selected universe.
+- Vantage saves each universe's changes in SQLite and restores them after restart.
+- Removed tickers leave the scheduled feed and ranking. Detail can still load a ticker on request.
+- Vantage protects QA and launch-locked universes from membership changes.
+- Detail marks a ticker Held when the saved Advisor book contains a matching lot.
+- Detail shows each lot's shares, average cost, session price, unrealized P/L, and portfolio weight.
+- Detail reads the book locally. Session quotes support P/L, and weights require a complete portfolio value.
+- Without a session quote, the lot keeps its shares and cost. Detail shows which market fields are unavailable.
+- Vantage saves visited and refreshed ticker Detail when it has a usable session quote.
+- After restart, Detail marks saved quotes and evidence as restored and shows the save time.
+- At startup, the Screener lists saved rows for the active universe under Restored rows.
+- Each restored row shows its saved price, any available target, and the save time.
+- A usable session quote replaces the corresponding restored row.
+- Restored rows, Detail, and candles stay outside the inputs for ranking and alerts.
 - Load and Refresh request data for the selected ticker. Detail keeps available data when a request fails.
+- Detail reads saved candles for the selected ticker and range on demand. It marks them as restored and shows the save time.
+- A matching session series replaces the restored candles independently of the quote.
 - Chart range controls request missing candles on demand. Additional provider data also needs an explicit request.
 - SEC insider results follow a bounded freshness interval. Financial residual income reruns when its inputs change.
 - Vantage scores opportunity rows outside the shared screener lock after it captures one input view.
 - Vantage queues chart enrichment when each symbol becomes visible, including symbols that arrive late.
 - Vantage ignores older opportunity responses after a universe change.
+- The toolbar Refresh button requests a quote and daily-chart pass for the active universe.
+- Refresh keeps available rows visible. The status bar shows pass progress and separate feed and system errors.
+- See [Windows feed refresh validation](../operations/windows-feed-refresh.md) for the baseline and offline checks.
 
 ### Android App
 
@@ -71,7 +111,7 @@ The clients rank public companies from quotes, analyst targets, candles, local p
 - Empty year charts enter bounded retry rounds.
 - System shows active errors only. Recovered errors stay in stored history.
 - DCF disagreement does not dispute analyst ranges while the model remains provisional.
-- Estimates withholds the index DCF projection. Analyst gaps show no timed return or zero without target coverage.
+- Estimates withholds the index DCF projection. Analyst endpoints require target coverage. Timed return requires a target date.
 - Aggressive opportunity scoring selected by default with legacy scoring available.
 - Tracked, opportunity, watchlist, system, and detail surfaces.
 - Symbol detail with EMA/price/MACD charts, valuation, consensus, evidence, alerts, chart range selection, and replay controls.

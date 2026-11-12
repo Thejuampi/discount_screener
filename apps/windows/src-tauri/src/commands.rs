@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,14 +10,28 @@ use serde::Serialize;
 
 #[cfg(test)]
 mod detail_refresh_tests;
+#[cfg(test)]
+mod manual_feed_refresh_tests;
+#[cfg(test)]
+mod saved_candles_tests;
+#[cfg(test)]
+mod saved_detail_tests;
+#[cfg(test)]
+mod saved_universe_tests;
+#[cfg(test)]
+mod tracked_feed_tests;
 
 use crate::analyst_forecasts::{AnalystForecastPanel, ForecastPricePoint, TipRanksSettingsStatus};
+use crate::db::saved_universe::SavedUniverseRow;
 use crate::db::{BacktestResult, HistorySnapshot, SnapshotInsert};
 use crate::edgar;
 use crate::engine::{
     composite_score_v2, compute_chart_summary, compute_sector_benchmarks, compute_setup_score,
     decision_state, score_forecast_v2, score_fundamentals_v2, score_technicals_v3, AlertEvent,
     CandidateRow, ConfidenceBand, HistoricalCandle, InsiderData, SymbolDetail,
+};
+use crate::feed_refresh::{
+    AttemptIssues, FeedRefresh, InputAttempt, RefreshPhase, RefreshProgress,
 };
 use crate::fetcher::{
     asset_type, etf_sector, is_crypto, is_enrichment_complete, is_etf, is_list_ready,
@@ -30,13 +44,15 @@ use crate::opportunity_v3::{
 };
 use crate::profiles::{
     compose_universe, profile_definitions, profile_symbols, resolve_profile_membership,
-    resolve_profile_name, QA_MAX_SYMBOLS,
+    resolve_profile_name, resolve_tracked_feed_membership, TrackedFeedMembership, QA_MAX_SYMBOLS,
 };
-use crate::state::AppState;
+use crate::saved_detail::{DetailAssetType, DetailResponse, SavedTickerDetail};
+use crate::state::{AppState, FeedStatus};
 use crate::ticker_search::{
-    local_universe_candidates, merge_and_rank, normalize_search_query_key, remote_candidates,
-    remote_search_query_variants, resolve_search_submit, should_trigger_remote_search,
-    SearchSubmitOutcome, TickerSearchResult, YahooSearchQuote,
+    is_ticker_token, local_universe_candidates, merge_and_rank, normalize_search_query_key,
+    remote_candidates, remote_search_query_variants, resolve_search_submit,
+    should_trigger_remote_search, SearchSubmitOutcome, TickerSearchCandidate, TickerSearchResult,
+    YahooSearchQuote,
 };
 
 const SNAPSHOT_INTERVAL_SECS: u64 = 3600; // capture once per hour
@@ -145,6 +161,8 @@ pub struct FeedStatusResponse {
     pub symbols_loaded: usize,
     pub symbols_total: usize,
     pub last_error: Option<String>,
+    pub system_error: Option<String>,
+    pub refresh: RefreshProgress,
     pub profile_name: String,
     pub profile_locked: bool,
     pub stale_snapshots: bool,
@@ -164,6 +182,13 @@ pub struct UniverseProfileStatus {
     pub symbols_loaded: usize,
     pub profile_locked: bool,
     pub stale_snapshots: bool,
+}
+
+#[derive(Serialize)]
+pub struct TrackedFeedStatus {
+    profile: String,
+    symbols: Vec<String>,
+    editable: bool,
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -903,11 +928,93 @@ pub fn set_regime_scoring_enabled(enabled: bool, state: State<AppState>) -> bool
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]
-pub fn get_symbol_detail(symbol: String, state: State<AppState>) -> Option<SymbolDetail> {
+pub fn get_symbol_detail(
+    symbol: String,
+    state: State<AppState>,
+) -> Result<Option<DetailResponse>, String> {
+    read_ticker_detail(&symbol, &state)
+}
+
+fn read_ticker_detail(symbol: &str, state: &AppState) -> Result<Option<DetailResponse>, String> {
     let symbol = symbol.trim().to_uppercase();
+    if symbol.is_empty() {
+        return Ok(None);
+    }
+    // Serialize the profile selection, session capture and write. Release the
+    // screener lock before SQLite so feed ingest can continue.
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        let profile = state.active_profile.lock().unwrap().clone();
+        let asset_type = detail_asset_type(state, &symbol);
+        let session = match capture_session_ticker_detail(state, &symbol) {
+            Some((detail, true)) => {
+                save_session_ticker_detail(state, &profile, detail.clone(), asset_type);
+                return Ok(Some(DetailResponse::session(detail, asset_type)));
+            }
+            Some((detail, false)) => Some(DetailResponse::session(detail, asset_type)),
+            None => None,
+        };
+        match state.db.load_saved_ticker_detail(&profile, &symbol) {
+            Ok(Some(saved)) => Ok(Some(saved.restore())),
+            Ok(None) => Ok(session),
+            Err(error) if session.is_some() => {
+                state
+                    .feed_log
+                    .warn(&format!("restore ticker detail: {error}"));
+                Ok(session)
+            }
+            Err(error) => Err(error),
+        }
+    })
+}
+
+fn capture_session_ticker_detail(state: &AppState, symbol: &str) -> Option<(SymbolDetail, bool)> {
     let mut screener = state.screener.lock().unwrap();
-    screener.ensure_model_routed_valuation(&symbol);
-    screener.detail(&symbol)
+    screener.ensure_model_routed_valuation(symbol);
+    let detail = screener.detail(symbol)?;
+    // The daily chart can seed a visible session row without a quote. It
+    // cannot replace a previously saved quote.
+    let accepted_quote =
+        detail.market_price_cents > 0 && screener.quote_request_starts.contains_key(symbol);
+    Some((detail, accepted_quote))
+}
+
+fn detail_asset_type(state: &AppState, symbol: &str) -> Option<DetailAssetType> {
+    match asset_type(symbol) {
+        "etf" => Some(DetailAssetType::Etf),
+        "crypto" => Some(DetailAssetType::Crypto),
+        _ if state
+            .active_symbols
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == symbol) =>
+        {
+            Some(DetailAssetType::Stock)
+        }
+        _ => None,
+    }
+}
+
+fn save_session_ticker_detail(
+    state: &AppState,
+    profile: &str,
+    detail: SymbolDetail,
+    asset_type: Option<DetailAssetType>,
+) {
+    let Some(saved_at_epoch_ms) = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+    else {
+        state
+            .feed_log
+            .warn("save ticker detail: capture time unavailable");
+        return;
+    };
+    let saved = SavedTickerDetail::new(detail, asset_type, saved_at_epoch_ms);
+    if let Err(error) = state.db.save_ticker_detail(profile, &saved) {
+        state.feed_log.warn(&format!("save ticker detail: {error}"));
+    }
 }
 
 /// Deterministic native-E2E setup. This is inert in release builds and unless
@@ -1715,12 +1822,13 @@ pub fn get_alerts(state: State<AppState>) -> Vec<AlertEvent> {
 #[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_feed_status(state: State<AppState>) -> FeedStatusResponse {
     let status = state.feed_status.lock().unwrap();
-    let symbols_total = state.active_symbols.lock().unwrap().len();
     FeedStatusResponse {
         running: status.running,
         symbols_loaded: status.symbols_loaded,
-        symbols_total,
-        last_error: status.last_error.clone(),
+        symbols_total: status.symbols_total,
+        last_error: status.legacy_error(),
+        system_error: status.last_error.clone(),
+        refresh: status.refresh.progress(),
         profile_name: status.profile_name.clone(),
         profile_locked: state.is_profile_locked(),
         stale_snapshots: status.stale_snapshots,
@@ -1763,13 +1871,79 @@ pub fn set_universe_profile(
     Ok(universe_profile_status(&state))
 }
 
+#[cfg_attr(feature = "gui", tauri::command)]
+pub fn get_tracked_feed(
+    profile: String,
+    state: State<AppState>,
+) -> Result<TrackedFeedStatus, String> {
+    read_tracked_feed(&profile, &state)
+}
+
+#[cfg_attr(feature = "gui", tauri::command)]
+pub fn set_tracked_feed_member(
+    profile: String,
+    symbol: String,
+    included: bool,
+    state: State<AppState>,
+) -> Result<TrackedFeedStatus, String> {
+    set_tracked_feed_member_with(&profile, &symbol, included, &state, spawn_feed_workers)
+}
+
+fn tracked_feed_status(expected: &str, state: &AppState) -> Result<TrackedFeedStatus, String> {
+    let profile = state.active_profile.lock().unwrap().clone();
+    if resolve_profile_name(expected) != Some(profile.as_str()) {
+        return Err("Universe profile changed".into());
+    }
+    Ok(TrackedFeedStatus {
+        editable: state.customize_tracked_feed && !state.is_profile_locked() && profile != "qa",
+        profile,
+        symbols: state.active_symbols.lock().unwrap().as_ref().clone(),
+    })
+}
+
+fn read_tracked_feed(expected: &str, state: &AppState) -> Result<TrackedFeedStatus, String> {
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        tracked_feed_status(expected, state)
+    })
+}
+
+fn set_tracked_feed_member_with(
+    expected: &str,
+    symbol: &str,
+    included: bool,
+    state: &AppState,
+    spawn: impl FnOnce(&AppState, Arc<Vec<String>>, u64, FeedStartup) -> Result<(), String>,
+) -> Result<TrackedFeedStatus, String> {
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        let current = tracked_feed_status(expected, state)?;
+        if !current.editable {
+            return Err("Universe profile is read-only".into());
+        }
+        let symbol = crate::score_history::validate_symbol(symbol)?;
+        if current.symbols.contains(&symbol) == included {
+            return Ok(current);
+        }
+
+        let base = resolve_profile_membership(&current.profile, &state.db)?;
+        let mut overrides = state.db.tracked_feed_overrides(&current.profile)?;
+        overrides.retain(|(existing, _)| existing != &symbol);
+        overrides.push((symbol.clone(), included));
+        let membership = TrackedFeedMembership::new(base, overrides);
+        state
+            .db
+            .set_tracked_feed_override(&current.profile, &symbol, included)?;
+
+        // The roster is durable before workers start. A launch error belongs to feed status.
+        let _ = install_feed_membership(state, membership, true, spawn);
+        tracked_feed_status(&current.profile, state)
+    })
+}
+
 fn universe_profile_status(state: &AppState) -> UniverseProfileStatus {
-    let name = state.active_profile.lock().unwrap().clone();
-    let symbols_total = state.active_symbols.lock().unwrap().len();
     let status = state.feed_status.lock().unwrap();
     UniverseProfileStatus {
-        name,
-        symbols_total,
+        name: status.profile_name.clone(),
+        symbols_total: status.symbols_total,
         symbols_loaded: status.symbols_loaded,
         profile_locked: state.is_profile_locked(),
         stale_snapshots: status.stale_snapshots,
@@ -1811,7 +1985,10 @@ pub(crate) fn apply_universe_profile_android(
     state: &AppState,
 ) -> Result<(), String> {
     with_profile_apply_gate(&state.profile_apply_gate, || {
-        apply_universe_profile_serial_with(raw_name, state, resolve_android_membership)
+        apply_universe_profile_serial_with(raw_name, state, |name, db| {
+            resolve_android_membership(name, db)
+                .map(|profile| TrackedFeedMembership::new(profile, Vec::new()))
+        })
     })
 }
 
@@ -1830,13 +2007,19 @@ pub(crate) fn resolve_android_membership(
 }
 
 fn apply_universe_profile_serial(raw_name: &str, state: &AppState) -> Result<(), String> {
-    apply_universe_profile_serial_with(raw_name, state, resolve_profile_membership)
+    apply_universe_profile_serial_with(raw_name, state, |name, db| {
+        resolve_tracked_feed_membership(
+            name,
+            db,
+            state.customize_tracked_feed && !state.is_profile_locked(),
+        )
+    })
 }
 
 fn apply_universe_profile_serial_with(
     raw_name: &str,
     state: &AppState,
-    resolve: impl FnOnce(&str, &crate::db::Db) -> Result<crate::profiles::ResolvedProfile, String>,
+    resolve: impl FnOnce(&str, &crate::db::Db) -> Result<TrackedFeedMembership, String>,
 ) -> Result<(), String> {
     let requested = resolve_profile_name(raw_name)
         .ok_or_else(|| format!("unknown universe profile: {raw_name}"))?
@@ -1852,62 +2035,94 @@ fn apply_universe_profile_serial_with(
         }
     }
 
-    let resolved = resolve(&requested, &state.db)?;
-    if resolved.name == "qa" && resolved.symbols.len() > QA_MAX_SYMBOLS {
+    let membership = resolve(&requested, &state.db)?;
+    if membership.profile.name == "qa" && membership.profile.symbols.len() > QA_MAX_SYMBOLS {
         return Err(format!(
             "qa membership exceeded hard cap: {} > {QA_MAX_SYMBOLS}",
-            resolved.symbols.len()
+            membership.profile.symbols.len()
         ));
     }
 
-    let new_set: std::collections::HashSet<String> = resolved.symbol_set();
-    {
-        let current_name = state.active_profile.lock().unwrap().clone();
-        let current_symbols = state.active_symbols.lock().unwrap();
-        let current_set: std::collections::HashSet<String> =
-            current_symbols.iter().cloned().collect();
-        let feed_running = state.feed_status.lock().unwrap().running;
-        if feed_running && current_name == resolved.name && current_set == new_set {
-            // Same membership set — do not thrash workers.
+    install_feed_membership(state, membership, false, spawn_feed_workers)
+}
+
+fn install_feed_membership(
+    state: &AppState,
+    membership: TrackedFeedMembership,
+    preserve_session: bool,
+    spawn: impl FnOnce(&AppState, Arc<Vec<String>>, u64, FeedStartup) -> Result<(), String>,
+) -> Result<(), String> {
+    let resolved = membership.profile;
+    let new_set = resolved.symbol_set();
+    let previous: HashSet<_> = state
+        .active_symbols
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    let same_profile = *state.active_profile.lock().unwrap() == resolved.name;
+    let profile_name = resolved.name;
+    let symbols = Arc::new(resolved.symbols);
+    let preserve_session = preserve_session && same_profile;
+
+    let (generation, failed) = {
+        let status = state.feed_status.lock().unwrap();
+        if same_profile && previous == new_set && (status.running || symbols.is_empty()) {
             return Ok(());
+        }
+        let generation = state.feed_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        (generation, status.refresh.failed_symbols())
+    };
+    state.feed_wakeup.notify_all();
+    reset_initial_pass_completion(&state.initial_pass_completed_generation);
+
+    let mut startup = FeedStartup::default();
+    let gate = EnrichmentGate::from_app(state);
+    gate.mutate(generation, |screener| {
+        if preserve_session {
+            startup = FeedStartup::from_session(&symbols, &previous, &failed, screener);
+        } else {
+            screener.clear_universe();
+            startup.pending = symbols.as_ref().clone();
+        }
+        screener.set_feed_exclusions(membership.exclusions);
+    });
+    {
+        let mut schedules = state.edgar_feed_schedules.lock().unwrap();
+        if preserve_session {
+            schedules
+                .insiders
+                .next_attempt
+                .retain(|symbol, _| new_set.contains(symbol));
+            schedules
+                .financials
+                .attempts
+                .retain(|symbol, _| new_set.contains(symbol));
+        } else {
+            *schedules = EdgarFeedSchedules::default();
         }
     }
 
-    let profile_name = resolved.name.clone();
-    let symbols = Arc::new(resolved.symbols);
-    // Fail-closed gate immediately before spawning workers.
-    if profile_name == "qa" && symbols.len() > QA_MAX_SYMBOLS {
-        return Err(format!(
-            "qa refuse spawn: {} symbols > {QA_MAX_SYMBOLS}",
-            symbols.len()
-        ));
-    }
-
-    // Invalidate any in-flight workers from the previous universe.
-    let generation = state
-        .feed_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        + 1;
-    reset_initial_pass_completion(&state.initial_pass_completed_generation);
-
-    {
-        // Closed-world clear: bump rank_input via the central mutation helper so
-        // `/status` ranked_rows cannot keep a stale count across profile switches.
-        let gen = state.feed_generation.load(Ordering::SeqCst);
-        let _ = clear_universe_if_current(
-            &EnrichmentGate::from_app(&state),
-            gen,
-        );
-    }
     *state.active_profile.lock().unwrap() = profile_name.clone();
     *state.active_symbols.lock().unwrap() = Arc::clone(&symbols);
 
     {
         let mut status = state.feed_status.lock().unwrap();
-        status.running = true;
-        status.symbols_loaded = 0;
+        status.running = !symbols.is_empty();
+        status.symbols_loaded = startup.visible.len();
+        status.symbols_total = symbols.len();
         status.profile_name = profile_name.clone();
         status.stale_snapshots = resolved.stale_snapshots;
+        if preserve_session {
+            status
+                .refresh
+                .restart_for_membership(&new_set, startup.pending.len());
+        } else if symbols.is_empty() {
+            status.refresh = FeedRefresh::default();
+        } else {
+            status.refresh = FeedRefresh::startup(symbols.len());
+        }
         let mut err_parts = Vec::new();
         if let Some(e) = resolved.db_error {
             err_parts.push(format!("qa db fallback: {e}"));
@@ -1931,7 +2146,20 @@ fn apply_universe_profile_serial_with(
         state.is_profile_locked()
     ));
 
-    spawn_feed_workers(state, symbols, generation)
+    if symbols.is_empty() {
+        return Ok(());
+    }
+    if let Err(error) = spawn(state, symbols, generation, startup) {
+        let mut status = state.feed_status.lock().unwrap();
+        // A subset of workers may already have started before another spawn failed.
+        state.feed_generation.fetch_add(1, Ordering::SeqCst);
+        state.feed_wakeup.notify_all();
+        status.running = false;
+        status.refresh.finish(None);
+        status.last_error = Some(error.clone());
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn ingest_fetch_result(
@@ -1994,7 +2222,7 @@ pub fn set_scoring_model(model: String, state: State<AppState>) -> Result<String
     // current screener state; it is not a ranking *input*. The `/status`
     // ranked_rows cache key is (feed_generation, pass, rank_input_generation)
     // and must not invalidate on a model toggle alone. Profile/feed restart
-    // paths that need a recount bump rank_input via clear_universe_if_current.
+    // paths that need a recount bump rank_input through the enrichment gate.
     let normalized = ScoringModel::parse(&model).as_str().to_string();
     state.screener.lock().unwrap().scoring_model = normalized.clone();
     Ok(normalized)
@@ -2002,18 +2230,31 @@ pub fn set_scoring_model(model: String, state: State<AppState>) -> Result<String
 
 #[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_index_estimates(state: State<AppState>) -> crate::index_estimates::IndexEstimatesReport {
-    let profile_name = state.active_profile.lock().unwrap().clone();
-    let screener = state.screener.lock().unwrap();
-    let rows = screener.candidate_rows();
-    let selected_dcf = rows
-        .iter()
-        .filter_map(|row| {
-            screener
-                .selected_dcf_analysis(&row.symbol)
-                .cloned()
-                .map(|analysis| (row.symbol.clone(), analysis))
-        })
-        .collect();
+    index_estimates_for_active_profile(&state)
+}
+
+fn index_estimates_for_active_profile(
+    state: &AppState,
+) -> crate::index_estimates::IndexEstimatesReport {
+    let (profile_name, rows, selected_dcf) =
+        with_profile_apply_gate(&state.profile_apply_gate, || {
+            let profile_name = state.active_profile.lock().unwrap().clone();
+            let symbols = Arc::clone(&state.active_symbols.lock().unwrap());
+            let membership: HashSet<_> = symbols.iter().map(String::as_str).collect();
+            let screener = state.screener.lock().unwrap();
+            let mut rows = screener.candidate_rows();
+            rows.retain(|row| membership.contains(row.symbol.as_str()));
+            let selected_dcf = rows
+                .iter()
+                .filter_map(|row| {
+                    screener
+                        .selected_dcf_analysis(&row.symbol)
+                        .cloned()
+                        .map(|analysis| (row.symbol.clone(), analysis))
+                })
+                .collect();
+            (profile_name, rows, selected_dcf)
+        });
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -2260,21 +2501,7 @@ pub fn search_tickers(
         return Vec::new();
     }
 
-    let mut company_names = HashMap::new();
-    {
-        let screener = state.screener.lock().unwrap();
-        for (sym, snap) in &screener.snapshots {
-            if let Some(name) = &snap.company_name {
-                company_names.insert(sym.to_uppercase(), name.clone());
-            }
-        }
-    }
-
-    let active = state.active_symbols.lock().unwrap().clone();
-    let profile_name = state.active_profile.lock().unwrap().clone();
-    let universe: Vec<&str> = active.iter().map(|s| s.as_str()).collect();
-
-    let local = local_universe_candidates(trimmed, &universe, &company_names, &profile_name);
+    let local = local_ticker_candidates(trimmed, &state);
     let mut ranked = merge_and_rank(&local, limit);
 
     if should_trigger_remote_search(trimmed, &ranked) {
@@ -2285,6 +2512,44 @@ pub fn search_tickers(
     }
 
     ranked
+}
+
+fn local_ticker_candidates(query: &str, state: &AppState) -> Vec<TickerSearchCandidate> {
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        let mut company_names = HashMap::new();
+        {
+            let screener = state.screener.lock().unwrap();
+            for (sym, snap) in &screener.snapshots {
+                if let Some(name) = &snap.company_name {
+                    company_names.insert(sym.to_uppercase(), name.clone());
+                }
+            }
+        }
+
+        let active = state.active_symbols.lock().unwrap().clone();
+        let profile_name = state.active_profile.lock().unwrap().clone();
+        let universe: Vec<&str> = active.iter().map(|s| s.as_str()).collect();
+        let mut local = local_universe_candidates(query, &universe, &company_names, &profile_name);
+        if is_ticker_token(query)
+            && !local
+                .iter()
+                .any(|candidate| candidate.symbol.eq_ignore_ascii_case(query.trim()))
+        {
+            let symbol = query.trim().to_uppercase();
+            if let Ok(Some(saved)) = state.db.load_saved_ticker_detail(&profile_name, &symbol) {
+                local.push(TickerSearchCandidate {
+                    symbol,
+                    company_name: saved.detail.company_name,
+                    profiles: Vec::new(),
+                    in_current_profile: false,
+                    exchange: None,
+                    match_rank: crate::ticker_search::rank::EXACT_TICKER_OTHER,
+                    is_remote: false,
+                });
+            }
+        }
+        local
+    })
 }
 
 /// Resolve Yahoo search with query variants (spaced brand names often 404 empty).
@@ -2376,7 +2641,7 @@ pub(crate) fn ensure_symbol_loaded_inner(
     let started = Instant::now();
     match client.fetch_symbol(&symbol) {
         Ok(result) => {
-            let outcome = apply_refresh_quote_if_current(
+            let (outcome, _) = apply_refresh_quote_if_current(
                 &EnrichmentGate::from_app(state),
                 generation,
                 started,
@@ -2398,8 +2663,12 @@ pub(crate) fn ensure_symbol_loaded_inner(
         return Err("profile changed during detail load".into());
     }
 
+    let chart_started = Instant::now();
     if let Ok(candles) = client.fetch_candles(&symbol, "1y", "1d") {
         if let Some(summary) = compute_chart_summary(&candles) {
+            state
+                .market_data
+                .publish_daily(&symbol, chart_started, &candles);
             if !ingest_daily_chart_if_current(
                 &EnrichmentGate::from_app(state),
                 generation,
@@ -2455,6 +2724,7 @@ fn spawn_detail_chart_enrichment(
                 Some((summary, candles))
             };
             if fill_daily {
+                let started = Instant::now();
                 let request = ChartRequest {
                     range: "1y",
                     interval: "1d",
@@ -2462,6 +2732,8 @@ fn spawn_detail_chart_enrichment(
                 if let Some((summary, candles)) =
                     fetch_missing_chart(DetailChartPart::Daily, request)
                 {
+                    gate.market_data
+                        .publish_daily(&deep_symbol, started, &candles);
                     seed_missing_detail_daily(&gate, generation, &deep_symbol, summary, candles);
                 }
             }
@@ -2555,16 +2827,64 @@ fn detail_chart_missing(
     !charts.contains_key(symbol)
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DetailCandleSource {
+    Session,
+    Restored,
+}
+
+#[derive(Serialize)]
+pub struct DetailCandleSeries {
+    candles: Vec<HistoricalCandle>,
+    source: DetailCandleSource,
+    saved_at_epoch_seconds: Option<i64>,
+}
+
 #[cfg_attr(feature = "gui", tauri::command)]
 pub fn get_candles(
     symbol: String,
     range: String,
     state: State<AppState>,
-) -> Result<Vec<HistoricalCandle>, String> {
+) -> Result<Option<DetailCandleSeries>, String> {
+    read_detail_candles(&symbol, &range, &state)
+}
+
+fn read_detail_candles(
+    symbol: &str,
+    range: &str,
+    state: &AppState,
+) -> Result<Option<DetailCandleSeries>, String> {
+    let range = detail_chart_request(range)?.range;
     let symbol = symbol.trim().to_uppercase();
-    let range = detail_chart_request(&range)?.range;
-    let screener = state.screener.lock().unwrap();
-    Ok(cached_detail_candles(&screener, &symbol, range))
+    if symbol.is_empty() {
+        return Ok(None);
+    }
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        let profile = state.active_profile.lock().unwrap().clone();
+        let candles = cached_detail_candles(&state.screener.lock().unwrap(), &symbol, range);
+        if !candles.is_empty() {
+            save_session_detail_candles(state, &profile, &symbol, range, &candles);
+            return Ok(Some(DetailCandleSeries {
+                candles,
+                source: DetailCandleSource::Session,
+                saved_at_epoch_seconds: None,
+            }));
+        }
+        match state.db.load_detail_candles(&profile, &symbol, range) {
+            Ok(saved) => Ok(saved.map(|saved| DetailCandleSeries {
+                candles: saved.candles,
+                source: DetailCandleSource::Restored,
+                saved_at_epoch_seconds: Some(saved.saved_at_epoch_seconds),
+            })),
+            Err(error) => {
+                state
+                    .feed_log
+                    .warn(&format!("restore ticker candles: {error}"));
+                Ok(None)
+            }
+        }
+    })
 }
 
 fn detail_chart_request(range: &str) -> Result<ChartRequest, String> {
@@ -2627,20 +2947,34 @@ pub async fn load_symbol_candles(
     let symbol = detail_symbol(&symbol)?;
     let range = detail_chart_request(&range)?;
     let gate = EnrichmentGate::from_app(&state);
-    let generation = state.feed_generation.load(Ordering::SeqCst);
+    let generation = with_profile_apply_gate(&state.profile_apply_gate, || {
+        state.feed_generation.load(Ordering::SeqCst)
+    });
     let started = Instant::now();
-    crate::tauri_compat::async_runtime::spawn_blocking(move || {
+    let requested_symbol = symbol.clone();
+    let (candles, accepted) = crate::tauri_compat::async_runtime::spawn_blocking(move || {
         if !generation_is_current(&gate.active_generation, generation) {
             return Err("profile changed before ticker chart load".into());
         }
         let client = YahooClient::new().map_err(|error| error.to_string())?;
         let candles = client
-            .fetch_candles(&symbol, range.range, range.interval)
+            .fetch_candles(&requested_symbol, range.range, range.interval)
             .map_err(|error| error.to_string())?;
-        store_detail_candles(&gate, generation, &symbol, range, started, candles)
+        store_detail_candles(
+            &gate,
+            generation,
+            &requested_symbol,
+            range,
+            started,
+            candles,
+        )
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    if accepted {
+        persist_loaded_detail_candles(&state, generation, &symbol, range);
+    }
+    Ok(candles)
 }
 
 fn store_detail_candles(
@@ -2650,7 +2984,7 @@ fn store_detail_candles(
     range: ChartRequest,
     started: Instant,
     mut candles: Vec<HistoricalCandle>,
-) -> Result<Vec<HistoricalCandle>, String> {
+) -> Result<(Vec<HistoricalCandle>, bool), String> {
     let mut screener = gate.screener.lock().unwrap();
     if !generation_is_current(&gate.active_generation, generation) {
         return Err("profile changed during ticker chart load".into());
@@ -2659,10 +2993,56 @@ fn store_detail_candles(
         return Err("provider returned no ticker chart candles".into());
     }
     trim_detail_candles(&mut candles, range.range);
-    screener
+    let accepted = screener
         .detail_charts
         .insert(symbol, range.range, started, candles);
-    Ok(cached_detail_candles(&screener, symbol, range.range))
+    Ok((
+        cached_detail_candles(&screener, symbol, range.range),
+        accepted,
+    ))
+}
+
+fn persist_loaded_detail_candles(
+    state: &AppState,
+    generation: u64,
+    symbol: &str,
+    range: ChartRequest,
+) {
+    with_current_profile_generation(
+        &state.profile_apply_gate,
+        &state.feed_generation,
+        generation,
+        || {
+            let profile = state.active_profile.lock().unwrap().clone();
+            let candles = state
+                .screener
+                .lock()
+                .unwrap()
+                .detail_charts
+                .get(symbol, range.range)
+                .map(<[HistoricalCandle]>::to_vec);
+            if let Some(candles) = candles {
+                save_session_detail_candles(state, &profile, symbol, range.range, &candles);
+            }
+        },
+    );
+}
+
+fn save_session_detail_candles(
+    state: &AppState,
+    profile: &str,
+    symbol: &str,
+    range: &str,
+    candles: &[HistoricalCandle],
+) {
+    if let Err(error) = state
+        .db
+        .save_detail_candles(profile, symbol, range, candles)
+    {
+        state
+            .feed_log
+            .warn(&format!("save ticker candles: {error}"));
+    }
 }
 
 fn trim_detail_candles(candles: &mut Vec<HistoricalCandle>, range: &str) {
@@ -2701,7 +3081,9 @@ pub async fn refresh_symbol_detail(
     let symbol = detail_symbol(&symbol)?;
     let range = detail_chart_request(&range)?;
     let gate = EnrichmentGate::from_app(&state);
-    let generation = state.feed_generation.load(Ordering::SeqCst);
+    let generation = with_profile_apply_gate(&state.profile_apply_gate, || {
+        state.feed_generation.load(Ordering::SeqCst)
+    });
     let started = Instant::now();
     let requested_symbol = symbol.clone();
     let outcome = crate::tauri_compat::async_runtime::spawn_blocking(move || {
@@ -2730,6 +3112,10 @@ pub async fn refresh_symbol_detail(
     })
     .await
     .map_err(|error| error.to_string())??;
+    persist_detail_refresh(&state, generation, &symbol, &outcome);
+    if outcome.chart_updated {
+        persist_loaded_detail_candles(&state, generation, &symbol, range);
+    }
     if outcome.quote_updated {
         request_demand_valuation_if_needed(&symbol, &state, generation);
     }
@@ -2737,6 +3123,33 @@ pub async fn refresh_symbol_detail(
         spawn_detail_chart_enrichment(&symbol, &state, generation, true);
     }
     Ok(outcome)
+}
+
+fn persist_detail_refresh(
+    state: &AppState,
+    generation: u64,
+    symbol: &str,
+    outcome: &DetailRefreshOutcome,
+) {
+    if !outcome.quote_updated {
+        return;
+    }
+    let _ = with_current_profile_generation(
+        &state.profile_apply_gate,
+        &state.feed_generation,
+        generation,
+        || {
+            if let Some((detail, true)) = capture_session_ticker_detail(state, symbol) {
+                let profile = state.active_profile.lock().unwrap().clone();
+                save_session_ticker_detail(
+                    state,
+                    &profile,
+                    detail,
+                    detail_asset_type(state, symbol),
+                );
+            }
+        },
+    );
 }
 
 struct DetailRefresh<'a> {
@@ -2775,13 +3188,21 @@ fn apply_detail_refresh(
     trim_detail_candles(&mut candles, range.range);
     gate.mutate(generation, |screener| {
         if let Some(quote) = quote {
+            let evidence = quote.clone();
             let (_, updated) =
                 ingest_current_quote(screener, started, quote, is_crypto(symbol), is_etf(symbol));
             result.quote_updated = updated;
+            if updated {
+                gate.market_data.publish_quote(started, evidence);
+            }
         }
+        let daily = (range.range == "1y" && range.interval == "1d").then(|| candles.clone());
         result.chart_updated = screener
             .detail_charts
             .insert(symbol, range.range, started, candles);
+        if let Some(daily) = daily.filter(|_| result.chart_updated) {
+            gate.market_data.publish_daily(symbol, started, &daily);
+        }
     })
     .then_some(result)
     .ok_or_else(|| "profile changed during ticker refresh".into())
@@ -2986,6 +3407,26 @@ struct FinancialDcfSchedule {
     attempts: std::collections::HashMap<String, FinancialDcfAttempt>,
 }
 
+#[derive(Default)]
+pub(crate) struct EdgarFeedSchedules {
+    insiders: InsiderRefreshSchedule,
+    financials: FinancialDcfSchedule,
+}
+
+fn mutate_current_edgar_schedule(
+    schedules: &Mutex<EdgarFeedSchedules>,
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    apply: impl FnOnce(&mut EdgarFeedSchedules),
+) -> bool {
+    let mut schedules = schedules.lock().unwrap();
+    if !generation_is_current(active_generation, generation) {
+        return false;
+    }
+    apply(&mut schedules);
+    true
+}
+
 impl FinancialDcfSchedule {
     fn should_compute(&self, symbol: &str, key: &[u8], now: Instant, has_analysis: bool) -> bool {
         match self.attempts.get(symbol) {
@@ -3158,6 +3599,7 @@ use rank_input_seal::RankInputCounter;
 struct EnrichmentGate {
     active_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     screener: std::sync::Arc<Mutex<crate::engine::ScreenerState>>,
+    market_data: Arc<crate::market_data_cache::MarketDataCache>,
     rank_input: RankInputCounter,
 }
 
@@ -3166,6 +3608,7 @@ impl EnrichmentGate {
         Self {
             active_generation: std::sync::Arc::clone(&state.feed_generation),
             screener: std::sync::Arc::clone(&state.screener),
+            market_data: Arc::clone(&state.market_data),
             rank_input: RankInputCounter::from_app(state),
         }
     }
@@ -3179,6 +3622,7 @@ impl EnrichmentGate {
         Self {
             active_generation,
             screener,
+            market_data: Arc::default(),
             rank_input: RankInputCounter::for_test(rank_input),
         }
     }
@@ -3289,6 +3733,7 @@ fn ingest_insider_if_current(
     gate.mutate(generation, |state| state.ingest_insider(symbol, insider))
 }
 
+#[cfg(test)]
 fn clear_universe_if_current(gate: &EnrichmentGate, generation: u64) -> bool {
     gate.mutate(generation, |state| state.clear_universe())
 }
@@ -4104,8 +4549,13 @@ mod feed_coordinator_tests {
             generation
         ));
 
-        super::spawn_feed_workers(&state, std::sync::Arc::new(Vec::new()), generation)
-            .expect("spawn feed workers");
+        super::spawn_feed_workers(
+            &state,
+            std::sync::Arc::new(Vec::new()),
+            generation,
+            super::FeedStartup::default(),
+        )
+        .expect("spawn feed workers");
 
         let expected = 1 + super::ENRICHMENT_CONCURRENCY + 1; // feed-refresh + enrich-* + edgar-dcf
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -4284,6 +4734,49 @@ mod feed_coordinator_tests {
         assert_eq!(state.snapshots.len(), 1);
         assert!(state.snapshots.contains_key("NEW"));
         assert!(!state.chart_summaries.contains_key("OLD"));
+        assert!(gate.market_data.daily("OLD").is_none());
+        assert!(gate
+            .market_data
+            .demand_prices(vec!["OLD".into()], |_| Default::default())
+            .is_empty());
+    }
+
+    #[test]
+    fn accepted_feed_evidence_survives_profile_switch_outside_ranking() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let fixture = super::opportunity_projection_tests::fixture_state();
+        let fixture = fixture.lock().unwrap();
+        let active = Arc::new(AtomicU64::new(4));
+        let screener = Arc::new(Mutex::new(ScreenerState::new()));
+        let gate = EnrichmentGate::for_test(active.clone(), screener.clone(), Arc::default());
+        let quote = FetchResult {
+            symbol: "AAPL".into(),
+            snapshot: fixture.snapshots.get("AAPL").cloned(),
+            fundamentals: fixture.fundamentals.get("AAPL").cloned(),
+            signal: fixture.signals.get("AAPL").cloned(),
+        };
+        assert!(apply_refresh_quote_if_current(&gate, 4, Instant::now(), quote, false, false)
+            .unwrap()
+            .1);
+        assert!(apply_refresh_chart_if_current(
+            &gate,
+            4,
+            "AAPL",
+            fixture.daily_candles["AAPL"].clone(),
+            RefreshOutcome::default(),
+        ).is_some());
+        active.store(5, Ordering::SeqCst);
+        assert!(gate.mutate(5, ScreenerState::clear_universe));
+        assert!(screener.lock().unwrap().candidate_rows().is_empty());
+        assert!(screener.lock().unwrap().alerts.is_empty());
+        assert!(gate.market_data.quote("AAPL").is_some());
+        assert!(gate.market_data.daily("AAPL").is_some());
+        let prices = gate
+            .market_data
+            .demand_prices(vec!["AAPL".into()], |_| panic!("feed price was lost"));
+        assert_eq!(prices["AAPL"], 20_000);
     }
 
     #[test]
@@ -5331,12 +5824,16 @@ fn apply_refresh_quote_if_current(
     result: crate::fetcher::FetchResult,
     crypto: bool,
     etf: bool,
-) -> Option<RefreshOutcome> {
-    let mut outcome = RefreshOutcome::default();
+) -> Option<(RefreshOutcome, bool)> {
+    let mut quote = (RefreshOutcome::default(), false);
     gate.mutate(generation, |state| {
-        (outcome, _) = ingest_current_quote(state, started, result, crypto, etf);
+        let evidence = result.clone();
+        quote = ingest_current_quote(state, started, result, crypto, etf);
+        if quote.1 {
+            gate.market_data.publish_quote(started, evidence);
+        }
     })
-    .then_some(outcome)
+    .then_some(quote)
 }
 
 fn ingest_current_quote(
@@ -5366,10 +5863,22 @@ fn ingest_current_quote(
     (outcome, outcome.visible)
 }
 
+#[cfg(test)]
 fn apply_refresh_chart_if_current(
     gate: &EnrichmentGate,
     generation: u64,
     sym: &str,
+    candles: Vec<HistoricalCandle>,
+    outcome: RefreshOutcome,
+) -> Option<RefreshOutcome> {
+    apply_refresh_chart_at(gate, generation, sym, Instant::now(), candles, outcome)
+}
+
+fn apply_refresh_chart_at(
+    gate: &EnrichmentGate,
+    generation: u64,
+    sym: &str,
+    started: Instant,
     candles: Vec<HistoricalCandle>,
     mut outcome: RefreshOutcome,
 ) -> Option<RefreshOutcome> {
@@ -5377,6 +5886,7 @@ fn apply_refresh_chart_if_current(
     let crypto = is_crypto(sym);
     let etf = is_etf(sym);
     gate.mutate(generation, |state| {
+            gate.market_data.publish_daily(sym, started, &candles);
             let Some(summary) = summary else { return };
             let close = summary.latest_close_cents;
             let already = state.snapshots.contains_key(sym);
@@ -5440,71 +5950,86 @@ fn apply_refresh_chart_if_current(
     .then_some(outcome)
 }
 
-/// Fetch one symbol progressively: price/name makes it visible immediately, while
-/// quoteSummary completeness controls only whether it remains in the retry set.
+#[derive(Default)]
+struct SymbolRefreshAttempt {
+    outcome: RefreshOutcome,
+    issues: AttemptIssues,
+    skipped: bool,
+}
+
+impl SymbolRefreshAttempt {
+    fn cooldown() -> Self {
+        Self {
+            issues: AttemptIssues::rate_limited(),
+            skipped: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fetch one symbol progressively. The fresh attempt and merged row have separate status.
 fn refresh_one_symbol(
-    client: &YahooClient,
     gate: &EnrichmentGate,
-    feed_status: &std::sync::Mutex<crate::state::FeedStatus>,
     generation: u64,
     sym: &str,
-) -> Option<RefreshOutcome> {
+    skip_on_cooldown: bool,
+    is_rate_limited: impl Fn() -> bool,
+    fetch_quote: impl FnOnce(&str) -> std::io::Result<crate::fetcher::FetchResult>,
+    fetch_chart: impl FnOnce(&str) -> std::io::Result<Vec<HistoricalCandle>>,
+    checkpoint: Option<&SavedUniverseCheckpoint>,
+) -> Option<SymbolRefreshAttempt> {
+    let active_generation = gate.active_generation.as_ref();
+    if !generation_is_current(active_generation, generation) {
+        return None;
+    }
+    if skip_on_cooldown && is_rate_limited() {
+        return Some(SymbolRefreshAttempt::cooldown());
+    }
     let crypto = is_crypto(sym);
     let etf = is_etf(sym);
-    let mut outcome = RefreshOutcome::default();
-    let active_generation = gate.active_generation.as_ref();
-
+    let mut attempt = SymbolRefreshAttempt::default();
     let started = Instant::now();
-    match client.fetch_symbol(sym) {
+    match fetch_quote(sym) {
         Ok(result) => {
-            outcome =
+            attempt.issues.quote = if is_enrichment_complete(&result, crypto, etf) {
+                InputAttempt::Ready
+            } else {
+                InputAttempt::Unavailable
+            };
+            let (outcome, accepted) =
                 apply_refresh_quote_if_current(gate, generation, started, result, crypto, etf)?;
-            if outcome.enriched {
-                if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
-                    s.last_error = None;
-                }) {
-                    return None;
-                }
+            attempt.outcome = outcome;
+            if let Some(checkpoint) = checkpoint.filter(|_| accepted) {
+                checkpoint.record(sym);
             }
         }
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("429") {
-                if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
-                    s.last_error = Some(
-                        "Yahoo rate-limited — retrying until full quote columns are available"
-                            .into(),
-                    );
-                }) {
-                    return None;
-                }
-            } else if !(msg.contains("404") || msg.contains("401") || msg.contains("403")) {
-                if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
-                    s.last_error = Some(format!("{sym}: {e}"));
-                }) {
-                    return None;
-                }
-            }
+            attempt.issues.quote = InputAttempt::Unavailable;
+            attempt.issues.rate_limited = crate::yahoo_session::is_rate_limit_error(&e);
         }
     }
 
     if !generation_is_current(active_generation, generation) {
         return None;
     }
+    attempt.issues.rate_limited |= is_rate_limited();
 
     // Year chart for spark/technicals — only attach to symbols already in the list,
     // or create crypto/ETF rows that can stand without analyst columns.
-    if let Ok(candles) = client.fetch_candles(sym, "1y", "1d") {
-        outcome = apply_refresh_chart_if_current(
-            &gate,
-            generation,
-            sym,
-            candles,
-            outcome,
-        )?;
+    match fetch_chart(sym) {
+        Ok(candles) if !candles.is_empty() => {
+            attempt.issues.chart = InputAttempt::Ready;
+            attempt.outcome =
+                apply_refresh_chart_at(gate, generation, sym, started, candles, attempt.outcome)?;
+        }
+        Ok(_) => attempt.issues.chart = InputAttempt::Unavailable,
+        Err(e) => {
+            attempt.issues.chart = InputAttempt::Unavailable;
+            attempt.issues.rate_limited |= crate::yahoo_session::is_rate_limit_error(&e);
+        }
     }
 
-    generation_is_current(active_generation, generation).then_some(outcome)
+    generation_is_current(active_generation, generation).then_some(attempt)
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]
@@ -5521,49 +6046,461 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
     })
 }
 
+#[cfg_attr(feature = "gui", tauri::command)]
+pub fn get_saved_universe_rows(
+    profile: String,
+    state: State<AppState>,
+) -> Result<Vec<SavedUniverseRow>, String> {
+    read_saved_universe_rows(&profile, &state)
+}
+
+fn read_saved_universe_rows(
+    profile: &str,
+    state: &AppState,
+) -> Result<Vec<SavedUniverseRow>, String> {
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        if profile != state.active_profile.lock().unwrap().as_str() {
+            return Err("Universe profile changed".into());
+        }
+        let symbols = Arc::clone(&state.active_symbols.lock().unwrap());
+        state
+            .db
+            .load_saved_universe_rows(profile, &symbols)
+            .map_err(|error| format!("Read saved universe rows: {error}"))
+    })
+}
+
+#[cfg_attr(feature = "gui", tauri::command)]
+pub fn request_feed_refresh(profile: String, state: State<AppState>) -> Result<(), String> {
+    request_feed_refresh_inner(&profile, &state)
+}
+
+fn request_feed_refresh_inner(profile: &str, state: &AppState) -> Result<(), String> {
+    with_profile_apply_gate(&state.profile_apply_gate, || {
+        queue_manual_refresh(profile, &state.feed_status, &state.feed_wakeup)
+    })
+}
+
+fn queue_manual_refresh(
+    profile: &str,
+    feed_status: &Mutex<FeedStatus>,
+    feed_wakeup: &Condvar,
+) -> Result<(), String> {
+    let mut status = feed_status.lock().unwrap();
+    if profile != status.profile_name {
+        return Err("Universe profile changed".into());
+    }
+    if !status.running {
+        return Err("Feed is not running".into());
+    }
+    let total = status.symbols_total;
+    if status.refresh.queue_manual(total) {
+        feed_wakeup.notify_all();
+    }
+    Ok(())
+}
+
+fn wait_for_recurring_pass(
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    feed_status: &Mutex<FeedStatus>,
+    feed_wakeup: &Condvar,
+    interval: Duration,
+) -> bool {
+    let still_current = |status: &FeedStatus| {
+        status.running && generation_is_current(active_generation, generation)
+    };
+    let (mut status, _) = feed_wakeup
+        .wait_timeout_while(feed_status.lock().unwrap(), interval, |status| {
+            still_current(status) && status.refresh.progress().phase == RefreshPhase::Idle
+        })
+        .unwrap();
+    let total = status.symbols_total;
+    still_current(&status) && status.refresh.begin_recurring(total)
+}
+
+fn wait_for_feed_retry(
+    active_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    feed_status: &Mutex<FeedStatus>,
+    feed_wakeup: &Condvar,
+    delay: Duration,
+) -> bool {
+    let (status, result) = feed_wakeup
+        .wait_timeout_while(feed_status.lock().unwrap(), delay, |status| {
+            status.running && generation_is_current(active_generation, generation)
+        })
+        .unwrap();
+    result.timed_out() && status.running && generation_is_current(active_generation, generation)
+}
+
+const SAVED_UNIVERSE_CHECKPOINT_SIZE: usize = 32;
+const SAVED_UNIVERSE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct PendingUniverseRows {
+    symbols: Vec<String>,
+    last_flush: Option<Instant>,
+}
+
+struct SavedUniverseCheckpoint {
+    db: Arc<crate::db::Db>,
+    feed_log: Arc<crate::feed_log::FeedLog>,
+    profile: String,
+    profile_gate: Arc<Mutex<()>>,
+    active_generation: Arc<std::sync::atomic::AtomicU64>,
+    generation: u64,
+    screener: Arc<Mutex<crate::engine::ScreenerState>>,
+    pending: Mutex<PendingUniverseRows>,
+}
+
+impl SavedUniverseCheckpoint {
+    fn new(state: &AppState, generation: u64) -> Self {
+        Self {
+            db: Arc::clone(&state.db),
+            feed_log: Arc::clone(&state.feed_log),
+            profile: state.active_profile.lock().unwrap().clone(),
+            profile_gate: Arc::clone(&state.profile_apply_gate),
+            active_generation: state.feed_generation_arc(),
+            generation,
+            screener: Arc::clone(&state.screener),
+            pending: Mutex::new(PendingUniverseRows::default()),
+        }
+    }
+
+    fn record(&self, symbol: &str) {
+        let mut pending = self.pending.lock().unwrap();
+        pending.symbols.push(symbol.to_owned());
+        if pending.symbols.len() >= SAVED_UNIVERSE_CHECKPOINT_SIZE
+            || pending
+                .last_flush
+                .is_none_or(|last| last.elapsed() >= SAVED_UNIVERSE_CHECKPOINT_INTERVAL)
+        {
+            self.flush_pending(&mut pending);
+        }
+    }
+
+    fn flush(&self) {
+        self.flush_pending(&mut self.pending.lock().unwrap());
+    }
+
+    fn flush_pending(&self, pending: &mut PendingUniverseRows) {
+        if pending.symbols.is_empty() {
+            return;
+        }
+        let symbols = std::mem::take(&mut pending.symbols);
+        pending.last_flush = Some(Instant::now());
+        let result = with_current_profile_generation(
+            &self.profile_gate,
+            &self.active_generation,
+            self.generation,
+            || {
+                let saved_at_epoch_seconds = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| error.to_string())?
+                    .as_secs() as i64;
+                let rows: Vec<_> = {
+                    let screener = self.screener.lock().unwrap();
+                    symbols
+                        .into_iter()
+                        .filter_map(|symbol| {
+                            let snapshot = screener.snapshots.get(&symbol)?;
+                            let target_price_cents = Some(snapshot.intrinsic_value_cents)
+                                .filter(|&value| value > 0)
+                                .or_else(|| {
+                                    let signal = screener.signals.get(&symbol)?;
+                                    Some(signal.fair_value_cents).filter(|&value| value > 0)
+                                });
+                            let company_name = snapshot
+                                .company_name
+                                .as_deref()
+                                .filter(|name| !name.trim().is_empty())
+                                .unwrap_or(&symbol)
+                                .chars()
+                                .take(256)
+                                .collect();
+                            let asset_type = asset_type(&symbol).to_owned();
+                            Some(SavedUniverseRow {
+                                symbol,
+                                company_name,
+                                market_price_cents: snapshot.market_price_cents,
+                                target_price_cents,
+                                asset_type,
+                                saved_at_epoch_seconds,
+                            })
+                        })
+                        .collect()
+                };
+                self.db
+                    .save_universe_rows(&self.profile, &rows)
+                    .map_err(|error| error.to_string())
+            },
+        );
+        if let Some(Err(error)) = result {
+            self.feed_log.warn(&format!("Save universe rows: {error}"));
+        }
+    }
+}
+
+struct FeedRefreshWorker<'a> {
+    gate: &'a EnrichmentGate,
+    generation: u64,
+    feed_status: &'a Mutex<FeedStatus>,
+    loaded: &'a AtomicUsize,
+    completed: &'a Mutex<HashSet<String>>,
+    enrichment_senders: &'a [std::sync::mpsc::Sender<String>],
+    total: usize,
+    checkpoint: Option<&'a SavedUniverseCheckpoint>,
+}
+
+impl FeedRefreshWorker<'_> {
+    fn run_batch(
+        &self,
+        symbols: &[String],
+        retry_incomplete: bool,
+        fetch: impl Fn(&str) -> Option<SymbolRefreshAttempt> + Sync,
+    ) -> Result<Option<Vec<String>>, String> {
+        let active_generation = &self.gate.active_generation;
+        let cursor = AtomicUsize::new(0);
+        let failed = Mutex::new(Vec::new());
+        let refreshed = thread::scope(|scope| -> Result<(), String> {
+            let mut handles = Vec::new();
+            for worker in 0..REFRESH_CONCURRENCY {
+                let (cursor, failed, fetch) = (&cursor, &failed, &fetch);
+                let handle = thread::Builder::new()
+                    .name(format!("feed-refresh-{worker}"))
+                    .spawn_scoped(scope, move || {
+                        while generation_is_current(active_generation, self.generation) {
+                            let Some(symbol) = symbols.get(cursor.fetch_add(1, Ordering::Relaxed))
+                            else {
+                                break;
+                            };
+                            let Some(attempt) = fetch(symbol) else { break };
+                            if attempt.outcome.visible
+                                && !queue_visible_symbol_for_enrichment(
+                                    symbol,
+                                    active_generation,
+                                    self.generation,
+                                    self.completed,
+                                    self.loaded,
+                                    self.feed_status,
+                                    self.enrichment_senders,
+                                    self.total,
+                                )
+                            {
+                                break;
+                            }
+                            if !mutate_current_feed_status(
+                                active_generation,
+                                self.generation,
+                                self.feed_status,
+                                |status| status.refresh.record(symbol, attempt.issues),
+                            ) {
+                                break;
+                            }
+                            if retry_incomplete
+                                && (attempt.skipped
+                                    || needs_enrichment_retry(
+                                        attempt.outcome,
+                                        &self.gate.screener.lock().unwrap(),
+                                        symbol,
+                                    ))
+                            {
+                                failed.lock().unwrap().push(symbol.clone());
+                            }
+                        }
+                    })
+                    .map_err(|error| format!("Start refresh worker: {error}"))?;
+                handles.push(handle);
+            }
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| "Refresh worker stopped unexpectedly".to_string())?;
+            }
+            Ok(())
+        });
+        if let Some(checkpoint) = self.checkpoint {
+            checkpoint.flush();
+        }
+        refreshed?;
+        Ok(
+            generation_is_current(active_generation, self.generation).then(|| {
+                let mut failed = failed.into_inner().unwrap();
+                failed.sort_unstable();
+                failed.dedup();
+                failed
+            }),
+        )
+    }
+
+    fn run_recurring_pass(
+        &self,
+        symbols: &[String],
+        feed_wakeup: &Condvar,
+        interval: Duration,
+        fetch: impl Fn(&str) -> Option<SymbolRefreshAttempt> + Sync,
+    ) -> Result<bool, String> {
+        let active_generation = &self.gate.active_generation;
+        if !wait_for_recurring_pass(
+            active_generation,
+            self.generation,
+            self.feed_status,
+            feed_wakeup,
+            interval,
+        ) || self.run_batch(symbols, false, fetch)?.is_none()
+        {
+            return Ok(false);
+        }
+        Ok(mutate_current_feed_status(
+            active_generation,
+            self.generation,
+            self.feed_status,
+            |status| status.refresh.finish(None),
+        ))
+    }
+}
+
+#[derive(Default)]
+struct FeedStartup {
+    pending: Vec<String>,
+    visible: HashSet<String>,
+    enrichment: Vec<String>,
+    reuse_edgar_cik_map: bool,
+}
+
+impl FeedStartup {
+    fn from_session(
+        symbols: &[String],
+        previous: &HashSet<String>,
+        failed: &HashSet<String>,
+        screener: &crate::engine::ScreenerState,
+    ) -> Self {
+        let mut startup = Self {
+            reuse_edgar_cik_map: true,
+            ..Self::default()
+        };
+        for symbol in symbols {
+            let retained = previous.contains(symbol);
+            if !retained
+                || failed.contains(symbol)
+                || !symbol_state_enrichment_complete(screener, symbol)
+                || !screener.daily_candles.contains_key(symbol)
+            {
+                startup.pending.push(symbol.clone());
+            }
+            if retained
+                && screener
+                    .snapshots
+                    .get(symbol)
+                    .is_some_and(|quote| quote.market_price_cents > 0)
+            {
+                startup.visible.insert(symbol.clone());
+                if !screener.weekly_summaries.contains_key(symbol)
+                    || !screener.hourly_summaries.contains_key(symbol)
+                {
+                    startup.enrichment.push(symbol.clone());
+                }
+            }
+        }
+        startup
+    }
+}
+
+pub(crate) fn create_feed_yahoo_client(state: &AppState) -> std::io::Result<Arc<YahooClient>> {
+    market_data_client_loader(state)()
+}
+
+/// Capture the cache for a blocking worker. The client constructor also blocks.
+pub(crate) fn market_data_client_loader(
+    state: &AppState,
+) -> impl FnOnce() -> std::io::Result<Arc<YahooClient>> + Send + 'static {
+    let cache = state
+        .customize_tracked_feed
+        .then(|| Arc::clone(&state.feed_yahoo));
+    move || {
+        let Some(cache) = cache else {
+            return YahooClient::new().map(Arc::new);
+        };
+        let mut cached = cache
+            .lock()
+            .map_err(|_| std::io::Error::other("Yahoo session cache lock"))?;
+        if let Some(client) = cached.as_ref() {
+            return Ok(Arc::clone(client));
+        }
+        let client = Arc::new(YahooClient::new()?);
+        *cached = Some(Arc::clone(&client));
+        Ok(client)
+    }
+}
+
+fn load_edgar_feed_cik_map(
+    cache: Option<&Mutex<Option<HashMap<String, u64>>>>,
+    reuse: bool,
+    fetch: impl FnOnce() -> Result<HashMap<String, u64>, String>,
+) -> Result<HashMap<String, u64>, String> {
+    let Some(cache) = cache else { return fetch() };
+    let mut cache = cache.lock().unwrap();
+    if reuse {
+        if let Some(map) = cache.as_ref() {
+            return Ok(map.clone());
+        }
+    }
+    let map = fetch()?;
+    *cache = Some(map.clone());
+    Ok(map)
+}
+
 /// Spawn refresh / enrich / EDGAR / snapshot workers for symbols at generation.
 /// Workers exit when eed_generation no longer matches generation.
 fn spawn_feed_workers(
     state: &AppState,
     symbols: Arc<Vec<String>>,
     generation: u64,
+    startup: FeedStartup,
 ) -> Result<(), String> {
     let total = symbols.len();
+    let reuse_edgar_cik_map = startup.reuse_edgar_cik_map;
     let feed_gen = state.feed_generation_arc();
     // The single enrichment gate for this generation, minted from `state` so its
     // rank-input counter IS `state.rank_input_generation`. Workers only clone it.
     let gate = EnrichmentGate::from_app(state);
 
     // One shared client + session (Android: single YahooSession / OkHttp client).
-    let shared_client = match YahooClient::new() {
-        Ok(c) => Arc::new(c),
+    let shared_client = match create_feed_yahoo_client(state) {
+        Ok(client) => client,
         Err(e) => {
-            state.feed_status.lock().unwrap().last_error = Some(e.to_string());
-            state.feed_status.lock().unwrap().running = false;
+            let mut status = state.feed_status.lock().unwrap();
+            status.last_error = Some(e.to_string());
+            status.running = false;
+            status.refresh.finish(None);
             return Err(e.to_string());
         }
     };
-    let loaded = Arc::new(AtomicUsize::new(0));
-    let completed = Arc::new(std::sync::Mutex::new(
-        std::collections::HashSet::<String>::with_capacity(total),
-    ));
+    let loaded = AtomicUsize::new(startup.visible.len());
+    let completed = Mutex::new(startup.visible);
     let (enrichment_senders, enrichment_receivers): (Vec<_>, Vec<_>) = (0..ENRICHMENT_CONCURRENCY)
         .map(|_| std::sync::mpsc::channel::<String>())
         .unzip();
     let enrichment_senders = Arc::new(enrichment_senders);
+    for (index, symbol) in startup.enrichment.into_iter().enumerate() {
+        let _ = enrichment_senders[index % enrichment_senders.len()].send(symbol);
+    }
 
-    // ── Android-style refresh coordinator ───────────────────────────────────
+    // The initial pass retries incomplete rows. Recurring passes share one
+    // coordinator for timer and manual requests.
     {
         let symbols = Arc::clone(&symbols);
         let client = Arc::clone(&shared_client);
-        let screener = Arc::clone(&state.screener);
         let feed_status = Arc::clone(&state.feed_status);
+        let feed_wakeup = Arc::clone(&state.feed_wakeup);
         let feed_log = Arc::clone(&state.feed_log);
-        let loaded = Arc::clone(&loaded);
-        let completed = Arc::clone(&completed);
         let enrichment_senders = Arc::clone(&enrichment_senders);
         let feed_gen = Arc::clone(&feed_gen);
         let gate = gate.clone();
+        let checkpoint = state
+            .save_universe_rows
+            .then(|| SavedUniverseCheckpoint::new(state, generation));
         let initial_pass_completed_generation =
             Arc::clone(&state.initial_pass_completed_generation);
 
@@ -5579,203 +6516,110 @@ fn spawn_feed_workers(
                     symbols.len(),
                     feed_log.path().display()
                 ));
-                let mut pending: Vec<String> = symbols.iter().cloned().collect();
-
-                for round in 0..=MAX_RETRY_ROUNDS {
-                    if !generation_is_current(&feed_gen, generation) {
-                        return;
-                    }
-                    if pending.is_empty() {
-                        break;
-                    }
-                    if round > 0 {
-                        let cool = client.rate_limit_remaining_secs();
-                        let wait_ms = batch_retry_delay_ms(cool, round - 1);
-                        let pending_refs = pending_as_refs(&pending);
-                        feed_log.log_pending_retry(round, MAX_RETRY_ROUNDS, &pending_refs);
-                        if !mutate_current_feed_status(&feed_gen, generation, &feed_status, |s| {
-                            s.last_error = Some(format_incomplete_retry_status(
+                let worker = FeedRefreshWorker {
+                    gate: &gate,
+                    generation,
+                    feed_status: &feed_status,
+                    loaded: &loaded,
+                    completed: &completed,
+                    enrichment_senders: &enrichment_senders,
+                    total,
+                    checkpoint: checkpoint.as_ref(),
+                };
+                let fetch = |symbol: &str, skip_on_cooldown| {
+                    refresh_one_symbol(
+                        &gate,
+                        generation,
+                        symbol,
+                        skip_on_cooldown,
+                        || client.is_rate_limited(),
+                        |symbol| client.fetch_symbol(symbol),
+                        |symbol| client.fetch_candles(symbol, "1y", "1d"),
+                        checkpoint.as_ref(),
+                    )
+                };
+                let result = (|| -> Result<(), String> {
+                    let mut pending = startup.pending;
+                    for round in 0..=MAX_RETRY_ROUNDS {
+                        if !generation_is_current(&feed_gen, generation) {
+                            return Ok(());
+                        }
+                        if pending.is_empty() {
+                            break;
+                        }
+                        if round > 0 {
+                            let wait_ms =
+                                batch_retry_delay_ms(client.rate_limit_remaining_secs(), round - 1);
+                            feed_log.log_pending_retry(
                                 round,
                                 MAX_RETRY_ROUNDS,
-                                &pending,
-                            ));
-                        }) {
-                            return;
+                                &pending_as_refs(&pending),
+                            );
+                            let current = mutate_current_feed_status(
+                                &feed_gen,
+                                generation,
+                                &feed_status,
+                                |status| {
+                                    status.refresh.retrying(format_incomplete_retry_status(
+                                        round,
+                                        MAX_RETRY_ROUNDS,
+                                        &pending,
+                                    ));
+                                },
+                            );
+                            if !current
+                                || !wait_for_feed_retry(
+                                    &feed_gen,
+                                    generation,
+                                    &feed_status,
+                                    &feed_wakeup,
+                                    Duration::from_millis(wait_ms),
+                                )
+                            {
+                                return Ok(());
+                            }
                         }
-                        thread::sleep(std::time::Duration::from_millis(wait_ms));
-                        if !generation_is_current(&feed_gen, generation) {
-                            return;
-                        }
+                        let Some(failed) =
+                            worker.run_batch(&pending, true, |symbol| fetch(symbol, true))?
+                        else {
+                            return Ok(());
+                        };
+                        pending = failed;
                     }
 
-                    let batch = Arc::new(pending);
-                    let cursor = Arc::new(AtomicUsize::new(0));
-                    let failed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-                    let mut handles = Vec::new();
-
-                    for w in 0..REFRESH_CONCURRENCY {
-                        let batch = Arc::clone(&batch);
-                        let cursor = Arc::clone(&cursor);
-                        let failed = Arc::clone(&failed);
-                        let client = Arc::clone(&client);
-                        let screener = Arc::clone(&screener);
-                        let feed_status = Arc::clone(&feed_status);
-                        let loaded = Arc::clone(&loaded);
-                        let completed = Arc::clone(&completed);
-                        let enrichment_senders = Arc::clone(&enrichment_senders);
-                        let feed_gen = Arc::clone(&feed_gen);
-                        let gate = gate.clone();
-
-                        handles.push(
-                            thread::Builder::new()
-                                .name(format!("refresh-{w}"))
-                                .spawn(move || loop {
-                                    if !generation_is_current(&feed_gen, generation) {
-                                        break;
-                                    }
-                                    if client.is_rate_limited() {
-                                        loop {
-                                            let j = cursor.fetch_add(1, Ordering::Relaxed);
-                                            if j >= batch.len() {
-                                                break;
-                                            }
-                                            failed.lock().unwrap().push(batch[j].clone());
-                                        }
-                                        break;
-                                    }
-
-                                    let i = cursor.fetch_add(1, Ordering::Relaxed);
-                                    if i >= batch.len() {
-                                        break;
-                                    }
-                                    let sym = batch[i].as_str();
-                                    let Some(outcome) = refresh_one_symbol(
-                                        &client,
-                                        &gate,
-                                        &feed_status,
-                                        generation,
-                                        sym,
-                                    ) else {
-                                        break;
-                                    };
-                                    if outcome.visible {
-                                        if !queue_visible_symbol_for_enrichment(
-                                            sym,
-                                            &feed_gen,
-                                            generation,
-                                            &completed,
-                                            &loaded,
-                                            &feed_status,
-                                            &enrichment_senders,
-                                            total,
-                                        ) {
-                                            break;
-                                        }
-                                    }
-                                    let retry = {
-                                        let s = screener.lock().unwrap();
-                                        needs_enrichment_retry(outcome, &s, sym)
-                                    };
-                                    if retry {
-                                        failed.lock().unwrap().push(sym.to_string());
-                                    }
-                                })
-                                .expect("spawn refresh worker"),
-                        );
-                    }
-
-                    for h in handles {
-                        let _ = h.join();
-                    }
-                    if !generation_is_current(&feed_gen, generation) {
-                        return;
-                    }
-                    pending = failed.lock().unwrap().clone();
-                    pending.sort_unstable();
-                    pending.dedup();
-                }
-
-                if !generation_is_current(&feed_gen, generation) {
-                    return;
-                }
-
-                if !pending.is_empty() {
-                    let pending_refs = pending_as_refs(&pending);
-                    feed_log.log_terminal_incomplete(&pending_refs);
-                    if !mutate_current_feed_status(&feed_gen, generation, &feed_status, |s| {
-                        s.last_error = Some(format_terminal_incomplete_status(&pending));
+                    let startup_error = if pending.is_empty() {
+                        feed_log.info("feed initial enrichment complete: no pending symbols");
+                        None
+                    } else {
+                        feed_log.log_terminal_incomplete(&pending_as_refs(&pending));
+                        Some(format_terminal_incomplete_status(&pending))
+                    };
+                    if !mutate_current_feed_status(&feed_gen, generation, &feed_status, |status| {
+                        status.refresh.finish(startup_error)
                     }) {
-                        return;
+                        return Ok(());
                     }
-                } else {
-                    feed_log.info("feed initial enrichment complete: no pending symbols");
-                }
+                    let _ = mark_initial_pass_complete_if_current(
+                        &feed_gen,
+                        &initial_pass_completed_generation,
+                        generation,
+                    );
 
-                let _ = mark_initial_pass_complete_if_current(
-                    &feed_gen,
-                    &initial_pass_completed_generation,
-                    generation,
-                );
-
-                loop {
-                    thread::sleep(std::time::Duration::from_secs(FULL_REFRESH_INTERVAL_SECS));
-                    if !generation_is_current(&feed_gen, generation) {
-                        return;
-                    }
-                    let cursor = Arc::new(AtomicUsize::new(0));
-                    let mut handles = Vec::new();
-                    for w in 0..REFRESH_CONCURRENCY {
-                        let symbols = Arc::clone(&symbols);
-                        let cursor = Arc::clone(&cursor);
-                        let client = Arc::clone(&client);
-                        let feed_status = Arc::clone(&feed_status);
-                        let loaded = Arc::clone(&loaded);
-                        let completed = Arc::clone(&completed);
-                        let enrichment_senders = Arc::clone(&enrichment_senders);
-                        let feed_gen = Arc::clone(&feed_gen);
-                        let gate = gate.clone();
-                        handles.push(
-                            thread::Builder::new()
-                                .name(format!("refresh-loop-{w}"))
-                                .spawn(move || loop {
-                                    if !generation_is_current(&feed_gen, generation) {
-                                        break;
-                                    }
-                                    let i = cursor.fetch_add(1, Ordering::Relaxed);
-                                    if i >= symbols.len() {
-                                        break;
-                                    }
-                                    let sym = symbols[i].as_str();
-                                    let Some(outcome) = refresh_one_symbol(
-                                        &client,
-                                        &gate,
-                                        &feed_status,
-                                        generation,
-                                        sym,
-                                    ) else {
-                                        break;
-                                    };
-                                    if outcome.visible {
-                                        if !queue_visible_symbol_for_enrichment(
-                                            sym,
-                                            &feed_gen,
-                                            generation,
-                                            &completed,
-                                            &loaded,
-                                            &feed_status,
-                                            &enrichment_senders,
-                                            symbols.len(),
-                                        ) {
-                                            break;
-                                        }
-                                    }
-                                })
-                                .expect("spawn refresh loop worker"),
-                        );
-                    }
-                    for h in handles {
-                        let _ = h.join();
-                    }
+                    while worker.run_recurring_pass(
+                        &symbols,
+                        &feed_wakeup,
+                        Duration::from_secs(FULL_REFRESH_INTERVAL_SECS),
+                        |symbol| fetch(symbol, false),
+                    )? {}
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    let _ =
+                        mutate_current_feed_status(&feed_gen, generation, &feed_status, |status| {
+                            status.running = false;
+                            status.last_error = Some(error);
+                            status.refresh.finish(None);
+                        });
                 }
             })
             .map_err(|e| {
@@ -5783,6 +6627,7 @@ fn spawn_feed_workers(
                 let mut status = state.feed_status.lock().unwrap();
                 status.running = false;
                 status.last_error = Some(message.clone());
+                status.refresh.finish(None);
                 message
             })?;
     }
@@ -5963,6 +6808,10 @@ fn spawn_feed_workers(
         let feed_status = Arc::clone(&state.feed_status);
         let feed_gen = Arc::clone(&feed_gen);
         let gate = gate.clone();
+        let schedules = Arc::clone(&state.edgar_feed_schedules);
+        let cik_cache = state
+            .customize_tracked_feed
+            .then(|| Arc::clone(&state.edgar_cik_map));
 
         thread::Builder::new()
             .name("edgar-dcf".to_string())
@@ -5974,21 +6823,21 @@ fn spawn_feed_workers(
                     return;
                 }
                 let edgar_client = edgar::edgar_client();
-                let mut insider_schedule = InsiderRefreshSchedule::default();
-                let mut financial_dcf_schedule = FinancialDcfSchedule::default();
-
-                let cik_map: HashMap<String, u64> = match edgar::fetch_cik_map(&edgar_client) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let _ = mutate_current_feed_status(
-                            &feed_gen,
-                            generation,
-                            &feed_status,
-                            |status| status.last_error = Some(format!("EDGAR CIK: {e}")),
-                        );
-                        return;
-                    }
-                };
+                let cik_map =
+                    match load_edgar_feed_cik_map(cik_cache.as_deref(), reuse_edgar_cik_map, || {
+                        edgar::fetch_cik_map(&edgar_client)
+                    }) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            let _ = mutate_current_feed_status(
+                                &feed_gen,
+                                generation,
+                                &feed_status,
+                                |status| status.last_error = Some(format!("EDGAR CIK: {e}")),
+                            );
+                            return;
+                        }
+                    };
 
                 loop {
                     if !generation_is_current(&feed_gen, generation) {
@@ -6054,12 +6903,12 @@ fn spawn_feed_workers(
                             if let Some(fund) = fund {
                                 let key = financial_dcf_input_key(&fund, price);
                                 let now = Instant::now();
-                                if financial_dcf_schedule.should_compute(
-                                    sym,
-                                    &key,
-                                    now,
-                                    has_analysis,
-                                ) {
+                                let should_compute = schedules
+                                    .lock()
+                                    .unwrap()
+                                    .financials
+                                    .should_compute(sym, &key, now, has_analysis);
+                                if should_compute {
                                     let result = crate::dcf_model::compute_from_fundamentals(
                                         &fund,
                                         price,
@@ -6067,19 +6916,37 @@ fn spawn_feed_workers(
                                     );
                                     let success = if let Ok(analysis) = result {
                                         publish_financial_dcf_if_current(
-            &gate,
-            generation,
-            sym.to_string(),
+                                            &gate,
+                                            generation,
+                                            sym.to_string(),
                                             analysis,
                                         )
                                     } else {
                                         false
                                     };
-                                    financial_dcf_schedule.record_result(sym, key, now, success);
+                                    if !mutate_current_edgar_schedule(
+                                        &schedules,
+                                        &feed_gen,
+                                        generation,
+                                        |schedules| {
+                                            schedules
+                                                .financials
+                                                .record_result(sym, key, now, success)
+                                        },
+                                    ) {
+                                        return;
+                                    }
                                 }
                             }
                         } else {
-                            financial_dcf_schedule.forget(sym);
+                            if !mutate_current_edgar_schedule(
+                                &schedules,
+                                &feed_gen,
+                                generation,
+                                |schedules| schedules.financials.forget(sym),
+                            ) {
+                                return;
+                            }
                             if matches!(
                                 business_class,
                                 crate::dcf_model::BusinessClass::Unclassified
@@ -6087,32 +6954,29 @@ fn spawn_feed_workers(
                             ) {
                                 // Closed-world refusal also clears any legacy value restored
                                 // before classification became available.
-                                if !clear_dcf_if_current(
-            &gate,
-            generation,
-            sym,
-        ) {
+                                if !clear_dcf_if_current(&gate, generation, sym) {
                                     return;
                                 }
                             }
                         }
 
-                        if !insider_schedule.is_due(sym, Instant::now()) {
+                        if !schedules
+                            .lock()
+                            .unwrap()
+                            .insiders
+                            .is_due(sym, Instant::now())
+                        {
                             continue;
                         }
                         if !generation_is_current(&feed_gen, generation) {
                             return;
                         }
                         let insider_result = edgar::fetch_insider_activity(&edgar_client, cik);
-                        if !generation_is_current(&feed_gen, generation) {
-                            return;
-                        }
-                        insider_schedule.record_result(sym, Instant::now(), &insider_result);
-                        if let Ok(Some(ins)) = insider_result {
+                        if let Ok(Some(ref ins)) = insider_result {
                             if !ingest_insider_if_current(
-            &gate,
-            generation,
-            sym.to_string(),
+                                &gate,
+                                generation,
+                                sym.to_string(),
                                 InsiderData {
                                     net_shares_90d: ins.net_shares_90d,
                                     buy_count: ins.buy_count,
@@ -6121,6 +6985,20 @@ fn spawn_feed_workers(
                             ) {
                                 return;
                             }
+                        }
+                        if !mutate_current_edgar_schedule(
+                            &schedules,
+                            &feed_gen,
+                            generation,
+                            |schedules| {
+                                schedules.insiders.record_result(
+                                    sym,
+                                    Instant::now(),
+                                    &insider_result,
+                                )
+                            },
+                        ) {
+                            return;
                         }
                         // Keep submissions requests below the existing SEC request pace.
                         thread::sleep(Duration::from_millis(125));
@@ -7158,62 +8036,42 @@ where
     resolved
 }
 
-/// Resolve current prices for arbitrary symbols. Read live screener prices first.
-/// Batch Yahoo quotes cover multiple holdings outside the active universe.
+/// Resolve current prices by ticker from the shared cache and load its misses.
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn get_quote_prices(
     symbols: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<HashMap<String, i64>, String> {
-    // Run the (blocking) cache read + network fallback on a worker thread so the
-    // UI thread never stalls while custom holdings resolve their prices.
-    let screener = state.screener.clone();
-    crate::tauri_compat::async_runtime::spawn_blocking(
-        move || -> Result<HashMap<String, i64>, String> {
-            let mut out: HashMap<String, i64> = HashMap::new();
-            let mut missing: Vec<String> = Vec::new();
-            {
-                let s = screener.lock().map_err(|_| "screener lock")?;
-                for sym in symbols {
-                    let key = sym.trim().to_uppercase();
-                    if let Some(snap) = s.snapshots.get(&key) {
-                        if snap.market_price_cents > 0 {
-                            out.insert(key, snap.market_price_cents);
-                            continue;
-                        }
-                    }
-                    missing.push(key);
-                }
-            }
-            if !missing.is_empty() {
-                let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
-                out.extend(resolve_missing_portfolio_prices(
-                    missing,
-                    |symbols| {
-                        client
-                            .fetch_quotes(symbols)
-                            .map(|result| {
-                                result
-                                    .quotes
-                                    .into_iter()
-                                    .map(|(symbol, quote)| (symbol, quote.market_price_cents))
-                                    .collect()
-                            })
-                            .map_err(|error| error.to_string())
-                    },
-                    |symbol| {
-                        let price = client
-                            .fetch_candles(symbol, "5d", "1d")
-                            .ok()
-                            .and_then(|candles| candles.last().map(|last| last.close_cents));
-                        std::thread::sleep(std::time::Duration::from_millis(150));
-                        price
-                    },
-                ));
-            }
-            Ok(out)
-        },
-    )
+    use crate::market_data_cache::{fetch_daily, unique_symbols};
+
+    let symbols = unique_symbols(symbols);
+    let cache = Arc::clone(&state.market_data);
+    let load_client = market_data_client_loader(&state);
+    crate::tauri_compat::async_runtime::spawn_blocking(move || {
+        let client = load_client().map_err(|error| error.to_string())?;
+        Ok(cache.demand_prices(symbols, |missing| {
+            resolve_missing_portfolio_prices(
+                missing,
+                |symbols| {
+                    client
+                        .fetch_quotes(symbols)
+                        .map(|result| {
+                            result
+                                .quotes
+                                .into_iter()
+                                .map(|(symbol, quote)| (symbol, quote.market_price_cents))
+                                .collect()
+                        })
+                        .map_err(|error| error.to_string())
+                },
+                |symbol| {
+                    cache
+                        .demand_daily(symbol, || fetch_daily(&client, symbol))
+                        .and_then(|candles| candles.last().map(|last| last.close_cents))
+                },
+            )
+        }))
+    })
     .await
     .map_err(|e| e.to_string())?
 }
@@ -7363,7 +8221,11 @@ pub fn get_news(symbol: String, state: State<AppState>) -> Result<crate::news::N
 
 #[cfg(test)]
 mod qa_universe_apply_tests {
-    use super::{apply_universe_profile, ensure_symbol_loaded_inner};
+    use super::{
+        apply_universe_profile, ensure_symbol_loaded_inner, index_estimates_for_active_profile,
+    };
+    use crate::engine::{ExternalValuationSignal, FundamentalSnapshot, MarketSnapshot};
+    use crate::index_estimates::EstimateScenario;
     use crate::launch_profile::ForcedProfile;
     use crate::profiles::QA_MAX_SYMBOLS;
     use crate::state::AppState;
@@ -7391,6 +8253,58 @@ mod qa_universe_apply_tests {
         let n = state.active_symbols.lock().unwrap().len();
         assert!(n <= QA_MAX_SYMBOLS, "got {n}");
         assert_eq!(state.active_profile.lock().unwrap().as_str(), "qa");
+    }
+
+    #[test]
+    fn index_estimates_use_only_active_feed_members() {
+        let state = temp_state(None);
+        *state.active_symbols.lock().unwrap() = Arc::new(vec!["AAPL".into()]);
+        {
+            let mut screener = state.screener.lock().unwrap();
+            for (symbol, target) in [("AAPL", 12_500), ("AD_HOC", 30_000)] {
+                screener.ingest_snapshot(MarketSnapshot {
+                    symbol: symbol.into(),
+                    company_name: None,
+                    profitable: true,
+                    market_price_cents: 10_000,
+                    intrinsic_value_cents: target,
+                    previous_close_cents: 10_000,
+                    next_earnings_epoch: None,
+                });
+                screener.ingest_fundamentals(FundamentalSnapshot {
+                    symbol: symbol.into(),
+                    market_cap_dollars: Some(100),
+                    ..Default::default()
+                });
+                screener.ingest_signal(ExternalValuationSignal {
+                    symbol: symbol.into(),
+                    fair_value_cents: target,
+                    age_seconds: 0,
+                    low_fair_value_cents: Some(target),
+                    high_fair_value_cents: None,
+                    analyst_opinion_count: None,
+                    recommendation_mean_hundredths: None,
+                    strong_buy_count: None,
+                    buy_count: None,
+                    hold_count: None,
+                    sell_count: None,
+                    strong_sell_count: None,
+                    weighted_fair_value_cents: None,
+                    weighted_analyst_count: None,
+                });
+            }
+        }
+
+        let report = index_estimates_for_active_profile(&state);
+        assert_eq!(report.profile_name, "sp500");
+        assert_eq!(report.total_symbols, 1);
+        let low = report
+            .scenarios
+            .iter()
+            .find(|s| s.scenario == EstimateScenario::AnalystLow)
+            .unwrap();
+        assert_eq!(low.coverage_count, 1);
+        assert_eq!(low.implied_upside_bps, 2_500);
     }
 
     #[test]

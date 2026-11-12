@@ -1,0 +1,65 @@
+.watchlist-panel {
+  margin: var(--space-5);
+  color: var(--text-2);
+}
+
+.watchlist-panel h2 {
+  margin: 0 0 var(--space-4);
+  color: var(--text-1);
+  font-size: 18px;
+}
+
+.watchlist-panel p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.watchlist-panel__read-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.watchlist-panel table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.watchlist-panel :is(th, td) {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border-default);
+  text-align: left;
+}
+
+.watchlist-panel .watchlist-panel__price {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist-panel__ticker {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font: 600 12px var(--font-mono);
+  cursor: pointer;
+}
+
+.watchlist-panel__ticker:is(:hover, [aria-pressed="true"]) {
+  border-color: var(--accent);
+}
+
+.watchlist-panel__ticker[aria-pressed="true"] {
+  background: var(--accent-tint);
+}
+
+.watchlist-panel__company {
+  display: inline-block;
+  margin-inline-start: var(--space-2);
+  color: var(--text-2);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}

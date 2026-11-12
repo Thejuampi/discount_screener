@@ -216,6 +216,48 @@ impl ResolvedProfile {
     }
 }
 
+pub(crate) struct TrackedFeedMembership {
+    pub(crate) profile: ResolvedProfile,
+    pub(crate) exclusions: HashSet<String>,
+}
+
+impl TrackedFeedMembership {
+    pub(crate) fn new(mut profile: ResolvedProfile, overrides: Vec<(String, bool)>) -> Self {
+        let exclusions: HashSet<_> = overrides
+            .iter()
+            .filter(|(_, included)| !included)
+            .map(|(symbol, _)| symbol.clone())
+            .collect();
+        profile
+            .symbols
+            .retain(|symbol| !exclusions.contains(symbol));
+        let mut present = profile.symbol_set();
+        for (symbol, included) in overrides {
+            if included && present.insert(symbol.clone()) {
+                profile.symbols.push(symbol);
+            }
+        }
+        Self {
+            profile,
+            exclusions,
+        }
+    }
+}
+
+pub(crate) fn resolve_tracked_feed_membership(
+    raw_profile: &str,
+    db: &Db,
+    custom: bool,
+) -> Result<TrackedFeedMembership, String> {
+    let profile = resolve_profile_membership(raw_profile, db)?;
+    let overrides = if custom && profile.name != "qa" {
+        db.tracked_feed_overrides(&profile.name)?
+    } else {
+        Vec::new()
+    };
+    Ok(TrackedFeedMembership::new(profile, overrides))
+}
+
 /// Single resolution path for startup and `apply_universe_profile`.
 pub fn resolve_profile_membership(raw_profile: &str, db: &Db) -> Result<ResolvedProfile, String> {
     let canonical = resolve_profile_name(raw_profile)

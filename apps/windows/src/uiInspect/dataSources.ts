@@ -156,7 +156,15 @@ export const DS = {
   quotePrices: tauri("quote_prices", "get_quote_prices", "getQuotePrices", {
     argKeys: ["symbols"],
     role: "enrich",
+    domain: [`${TAURI}/market_data_cache.rs`],
     probeTemplate: "api.getQuotePrices(/* symbols[] */)",
+  }),
+
+  portfolioAnalysis: tauri("portfolio_analysis", "get_portfolio_analysis", "getPortfolioAnalysis", {
+    argKeys: ["symbols"],
+    role: "enrich",
+    domain: [`${TAURI}/portfolio_analysis.rs`, `${TAURI}/market_data_cache.rs`],
+    probeTemplate: "api.getPortfolioAnalysis(/* held symbols[] */)",
   }),
 
   scalpAnalysis: tauri("scalp_analysis", "get_scalp_analysis", "getScalpAnalysis", {

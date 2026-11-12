@@ -2,6 +2,10 @@ mod analyst_forecasts;
 pub mod analyst_method_import;
 pub mod analyst_method_service;
 pub mod android_chart;
+#[cfg(feature = "gui")]
+mod android_v3_charts;
+#[cfg(feature = "gui")]
+mod android_v3_screener;
 mod chart_patterns;
 mod commands;
 mod congress;
@@ -21,7 +25,10 @@ pub mod evidence_sotp;
 #[cfg(test)]
 mod evidence_sotp_contract;
 mod feed_log;
+mod feed_refresh;
 mod fetcher;
+mod market_data_cache;
+mod portfolio_analysis;
 mod fibonacci;
 pub mod forward_earnings_multiple;
 #[cfg(test)]
@@ -41,6 +48,7 @@ mod quant_lens;
 mod quote_summary;
 mod regime;
 mod risk;
+mod saved_detail;
 #[cfg(feature = "gui")]
 mod scalp_ws;
 mod scalping;
@@ -56,6 +64,8 @@ pub mod source_continuity;
 mod state;
 mod stooq;
 mod tauri_compat;
+#[cfg(feature = "gui")]
+mod ticker_note_commands;
 mod ticker_search;
 #[cfg(test)]
 mod valuation_baseline;
@@ -76,6 +86,8 @@ pub mod valuation_gap_attribution;
 mod valuation_high_signal;
 #[cfg(test)]
 mod valuation_probes;
+#[cfg(feature = "gui")]
+mod watchlist_commands;
 mod yahoo_session;
 
 #[cfg(feature = "gui")]
@@ -169,8 +181,9 @@ pub fn run() {
                     return Err(e.to_string().into());
                 }
             };
-            let app_state = AppState::new_with_forced_profile(db_path, forced)
+            let mut app_state = AppState::new_with_profile_policy(db_path, forced, true)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            app_state.save_universe_rows = true;
             if app_state.is_profile_locked() {
                 let name = app_state.active_profile.lock().unwrap().clone();
                 let n = app_state.active_symbols.lock().unwrap().len();
@@ -269,7 +282,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_app_version,
             commands::get_opportunities,
+            android_v3_screener::get_android_long_v3,
+            commands::get_saved_universe_rows,
             commands::get_symbol_detail,
+            ticker_note_commands::get_ticker_note,
+            ticker_note_commands::set_ticker_note,
+            watchlist_commands::get_watchlist,
+            watchlist_commands::set_watchlist_member,
             commands::debug_seed_cof_native_e2e,
             commands::get_analyst_forecasts,
             commands::load_analyst_forecasts,
@@ -295,8 +314,11 @@ pub fn run() {
             commands::list_universe_profiles,
             commands::get_universe_profile,
             commands::set_universe_profile,
+            commands::get_tracked_feed,
+            commands::set_tracked_feed_member,
             commands::start_feed,
             commands::get_feed_status,
+            commands::request_feed_refresh,
             commands::get_symbol_history,
             commands::get_backtest,
             commands::get_history_status,
@@ -314,6 +336,7 @@ pub fn run() {
             commands::get_congress_sync_progress,
             commands::get_crypto_metrics,
             commands::portfolio_list,
+            portfolio_analysis::get_portfolio_analysis,
             commands::portfolio_add,
             commands::portfolio_update,
             commands::portfolio_delete,

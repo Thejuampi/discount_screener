@@ -1,7 +1,7 @@
 /// Core domain types and scoring logic — mirrors apps/desktop/src/lib.rs
 /// but standalone so we don't pull in ratatui/crossterm as compile deps.
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -285,7 +285,7 @@ pub struct CandidateRow {
     pub insider_sell_count: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolDetail {
     pub symbol: String,
     pub company_name: Option<String>,
@@ -311,6 +311,7 @@ pub struct SymbolDetail {
     pub weekly_summary: Option<ChartSummary>,
     pub hourly_summary: Option<ChartSummary>,
     pub monthly_summary: Option<ChartSummary>,
+    #[serde(skip_deserializing)]
     pub technical_breakdown: Option<TechnicalBreakdown>,
     pub dcf_value_cents: Option<i64>,
     pub dcf_analysis: Option<crate::dcf_model::DcfAnalysis>,
@@ -330,7 +331,9 @@ pub struct SymbolDetail {
     pub insider_buy_count: Option<u32>,
     pub insider_sell_count: Option<u32>,
     pub next_earnings_epoch: Option<i64>,
+    #[serde(skip_deserializing)]
     pub chart_patterns: Vec<crate::chart_patterns::ChartPattern>,
+    #[serde(skip_deserializing)]
     pub fib: Option<crate::fibonacci::FibAnalysis>,
 }
 
@@ -2070,6 +2073,7 @@ pub struct ScreenerState {
     /// Last valuation failure reason per symbol (cleared on successful ingest).
     pub valuation_errors: HashMap<String, String>,
     pub insider_data: HashMap<String, InsiderData>, // symbol → insider activity
+    feed_exclusions: HashSet<String>,
     pub alerts: Vec<AlertEvent>,
     pub min_gap_bps: i32,
     pub signal_max_age_seconds: u64,
@@ -2100,7 +2104,17 @@ impl ScreenerState {
         };
     }
 
+    /// Keep one-shot Detail data available while excluding opted-out symbols from the feed.
+    pub(crate) fn set_feed_exclusions(&mut self, symbols: HashSet<String>) {
+        self.alerts.retain(|event| !symbols.contains(&event.symbol));
+        self.feed_exclusions = symbols;
+    }
+
     pub fn ingest_snapshot(&mut self, snap: MarketSnapshot) {
+        if self.feed_exclusions.contains(&snap.symbol) {
+            self.snapshots.insert(snap.symbol.clone(), snap);
+            return;
+        }
         let was_qualified = self.snapshots.get(&snap.symbol).map(|s| {
             let g = gap_bps(s.market_price_cents, s.intrinsic_value_cents);
             qualification(s.profitable, g, self.min_gap_bps) == QualificationStatus::Qualified
@@ -2530,6 +2544,7 @@ impl ScreenerState {
         let mut rows: Vec<CandidateRow> = self
             .snapshots
             .values()
+            .filter(|snap| !self.feed_exclusions.contains(&snap.symbol))
             .map(|snap| {
                 let signal = self.signals.get(&snap.symbol);
                 // Prefer snapshot target; fall back to signal fair value so Objetivo/Gap

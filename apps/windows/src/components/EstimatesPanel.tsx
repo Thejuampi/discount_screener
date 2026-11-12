@@ -2,59 +2,64 @@ import { useCallback, useEffect, useState } from "react";
 import { api, fmt } from "../api";
 import type {
   IndexEstimatesReport,
-  ScenarioEstimate,
   ValuationDivergenceAudit,
 } from "../api";
 import { useT } from "../i18n";
 import { UI, UiInspectable } from "../uiInspect";
+import { analystPriceGaps, type AnalystPriceGap } from "../estimatesPresentation";
+import { singleFlight } from "../singleFlight";
 
-function upsideLabel(bps: number): string {
+function priceGapLabel(bps: number): string {
   const pct = (bps / 100).toFixed(1);
-  return bps >= 0 ? `+${pct}%` : `${pct}%`;
+  return bps > 0 ? `+${pct}%` : `${pct}%`;
 }
 
-function scenarioTitle(s: string, t: (k: string) => string): string {
-  switch (s) {
-    case "bear_dcf":
-      return t("estimates.bear");
-    case "base_dcf":
-      return t("estimates.base");
-    case "bull_dcf":
-      return t("estimates.bull");
-    case "analyst_low":
-      return t("estimates.analystLow");
-    case "analyst_high":
-      return t("estimates.analystHigh");
-    default:
-      return s;
-  }
-}
-
-function ScenarioCard({
-  title,
-  items,
-}: {
-  title: string;
-  items: ScenarioEstimate[];
-}) {
+function AnalystEstimates({ low, high }: { low: AnalystPriceGap | null; high: AnalystPriceGap | null }) {
   const { t } = useT();
+  const endpoints = [
+    { side: "low", label: t("estimates.analystLow"), gap: low },
+    { side: "high", label: t("estimates.analystHigh"), gap: high },
+  ];
   return (
-    <div className="est-card">
-      <h3>{title}</h3>
-      <div className="est-scenarios">
-        {items.map((s) => (
-          <div key={s.scenario} className="est-scenario-row">
-            <span>{scenarioTitle(s.scenario, t)}</span>
-            <strong className={s.implied_upside_bps >= 0 ? "pos" : "neg"}>
-              {upsideLabel(s.implied_upside_bps)}
-            </strong>
-            <span className="muted">
-              {fmt.dollars(s.weighted_price_cents)} · n={s.coverage_count}
-            </span>
-          </div>
-        ))}
+    <UiInspectable
+      as="section"
+      className="est-card"
+      data-estimates-analysts
+      source={UI.estimatesScenario}
+      snapshot={{ low, high, timedReturnBps: null, targetDate: null }}
+    >
+      <h3>{t("estimates.wallStreet")}</h3>
+      <div data-estimates-price-gap>
+        <h4>{t("estimates.priceGap")}</h4>
+        {low || high ? (
+          <dl className="est-scenarios" data-estimates-range={low && high ? "" : undefined}>
+            {endpoints.map(({ side, label, gap }) => (
+              <div key={side} className="est-scenario-row" data-estimates-endpoint={side}>
+                <dt>{label}</dt>
+                <dd>
+                  {gap ? (
+                    <strong className={gap.priceGapBps < 0 ? "neg" : gap.priceGapBps > 0 ? "pos" : undefined}>
+                      {priceGapLabel(gap.priceGapBps)}
+                    </strong>
+                  ) : t("estimates.unavailable")}
+                </dd>
+                {gap && (
+                  <dd className="muted">
+                    {t(gap.coverageCount === 1 ? "estimates.targetCoverageOne" : "estimates.targetCoverage", { count: gap.coverageCount })}
+                  </dd>
+                )}
+              </div>
+            ))}
+          </dl>
+        ) : (
+          <p className="muted">{t("estimates.noAnalystCoverage")}</p>
+        )}
       </div>
-    </div>
+      <div className="est-timed-return" data-estimates-timed-return>
+        <h4>{t("estimates.timedReturn")}</h4>
+        <p className="muted">{t("estimates.timedReturnUnavailable")}</p>
+      </div>
+    </UiInspectable>
   );
 }
 
@@ -66,21 +71,25 @@ export function EstimatesPanel() {
   const [auditErr, setAuditErr] = useState<string | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      const r = await api.getIndexEstimates();
-      setReport(r);
-      setErr(null);
-    } catch (e) {
-      setErr(String(e));
-    }
-  }, []);
-
   useEffect(() => {
-    load();
+    let cancelled = false;
+    const load = singleFlight(async () => {
+      try {
+        const r = await api.getIndexEstimates();
+        if (cancelled) return;
+        setReport(r);
+        setErr(null);
+      } catch (e) {
+        if (!cancelled) setErr(String(e));
+      }
+    });
+    void load();
     const id = setInterval(load, 15_000);
-    return () => clearInterval(id);
-  }, [load]);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   const runAudit = useCallback(async () => {
     setAuditLoading(true);
@@ -101,9 +110,7 @@ export function EstimatesPanel() {
     return <div className="est-panel">{t("estimates.loading")}</div>;
   }
 
-  const base = report.scenarios.find((s) => s.scenario === "base_dcf");
-  const dcfScenarios = report.scenarios.filter((s) => s.scenario.endsWith("_dcf") || s.scenario.includes("dcf"));
-  const analyst = report.scenarios.filter((s) => s.scenario.startsWith("analyst"));
+  const analyst = analystPriceGaps(report.scenarios);
   const cov = report.dcf_coverage;
 
   return (
@@ -114,37 +121,27 @@ export function EstimatesPanel() {
       snapshot={{
         profileName: report.profile_name,
         totalSymbols: report.total_symbols,
-        baseUpsideBps: base?.implied_upside_bps ?? null,
         dcfCoverageStatus: cov.status,
         dcfCovered: cov.covered_symbols,
         dcfEligible: cov.total_eligible_symbols,
-        scenarioCount: report.scenarios.length,
+        analystLowCoverage: analyst.low?.coverageCount ?? 0,
+        analystHighCoverage: analyst.high?.coverageCount ?? 0,
       }}
     >
       <header className="est-hero">
         <div>
-          <div className="est-kicker">
-            {report.profile_name} · {report.total_symbols} {t("estimates.symbols")}
-          </div>
-          <div className={`est-upside ${(base?.implied_upside_bps ?? 0) >= 0 ? "pos" : "neg"}`}>
-            {base ? upsideLabel(base.implied_upside_bps) : "—"}
-          </div>
-          <div className="muted">{t("estimates.baseUpside")}</div>
+          <h2 className="est-profile">{report.profile_name.toUpperCase()}</h2>
+          <div className="muted">{report.total_symbols} {t("estimates.symbols")}</div>
         </div>
-        <div className="est-coverage">
-          <span className={`est-chip status-${cov.status}`}>{cov.status}</span>
+        <div className="est-coverage" data-estimates-dcf-coverage>
+          <span className={`est-chip status-${cov.status}`}>{t(`estimates.dcfCoverage.${cov.status}`)}</span>
           <div className="muted">
-            DCF {cov.covered_symbols}/{cov.total_eligible_symbols} (
-            {(cov.coverage_bps / 100).toFixed(0)}%)
+            {t("estimates.dcfCoverage", { covered: cov.covered_symbols, total: cov.total_eligible_symbols })}
           </div>
         </div>
       </header>
 
-      {cov.status !== "ready" && (
-        <div className="est-banner">
-          {t("estimates.coverageBanner")} {cov.covered_symbols}/{cov.total_eligible_symbols}
-        </div>
-      )}
+      <AnalystEstimates {...analyst} />
 
       <section className="est-card est-audit-card">
         <div className="est-audit-header">
@@ -195,11 +192,6 @@ export function EstimatesPanel() {
           </>
         )}
       </section>
-
-      <div className="est-grid">
-        <ScenarioCard title={t("estimates.internalDcf")} items={dcfScenarios} />
-        <ScenarioCard title={t("estimates.wallStreet")} items={analyst} />
-      </div>
     </UiInspectable>
   );
 }

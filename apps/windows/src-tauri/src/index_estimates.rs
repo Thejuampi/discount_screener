@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::dcf_model::DcfAnalysis;
 use crate::engine::CandidateRow;
+use crate::opportunity_v3::kotlin_round;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -57,14 +58,14 @@ pub fn compute(
     profile_name: &str,
     now_epoch_seconds: i64,
 ) -> IndexEstimatesReport {
-    let mut total_cap = 0u64;
+    let mut total_cap = 0u128;
     let mut weighted_current = 0.0;
     let mut eligible = 0usize;
     for row in rows {
         let Some(cap) = row.market_cap_dollars.filter(|&c| c > 0) else {
             continue;
         };
-        total_cap += cap;
+        total_cap += u128::from(cap);
         weighted_current += row.market_price_cents as f64 * cap as f64;
         eligible += 1;
     }
@@ -82,7 +83,7 @@ pub fn compute(
         EstimateScenario::AnalystHigh,
     ]
     .into_iter()
-    .map(|s| compute_scenario(s, rows, dcf_by_symbol, total_cap, current_weighted))
+    .map(|s| compute_scenario(s, rows, dcf_by_symbol, current_weighted))
     .collect();
 
     IndexEstimatesReport {
@@ -138,21 +139,32 @@ fn compute_scenario(
     scenario: EstimateScenario,
     rows: &[CandidateRow],
     dcf_by_symbol: &std::collections::HashMap<String, DcfAnalysis>,
-    _total_cap: u64,
     current_weighted: i64,
 ) -> ScenarioEstimate {
+    let analyst_endpoint = matches!(
+        scenario,
+        EstimateScenario::AnalystLow | EstimateScenario::AnalystHigh
+    );
     let mut numerator = 0.0;
-    let mut denom_cap = 0u64;
+    let mut gap_numerator = 0.0;
+    let mut denom_cap = 0u128;
     let mut coverage = 0usize;
     for row in rows {
         let Some(cap) = row.market_cap_dollars.filter(|&c| c > 0) else {
             continue;
         };
-        let Some(fv) = scenario_fair_value(scenario, row, dcf_by_symbol) else {
+        if analyst_endpoint && row.market_price_cents <= 0 {
+            continue;
+        }
+        let Some(fv) = scenario_fair_value(scenario, row, dcf_by_symbol).filter(|&v| v > 0) else {
             continue;
         };
         numerator += fv as f64 * cap as f64;
-        denom_cap += cap;
+        if analyst_endpoint {
+            // Market-cap weight each covered ticker's price-relative gap.
+            gap_numerator += (fv as f64 / row.market_price_cents as f64 - 1.0) * cap as f64;
+        }
+        denom_cap += u128::from(cap);
         coverage += 1;
     }
     let weighted = if denom_cap > 0 {
@@ -160,7 +172,11 @@ fn compute_scenario(
     } else {
         0
     };
-    let upside = if current_weighted <= 0 || coverage == 0 {
+    let upside = if coverage == 0 {
+        0
+    } else if analyst_endpoint {
+        kotlin_round(gap_numerator / denom_cap as f64 * 10_000.0)
+    } else if current_weighted <= 0 {
         0
     } else {
         ((weighted as f64 / current_weighted as f64 - 1.0) * 10_000.0).round() as i32
@@ -288,5 +304,92 @@ mod tests {
         assert_eq!(report.total_symbols, 2);
         assert!(report.scenarios.iter().any(|s| s.coverage_count == 2));
         assert_eq!(report.dcf_coverage.covered_symbols, 2);
+        let base = scenario(&report, EstimateScenario::BaseDcf);
+        assert_eq!(base.weighted_price_cents, 19_000);
+        assert_eq!(base.implied_upside_bps, 857);
+    }
+
+    fn scenario(report: &IndexEstimatesReport, kind: EstimateScenario) -> &ScenarioEstimate {
+        report
+            .scenarios
+            .iter()
+            .find(|s| s.scenario == kind)
+            .unwrap()
+    }
+
+    #[test]
+    fn analyst_gap_uses_each_endpoints_covered_market_cap_weighted_symbol_returns() {
+        let mut a = row("A", 10_000, 1, 20_000, 0);
+        a.high_fair_value_cents = None;
+        let b = row("B", 100_000, 3, 50_000, 125_000);
+        let mut uncovered = row("C", 1_000_000, 9, 0, 0);
+        uncovered.low_fair_value_cents = None;
+        uncovered.high_fair_value_cents = None;
+        let report = compute(&[a, b, uncovered], &Default::default(), "universe", 0);
+
+        // Android's weighted-return fixture: one +100% and three -50% weights.
+        let low = scenario(&report, EstimateScenario::AnalystLow);
+        assert_eq!(low.coverage_count, 2);
+        assert_eq!(low.weighted_price_cents, 42_500);
+        assert_eq!(low.implied_upside_bps, -1_250);
+
+        let high = scenario(&report, EstimateScenario::AnalystHigh);
+        assert_eq!(high.coverage_count, 1);
+        assert_eq!(high.weighted_price_cents, 125_000);
+        assert_eq!(high.implied_upside_bps, 2_500);
+    }
+
+    #[test]
+    fn analyst_coverage_requires_positive_cap_price_and_endpoint_target() {
+        let mut missing_cap = row("NO_CAP", 10_000, 1, 12_000, 14_000);
+        missing_cap.market_cap_dollars = None;
+        let report = compute(
+            &[
+                row("ZERO_CAP", 10_000, 0, 12_000, 14_000),
+                missing_cap,
+                row("ZERO_PRICE", 0, 1, 12_000, 14_000),
+                row("NEGATIVE_PRICE", -1, 1, 12_000, 14_000),
+                row("INVALID_TARGETS", 10_000, 1, 0, -1),
+            ],
+            &Default::default(),
+            "universe",
+            0,
+        );
+        for kind in [EstimateScenario::AnalystLow, EstimateScenario::AnalystHigh] {
+            let endpoint = scenario(&report, kind);
+            assert_eq!(endpoint.coverage_count, 0);
+            assert_eq!(endpoint.weighted_price_cents, 0);
+            assert_eq!(endpoint.implied_upside_bps, 0);
+        }
+    }
+
+    #[test]
+    fn analyst_zero_gap_with_coverage_differs_from_missing_coverage() {
+        let mut flat = row("FLAT", 1, 1, 1, 0);
+        flat.high_fair_value_cents = None;
+        let report = compute(&[flat], &Default::default(), "universe", 0);
+        let low = scenario(&report, EstimateScenario::AnalystLow);
+        assert_eq!(low.coverage_count, 1);
+        assert_eq!(low.implied_upside_bps, 0);
+        let high = scenario(&report, EstimateScenario::AnalystHigh);
+        assert_eq!(high.coverage_count, 0);
+    }
+
+    #[test]
+    fn analyst_gap_uses_kotlin_rounding_at_half_basis_points() {
+        let report = compute(
+            &[row("A", 800, 1, 775, 825)],
+            &Default::default(),
+            "universe",
+            0,
+        );
+        assert_eq!(
+            scenario(&report, EstimateScenario::AnalystLow).implied_upside_bps,
+            -312
+        );
+        assert_eq!(
+            scenario(&report, EstimateScenario::AnalystHigh).implied_upside_bps,
+            313
+        );
     }
 }

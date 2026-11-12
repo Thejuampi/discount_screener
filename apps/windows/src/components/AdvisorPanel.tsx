@@ -1,9 +1,9 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { api, fmt } from "../api";
-import type { PortfolioPosition, OpportunityRow, AccuracyRow, SetupLabel, PortfolioRiskResponse } from "../api";
+import type { PortfolioPosition, OpportunityRow, AccuracyRow, SetupLabel, PortfolioRiskResponse, PortfolioAnalysis } from "../api";
 import { useT } from "../i18n";
 import { JournalPanel } from "./JournalPanel";
-import { projectPortfolioExposure, usableQuoteCents, type ExposureCoverage } from "../portfolioExposure";
+import { projectPortfolioExposure, type ExposureCoverage } from "../portfolioExposure";
 import {
   BOOK_AS_OF_STORAGE_KEY,
   parseAnyCsv,
@@ -48,6 +48,9 @@ const POSITIVE_LABELS: SetupLabel[] = ["StrongBuy", "StrongAccumulate"];
 const MILD_POSITIVE: SetupLabel[] = ["Buy", "Accumulate"];
 const NEGATIVE_LABELS: SetupLabel[] = ["Avoid", "Distribute", "Caution"];
 const STRONG_NEGATIVE: SetupLabel[] = ["StrongAvoid"];
+const NO_SCREENER_PRICES = new Map<string, { market_price_cents: number }>();
+const PRICE_BATCH_SIZE = 12;
+const DATA_POLL_MS = 30_000;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -94,13 +97,13 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
   const [accuracy, setAccuracy] = useState<AccuracyRow[]>([]);
   const [horizon, setHorizon] = useState(30);
   const [loading, setLoading] = useState(true);
-  const [extraPrices, setExtraPrices] = useState<Record<string, number | null>>({});
-  const extraPricesRef = useRef<Record<string, number | null>>({});
+  const [marketPrices, setMarketPrices] = useState<{ key: string; prices: Record<string, number> }>();
+  const [analysis, setAnalysis] = useState<{ key: string; report: PortfolioAnalysis }>();
   const [csvMsg, setCsvMsg] = useState<string | null>(null);
   const [csvPending, setCsvPending] = useState<ImportPlan | null>(null);
 
   // Risk engine state
-  const [risk, setRisk] = useState<PortfolioRiskResponse | null>(null);
+  const [riskRead, setRiskRead] = useState<{ key: string; report: PortfolioRiskResponse | null }>();
   const [riskPct, setRiskPct] = useState(() => {
     const v = parseFloat(localStorage.getItem("ds_risk_per_trade") ?? "1");
     return isFinite(v) && v > 0 ? v : 1;
@@ -138,52 +141,87 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     [rows]
   );
 
-  // Fetch prices for held symbols with no usable screener quote.
+  const heldKey = useMemo(
+    () => [...new Set(positions.map((p) => p.symbol))].sort().join(","),
+    [positions],
+  );
+
+  // The book requests each of its symbols, regardless of screener membership.
   useEffect(() => {
-    const requestCache = extraPricesRef.current;
-    const missing = [...new Set(positions.map((p) => p.symbol))]
-      .filter((s) => usableQuoteCents(rowsBySymbol.get(s)?.market_price_cents) == null)
-      .filter((s) => requestCache[s] === undefined);
-    if (missing.length === 0) return;
-    // Mark as in-flight (null) immediately to avoid duplicate fetches
-    for (const s of missing) requestCache[s] = null;
-    api.getQuotePrices(missing)
-      .then((map) => {
-        if (extraPricesRef.current !== requestCache) return;
-        for (const s of missing) {
-          requestCache[s] = map[s] ?? null;
-        }
-        setExtraPrices({ ...requestCache });
-      })
-      .catch(console.error);
-  }, [positions, rowsBySymbol]);
+    if (!heldKey) return;
+    const symbols = heldKey.split(",");
+    let active = true;
+    let timer: number;
+    async function readPrices() {
+      for (let start = 0; active && start < symbols.length; start += PRICE_BATCH_SIZE) {
+        const batch = symbols.slice(start, start + PRICE_BATCH_SIZE);
+        const prices = await api.getQuotePrices(batch).catch(() => ({} as Record<string, number>));
+        if (!active) return;
+        setMarketPrices((previous) => {
+          const next = previous?.key === heldKey ? { ...previous.prices } : {};
+          for (const symbol of batch) {
+            if (prices[symbol] == null) delete next[symbol];
+            else next[symbol] = prices[symbol];
+          }
+          return { key: heldKey, prices: next };
+        });
+      }
+      if (active) timer = window.setTimeout(readPrices, DATA_POLL_MS);
+    }
+    void readPrices();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [heldKey]);
+
+  const analysisKey = `${scoringModel}:${heldKey}`;
+  useEffect(() => {
+    if (!heldKey) return;
+    const symbols = heldKey.split(",");
+    let active = true;
+    let timer: number;
+    async function readAnalysis() {
+      const report = await api.getPortfolioAnalysis(symbols).catch(() => ({ rows: [], pending: false }));
+      if (!active) return;
+      setAnalysis({ key: analysisKey, report });
+      timer = window.setTimeout(readAnalysis, report.pending ? 1_000 : DATA_POLL_MS);
+    }
+    void readAnalysis();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [heldKey, analysisKey]);
+
+  const activeAnalysis = analysis?.key === analysisKey ? analysis.report : null;
+  const signals = useMemo(
+    () => new Map(activeAnalysis?.rows.map((row) => [row.symbol, row])),
+    [activeAnalysis],
+  );
 
   // ── Enriched holdings ─────────────────────────────────────────────────────
   const exposure = useMemo(
-    () => projectPortfolioExposure(positions, rowsBySymbol, extraPrices),
-    [positions, rowsBySymbol, extraPrices],
+    () => projectPortfolioExposure(positions, NO_SCREENER_PRICES, marketPrices?.key === heldKey ? marketPrices.prices : {}),
+    [positions, heldKey, marketPrices],
   );
   const holdings = useMemo(() => positions.map((pos, index) => ({
     ...exposure.rows[index],
     pos,
-    row: rowsBySymbol.get(pos.symbol) ?? null,
+    row: signals.get(pos.symbol) ?? null,
     days: daysOpen(pos.opened_at),
-  })), [positions, rowsBySymbol, exposure.rows]);
+  })), [positions, signals, exposure.rows]);
   const completeValue = exposure.completeValueCents;
 
   // ── Risk engine: fetch ATR + correlation for held symbols ─────────────────
-  const heldKey = useMemo(
-    () => positions.map((p) => p.symbol).sort().join(","),
-    [positions]
-  );
   useEffect(() => {
-    if (heldKey === "") { setRisk(null); return; }
+    if (!heldKey) return;
     let cancelled = false;
-    api.getPortfolioRisk(heldKey.split(","))
-      .then((r) => { if (!cancelled) setRisk(r); })
-      .catch(console.error);
-    return () => { cancelled = true; };
+    let timer: number;
+    async function readRisk() {
+      const report = await api.getPortfolioRisk(heldKey.split(",")).catch(() => null);
+      if (cancelled) return;
+      setRiskRead({ key: heldKey, report });
+      timer = window.setTimeout(readRisk, 60_000);
+    }
+    void readRisk();
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [heldKey]);
+  const risk = riskRead?.key === heldKey ? riskRead.report : null;
 
   const atrBySym = useMemo(() => {
     const m = new Map<string, number>();
@@ -195,7 +233,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
 
   // Per-holding stop + risk-at-stop, using ATR (cents).
   const riskRows = useMemo(() => holdings.map((h) => {
-    const atr = atrBySym.get(h.pos.symbol) ?? h.row?.atr_cents ?? null;
+    const atr = atrBySym.get(h.pos.symbol) ?? null;
     const price = h.priceCents;
     if (atr == null || atr <= 0 || price == null || h.valueCents == null) {
       return { h, atr: null as number | null, atrPct: null as number | null,
@@ -367,8 +405,6 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
     if (ignored > 0) msg += ` · ${ignored} filas no-trade omitidas`;
     if (asOf) localStorage.setItem(BOOK_AS_OF_STORAGE_KEY, asOf);
     setCsvMsg(msg);
-    extraPricesRef.current = {};
-    setExtraPrices({});
     refresh();
     setTimeout(() => setCsvMsg(null), 8000);
   };
@@ -707,12 +743,12 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                         ? "var(--danger)"
                         : "var(--text-3)";
                 return (
-                  <tr key={h.pos.id}>
+                  <tr key={h.pos.id} data-portfolio-symbol={h.pos.symbol}>
                     <td>
                       <strong
-                        style={{ cursor: h.row ? "pointer" : "default", color: h.row ? "var(--accent)" : "var(--text-1)" }}
-                        onClick={() => h.row && onOpenSymbol(h.pos.symbol)}
-                        title={h.row ? t("advisor.openInScreener") : undefined}
+                        style={{ cursor: "pointer", color: "var(--accent)" }}
+                        onClick={() => onOpenSymbol(h.pos.symbol)}
+                        title={t("advisor.openInScreener")}
                       >
                         {h.pos.symbol}
                       </strong>
@@ -721,7 +757,7 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                     <td className="num-cell" style={{ textAlign: "right" }}>
                       {h.unitCostCents != null ? fmt.dollars(h.unitCostCents) : "—"}
                     </td>
-                    <td className="num-cell" style={{ textAlign: "right" }}>
+                    <td className="num-cell" style={{ textAlign: "right" }} data-portfolio-price>
                       {h.priceCents != null ? fmt.dollars(h.priceCents) : "—"}
                     </td>
                     <td className="num-cell" style={{ textAlign: "right" }} title={h.valueOutOfRange ? t("advisor.coverage.amountOutOfRange") : undefined}>
@@ -741,14 +777,14 @@ export function AdvisorPanel({ rows, onOpenSymbol, scoringModel }: Props) {
                     <td className="num-cell" style={{ textAlign: "right" }}>
                       {h.days != null ? `${h.days}d` : "—"}
                     </td>
-                    <td>
+                    <td data-portfolio-setup>
                       {h.row ? (
                         <span style={{ fontSize: 11, fontWeight: 700 }}>
                           {t(presentation.setupLabelKey(h.row.setup_label))} ({h.row.setup_score > 0 ? "+" : ""}{h.row.setup_score})
                         </span>
-                      ) : "—"}
+                      ) : t(activeAnalysis == null || activeAnalysis.pending ? "advisor.analysis.loading" : "advisor.analysis.unavailable")}
                     </td>
-                    <td className="num-cell" style={{ textAlign: "right", color: fitColor, fontWeight: 700, fontSize: 12 }}>
+                    <td className="num-cell" style={{ textAlign: "right", color: fitColor, fontWeight: 700, fontSize: 12 }} data-portfolio-fit>
                       {fit != null ? `${fit > 0 ? "+" : ""}${fit}` : "—"}
                     </td>
                     <td>

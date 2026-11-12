@@ -53,9 +53,8 @@ Profiles: `sp500`, `dow`, `russell`, `merval`, `nikkei`, `europe`, `asia`, `qa` 
 ## Android semantics (default for Long V3)
 
 Ground truth is `apps/android/core`. `--semantics android` (default) ranks Long V3
-as the Android Opportunities screen does; the Tauri GUI is unchanged and
-`--semantics tauri` reproduces it. Long V2 and Short have no Android port here and
-always use desktop semantics (the response says `"semantics":"tauri"`).
+with the Android Opportunities rules. `--semantics tauri` reproduces the standard Vantage ranking.
+Long V2 and Short use desktop semantics (the response says `"semantics":"tauri"`).
 
 | Aspect | Android (headless default) | Desktop / Tauri |
 |---|---|---|
@@ -75,6 +74,24 @@ Parity is enforced by a shared contract: `shared/contracts/opportunity-v3-headle
 (`HeadlessV3ParityGoldenTest`, `HEADLESS_GOLDEN_WRITE=1` regenerates
 `opportunity-v3-headless-golden.json`) and by Rust (`headless::android_parity_tests`),
 which feeds the fixture through the real `ScreenerState` ingest and compares every row.
+
+Markets offers an opt-in Android Long V3 view. It uses the same rules with the active Vantage equity universe.
+The view evaluates a read-only copy of session data. It requests exact one-year weekly charts in bounded batches.
+It shows incomplete valuation when the Android model reference is unavailable in Headless.
+The base Vantage ranking supplies Dashboard, Advisor, Detail, and alerts.
+
+Run the Kotlin fixture offline from `apps/android`.
+
+```text
+.\gradlew.bat --offline --no-configuration-cache :core:test --tests "*HeadlessV3ParityGoldenTest*"
+```
+
+Run the Rust parity fixture and the opt-in projection tests from `apps/windows/src-tauri`.
+
+```text
+cargo test --offline --lib headless::android_parity_tests
+cargo test --offline --lib android_v3_screener
+```
 
 ## Packaging
 

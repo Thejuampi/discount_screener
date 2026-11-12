@@ -8,11 +8,13 @@ import {
 } from "lightweight-charts";
 import type { IChartApi, UTCTimestamp } from "lightweight-charts";
 import { api } from "../api";
-import type { Candle, ChartPattern, FibAnalysis } from "../api";
+import type { ChartPattern, DetailCandleSeries, FibAnalysis } from "../api";
 import { drawPatternLines, drawFibLevels } from "../chartPatternDraw";
 import { CandleRequestCache } from "../candleRequestCache";
 import { observeChartWidth } from "../chartResizeObserver";
+import { readDetailCandleSeries } from "../detailCandleSeries";
 import { useT } from "../i18n";
+import { singleFlight } from "../singleFlight";
 
 interface Props {
   symbol: string;
@@ -68,27 +70,34 @@ export function calcMACD(closes: number[]) {
 }
 
 export function CandleChart({ symbol, range, cacheRevision, loadRequest, patterns, fib, ema = true, volume = true }: Props) {
-  const { t } = useT();
+  const { t, lang } = useT();
   const containerRef = useRef<HTMLDivElement>(null);
-  const [candleCache] = useState(() => new CandleRequestCache<Candle[]>({
-    cacheValue: (candles) => candles.length > 0,
+  const [candleCache] = useState(() => new CandleRequestCache<DetailCandleSeries | null>({
+    cacheValue: (series) => series?.source === "session",
   }));
-  const [result, setResult] = useState<{ symbol: string; range: string; candles: Candle[] } | null>(null);
+  const [result, setResult] = useState<{ symbol: string; range: string; series: DetailCandleSeries } | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "empty" | "failed">("loading");
   const [drawFailed, setDrawFailed] = useState(false);
-  const candles = result?.symbol === symbol && result.range === range ? result.candles : null;
+  const series = result?.symbol === symbol && result.range === range ? result.series : null;
+  const candles = series?.candles;
+  const restored = series?.source === "restored";
+  const dailyRange = range === "1mo" || range === "3mo";
+  const savedAt = restored && series.saved_at_epoch_seconds != null
+    ? new Date(series.saved_at_epoch_seconds * 1_000)
+    : null;
+  const sessionPatterns = restored ? undefined : patterns;
+  const sessionFib = restored ? null : fib;
 
   useEffect(() => {
     let cancelled = false;
     setStatus("loading");
-    void candleCache.load(symbol, `${range}:${cacheRevision}:${loadRequest}`, async () => {
-      const saved = await api.getCandles(symbol, range);
-      if (saved.length > 0 || !loadRequest || cancelled) return saved;
-      return api.loadSymbolCandles(symbol, range);
-    }).then((next) => {
+    void candleCache.load(symbol, `${range}:${cacheRevision}:${loadRequest}`, () => readDetailCandleSeries(
+      () => api.getCandles(symbol, range),
+      async () => loadRequest && !cancelled ? api.loadSymbolCandles(symbol, range) : null,
+    )).then((next) => {
       if (cancelled) return;
-      if (next.length > 0) {
-        setResult({ symbol, range, candles: next });
+      if (next) {
+        setResult({ symbol, range, series: next });
         setStatus("ready");
       } else {
         setStatus(loadRequest ? "failed" : "empty");
@@ -98,6 +107,24 @@ export function CandleChart({ symbol, range, cacheRevision, loadRequest, pattern
     });
     return () => { cancelled = true; };
   }, [symbol, range, cacheRevision, loadRequest, candleCache]);
+
+  useEffect(() => {
+    if (!restored || !dailyRange || status === "loading") return;
+
+    let cancelled = false;
+    const reread = singleFlight(async () => {
+      const next = await api.getCandles(symbol, range).catch(() => null);
+      if (cancelled || next?.source !== "session" || !next.candles.length) return;
+
+      setResult({ symbol, range, series: next });
+      setStatus("ready");
+    });
+    const timer = window.setInterval(() => void reread(), 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [symbol, range, cacheRevision, loadRequest, restored, dailyRange, status]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -194,12 +221,12 @@ export function CandleChart({ symbol, range, cacheRevision, loadRequest, pattern
 
       // Chart patterns (detected on daily candles) — overlay only on
       // daily-interval ranges so the line timestamps align with bars.
-      if (patterns && patterns.length > 0 && (range === "1mo" || range === "3mo") && candles.length > 0) {
-        drawPatternLines(chart, patterns, candles[0].epoch_seconds, candles[candles.length - 1].epoch_seconds);
+      if (sessionPatterns && sessionPatterns.length > 0 && dailyRange) {
+        drawPatternLines(chart, sessionPatterns, candles[0].epoch_seconds, candles[candles.length - 1].epoch_seconds);
       }
       // Fibonacci levels + swing leg (forces scale to include extensions).
-      if (fib && candles.length > 0) {
-        drawFibLevels(chart, candleSeries, fib, candles[0].epoch_seconds, candles[candles.length - 1].epoch_seconds);
+      if (sessionFib) {
+        drawFibLevels(chart, candleSeries, sessionFib, candles[0].epoch_seconds, candles[candles.length - 1].epoch_seconds);
       }
 
       chart.timeScale().fitContent();
@@ -215,7 +242,7 @@ export function CandleChart({ symbol, range, cacheRevision, loadRequest, pattern
       startedChart?.remove();
       setDrawFailed(true);
     }
-  }, [candles, range, patterns, fib, ema, volume]);
+  }, [candles, dailyRange, sessionPatterns, sessionFib, ema, volume]);
 
   return (
     <div className={candles ? "chart-container" : "chart-container detail-chart--empty"}>
@@ -223,6 +250,16 @@ export function CandleChart({ symbol, range, cacheRevision, loadRequest, pattern
       {status === "empty" && !candles && <div className="detail-chart-status">{t("detail.chartCacheEmpty")}</div>}
       {(status === "failed" || (candles && drawFailed)) && (
         <div className="detail-chart-status" role="status">{t("detail.chartUnavailable")}</div>
+      )}
+      {restored && (
+        <div className="detail-restored-status detail-chart-provenance" data-candle-source="restored" role="status">
+          <strong>{t("detail.restoredCandles")}</strong>
+          {savedAt && Number.isFinite(savedAt.getTime()) && (
+            <time dateTime={savedAt.toISOString()}>
+              {t("detail.savedAt", { date: savedAt.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" }) })}
+            </time>
+          )}
+        </div>
       )}
       {candles && <div ref={containerRef} className="chart-inner" style={{ height: "470px" }} />}
     </div>

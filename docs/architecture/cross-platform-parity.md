@@ -5,14 +5,65 @@
 Android shows stock exposure, research labels, local position facts, and a dashboard header that returns on upward scroll.
 Android Positions and Windows Advisor withhold weights when quote coverage is incomplete.
 P/L uses lots with both a market value and a cost basis. The views keep separate quote and P/L coverage.
+Both clients show each matching lot in ticker Detail and calculate weight against the complete book.
+Windows Detail reads the Advisor book locally and uses session quotes for market fields.
 See [Android Positions](../product/android-positions.md) for the field and interaction contract.
+
+### Windows Portfolio Market Data
+
+The Windows session cache indexes prices, ticker summaries, and one-year daily candles by ticker.
+Accepted feed and Detail results fill the cache. Advisor requests missing evidence for the book's unique symbols.
+Advisor uses daily candles for risk, setup, and price fallback. The cache combines concurrent candle demand.
+Portfolio setup uses the selected Vantage model and market regime with available ticker summaries and daily candles.
+The legacy model compares sectors within the book. Optional forecast and technical evidence can differ from Markets.
+The cache expires evidence and delays retries after failed requests. The view loads missing setup inputs in bounded passes.
+The active profile defines the scheduled feed. Portfolio demand has no path into Markets ranking or alerts.
+Restored disk data keeps its separate display path.
 
 ## Ticker Detail
 
 Android and Windows open Detail with available data and request ticker updates on demand.
-Android restores ticker detail from local storage. Windows reads the current session cache.
+Both clients save one local note per ticker from Detail. Vantage also offers a Delete note action.
+Both apps restore saved rows for the active universe at startup.
+Windows reads saved ticker Detail and candles on demand. Candles are keyed by profile, ticker, and chart range.
+Windows keeps restored data separate from the state that supplies ranking and alerts.
+Android also persists full ticker price history and revision history.
 
 Discount Screener has four clients: Rust desktop, Windows Tauri, native Android, and Flutter.
+
+## Watchlist
+
+Both apps change Watchlist membership from Detail and persist it locally.
+Vantage keeps one list across universe profiles and shows saved tickers without a session quote.
+
+## Feed Membership
+
+Android and Vantage can add tickers to the active feed.
+Vantage saves additions and exclusions per universe. It applies them to the profile catalog at startup and on profile changes.
+Vantage preserves the catalog order and appends added tickers in the order entered.
+
+## Android Long V3 In Vantage
+
+Vantage offers Android Long V3 as an opt-in ranking in Markets.
+It ranks the active Vantage feed's equities with the Headless Android rules.
+The projection uses session inputs and loads exact one-year weekly candles on demand.
+The view marks incomplete valuations when the model reference cannot be computed.
+The [Headless guide](../../apps/windows/src-tauri/HEADLESS.md#android-semantics-default-for-long-v3) describes the shared Kotlin and Rust parity fixture.
+
+## Opportunities And Upside
+
+Both apps have separate Opportunities and Upside lists.
+Vantage Upside projects the active feed with session quotes and analyst targets independently of the scoring model.
+It orders rows by price-relative upside and places unavailable values last.
+Vantage numbers both lists after filters and sorting.
+
+## Index Estimates
+
+Both apps withhold the index DCF projection and show coverage diagnostics.
+Each analyst endpoint uses its own companies with positive targets, session prices, and market caps.
+The gap is the market-cap-weighted average of each covered company's target relative to its price.
+Both endpoints need coverage to show a range. A covered endpoint can show a zero gap.
+Timed return remains unavailable when the report has no target date.
 
 ## Default Rule
 

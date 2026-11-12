@@ -1,7 +1,9 @@
-import { useState, useEffect, useId, useRef } from "react";
+import { useState, useEffect, useId, useMemo, useRef } from "react";
 import { api, fmt } from "../api";
-import type { SymbolDetail, OpportunityRow, PriceProvenance } from "../api";
+import type { SymbolDetail, OpportunityRow, PortfolioPosition, PriceProvenance } from "../api";
 import { CandleChart } from "./CandleChart";
+import { DetailPositionLots } from "./DetailPositionLots";
+import { TickerNoteEditor } from "./TickerNoteEditor";
 import { HistoryChart } from "./HistoryChart";
 import { TechnicalAnalysisPanel } from "./TechnicalAnalysisPanel";
 import type { Profile } from "./TechnicalAnalysisPanel";
@@ -32,6 +34,10 @@ import { buildConditionalPlan, type PlanStance } from "../conditionalPlan";
 import { verdictFromTechnicalScore } from "../technicalVerdict";
 import { UI, UiInspectable } from "../uiInspect";
 import { createDetailLoader, INITIAL_DETAIL, VALUATION_READ_DELAYS, type DetailLoadState } from "../detailLoader";
+import { detailSnapshotPresentation } from "../detailSnapshotPresentation";
+import { projectDetailPosition } from "../detailPosition";
+import type { WatchlistStatus, WatchlistWriteStatus } from "../watchlist";
+import { singleFlight } from "../singleFlight";
 import {
   detailValuationPresentation,
   dcfMarketRelation,
@@ -91,12 +97,23 @@ function ValuationInfoTooltip({ lines }: { lines: string[] }) {
 
 interface Props {
   symbol: string;
-  row: OpportunityRow | null;
+  sessionRows: readonly OpportunityRow[];
+  watchlist: {
+    status: WatchlistStatus;
+    included: boolean;
+    writeStatus: WatchlistWriteStatus | undefined;
+    onToggle: () => void;
+    onRetry: () => void;
+  };
   scoringModel: ScoringModelId;
   profile: Profile;
   onProfileChange: (p: Profile) => void;
   onClose: () => void;
 }
+
+type PositionBook =
+  | { kind: "pending" | "unavailable" }
+  | { kind: "ready"; positions: PortfolioPosition[] };
 
 const RANGES = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"];
 
@@ -107,10 +124,11 @@ const ISSUE_LABEL = {
   chart_unavailable: "detail.chartUnavailable",
 } as const;
 
-export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChange, onClose }: Props) {
-  const { t } = useT();
+export function DetailPanel({ symbol, sessionRows, watchlist, scoringModel, profile, onProfileChange, onClose }: Props) {
+  const { t, lang } = useT();
   const presentation = getScoringPresentation(scoringModel);
   const [load, setLoad] = useState<DetailLoadState<SymbolDetail>>(INITIAL_DETAIL);
+  const [positionBook, setPositionBook] = useState<PositionBook>({ kind: "pending" });
   const loaderRef = useRef<ReturnType<typeof createDetailLoader<SymbolDetail>> | null>(null);
   const [chartRange, setChartRange] = useState({ range: "3mo", request: 0, revision: 0 });
   const { range } = chartRange;
@@ -135,7 +153,40 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
     };
   }, [symbol]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void api.portfolioList().then(
+      (positions) => {
+        if (!cancelled) setPositionBook({ kind: "ready", positions });
+      },
+      () => {
+        if (!cancelled) setPositionBook({ kind: "unavailable" });
+      },
+    );
+    return () => { cancelled = true; };
+  }, []);
+
   const { detail, status, issues, chartRevision, valuationRevision } = load;
+  const opportunityRow = sessionRows.find((candidate) => candidate.symbol === symbol) ?? null;
+  const { restored, liveRow: row, assetType, savedAt, shouldReadSession } =
+    detailSnapshotPresentation(detail, opportunityRow);
+  const position = useMemo(
+    () => positionBook.kind === "ready"
+      ? projectDetailPosition(symbol, positionBook.positions, sessionRows, detail)
+      : null,
+    [symbol, positionBook, sessionRows, detail],
+  );
+
+  // A published row can arrive before the backend has a usable session quote.
+  useEffect(() => {
+    const loader = loaderRef.current;
+    if (!loader || !shouldReadSession || status !== "ready") return;
+    const reread = singleFlight(() => loader.reread());
+    void reread();
+    const timer = window.setInterval(reread, 5_000);
+    return () => window.clearInterval(timer);
+  }, [symbol, shouldReadSession, status]);
+
   useEffect(() => {
     if (!valuationRevision) return;
     const loader = loaderRef.current;
@@ -168,14 +219,12 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
     ? valuation.valueCents
     : null;
   const hasDcf = valuation.kind === "selected";
-  const dcfVsMarket = dcfMarketRelation(dcfValue, marketPrice);
+  const dcfVsMarket = restored ? null : dcfMarketRelation(dcfValue, marketPrice);
   const valuationReason = detail?.valuation_unavailable_reason ?? null;
 
   const f = detail?.fundamentals;
-  // Unknown row type stays neutral until the scored row arrives; never guess
-  // that an outside-universe symbol is an equity and show valuation guidance.
-  const technicalOnly = row == null || row.asset_type === "crypto" || row.asset_type === "etf";
-  const isCrypto = row?.asset_type === "crypto" || symbol.endsWith("-USD");
+  const technicalOnly = assetType !== "stock";
+  const isCrypto = assetType === "crypto" || symbol.endsWith("-USD");
   const gapPresentation = presentation.gap(gap);
   const hasValidData = marketPrice > 0;
   const dcfSlotState: "hidden" | "loading" | "ready" | "disputed" | "unavailable" = technicalOnly
@@ -184,7 +233,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       ? "ready"
       : valuation.kind === "disputed"
         ? "disputed"
-      : valuation.kind !== "unavailable" && !valuationReason
+      : !restored && valuation.kind !== "unavailable" && !valuationReason
         && (status === "reading" || refreshing || valuationRevision > valuationWaitEnded)
         ? "loading"
         : "unavailable";
@@ -204,7 +253,9 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         compositeScore: row?.composite_score ?? null,
         technicalScore: row?.technical_score ?? null,
         technicalVerdict: verdictFromTechnicalScore(row?.technical_score ?? null),
-        assetType: row?.asset_type ?? null,
+        assetType,
+        detailSource: detail?.detail_source ?? null,
+        savedAtEpochSeconds: detail?.saved_at_epoch_seconds ?? null,
         dcfSlotState,
         hasDcf,
       }}
@@ -212,9 +263,22 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       <div className="detail-header">
         <div>
           <span className="detail-symbol">{symbol}</span>
+          {position && <span className="detail-position-held" data-position-held>{t("detail.positionHeld")}</span>}
           {companyName && <span className="detail-company">{companyName}</span>}
         </div>
         <div className="detail-actions">
+          <button
+            type="button"
+            className="btn-ghost detail-watchlist-toggle"
+            data-watchlist-toggle
+            aria-label={t("watchlist.toggle", { symbol })}
+            aria-pressed={watchlist.included}
+            aria-busy={watchlist.writeStatus === "saving"}
+            disabled={watchlist.status !== "ready" || watchlist.writeStatus === "saving"}
+            onClick={watchlist.onToggle}
+          >
+            {t(watchlist.included ? "watchlist.unwatch" : "watchlist.watch")}
+          </button>
           <button
             type="button"
             className="btn-ghost"
@@ -228,6 +292,18 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         </div>
       </div>
 
+      {watchlist.status === "unavailable" && (
+        <div className="detail-cache-message detail-cache-message--issue" data-watchlist-error>
+          <p role="status">{t("watchlist.readError")}</p>
+          <button className="btn-ghost" type="button" onClick={watchlist.onRetry}>{t("watchlist.retry")}</button>
+        </div>
+      )}
+      {watchlist.writeStatus === "failed" && (
+        <p className="detail-cache-message detail-cache-message--issue" data-watchlist-error role="status">
+          {t("watchlist.writeError")}
+        </p>
+      )}
+
       {!hasSavedDetail && status === "reading" && (
         <div className="loading-msg" role="status">{t("detail.loading")} {symbol}…</div>
       )}
@@ -237,6 +313,16 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       {issues.length > 0 && (
         <div className="detail-cache-message detail-cache-message--issue" role="status">
           {issues.map((issue) => <p key={issue}>{t(ISSUE_LABEL[issue])}</p>)}
+        </div>
+      )}
+      {restored && (
+        <div className="detail-restored-status" data-detail-source="restored" role="status">
+          <strong>{t("detail.restoredSnapshot")}</strong>
+          {savedAt && (
+            <time dateTime={savedAt.toISOString()}>
+              {t("detail.savedAt", { date: savedAt.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" }) })}
+            </time>
+          )}
         </div>
       )}
 
@@ -258,8 +344,8 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
               </span>
             )}
           </span>
-          <span className="price-label">{t("detail.marketPrice")}</span>
-          {hasValidData && (
+          <span className="price-label">{t(restored ? "detail.savedQuote" : "detail.marketPrice")}</span>
+          {!restored && hasValidData && (
             <span className="muted small">{t(updatedQuote ? "detail.updatedQuote" : "detail.savedQuote")}</span>
           )}
         </div>
@@ -267,7 +353,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
           <div className="price-arrow">→</div>
           <div className="price-main">
             <span className="price-value">{targetPrice > 0 ? fmt.dollars(targetPrice) : "—"}</span>
-            <span className="price-label">{t(presentation.analystTargetLabelKey)}</span>
+            <span className="price-label">{t(restored ? "detail.analystTarget" : presentation.analystTargetLabelKey)}</span>
           </div>
         </>}
         {dcfSlotState === "loading" && (
@@ -332,7 +418,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
                       color: unreliable
                         ? "var(--warning)"
                         : toneColor(
-                          hasValidData ? presentation.dcfTone(dcfValue, marketPrice) : "neutral",
+                          !restored && hasValidData ? presentation.dcfTone(dcfValue, marketPrice) : "neutral",
                         ),
                     }}
                   >
@@ -364,7 +450,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
             })()}
           </div>
         )}
-        {hasValidData && !technicalOnly && (
+        {!restored && hasValidData && !technicalOnly && (
           <div
             className={`gap-pill ${gapToneClass(gapPresentation.tone)}`}
             title={renderText(gapPresentation.text, t)}
@@ -373,7 +459,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
             {renderText(gapPresentation.compactText, t)}
           </div>
         )}
-        {!technicalOnly && (
+        {!restored && !technicalOnly && (
           <div className={`conf-pill conf-${confidence.toLowerCase()}`}>
             {t(`conf.${confidence}`)}
           </div>
@@ -382,10 +468,10 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       )}
 
       {/* Price provenance — cross-source verification badge */}
-      {relatedLoaded && <ProvenanceBadge symbol={symbol} />}
+      {!restored && relatedLoaded && <ProvenanceBadge symbol={symbol} />}
 
       {/* Earnings warning — only when a date is known and upcoming within 21 days */}
-      {(() => {
+      {!restored && (() => {
         const epoch = row?.next_earnings_epoch ?? detail?.next_earnings_epoch ?? null;
         if (epoch == null) return null;
         const days = Math.floor((epoch * 1000 - Date.now()) / 86_400_000);
@@ -404,8 +490,17 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         );
       })()}
 
+      {position && <DetailPositionLots position={position} />}
+      {positionBook.kind === "unavailable" && (
+        <p className="detail-position-read-failed" data-position-book-unavailable role="status">
+          {t("detail.positionReadFailed")}
+        </p>
+      )}
+
+      <TickerNoteEditor symbol={symbol} />
+
       {/* Crypto cycle analysis — shown only for crypto symbols, right after price */}
-      {relatedLoaded && <CryptoCyclePanel symbol={symbol} isCrypto={isCrypto} scoringModel={scoringModel} />}
+      {!restored && relatedLoaded && <CryptoCyclePanel symbol={symbol} isCrypto={isCrypto} scoringModel={scoringModel} />}
 
       {/* ── Analysis summary — needs both row and detail for full narrative ── */}
       {row && detail && <AnalysisSummary row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}
@@ -449,8 +544,8 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
           range={range}
           cacheRevision={chartRevision}
           loadRequest={chartRange.revision === chartRevision ? chartRange.request : 0}
-          patterns={showPat ? detail?.chart_patterns : undefined}
-          fib={showFib ? detail?.fib : null}
+          patterns={!restored && showPat ? detail?.chart_patterns : undefined}
+          fib={!restored && showFib ? detail?.fib : null}
           ema={showEma}
           volume={showVol}
         />
@@ -463,7 +558,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       )}
 
       {/* Chart patterns (classic TA structures, from daily candles) */}
-      {detail && detail.chart_patterns.length > 0 && (
+      {!restored && detail && detail.chart_patterns.length > 0 && (
         <div className="info-section">
           <h3>{t("pat.title")}</h3>
           <ChartPatterns patterns={detail.chart_patterns} />
@@ -471,7 +566,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       )}
 
       {/* Fibonacci levels (from daily candles) */}
-      {detail?.fib && (
+      {!restored && detail?.fib && (
         <div className="info-section">
           <h3>{t("fib.title")}</h3>
           <FibLevels fib={detail.fib} />
@@ -498,7 +593,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
       <CongressStockPanel symbol={symbol} />
 
       {/* Multi-TF technical analysis — only when detail is loaded */}
-      {detail && (
+      {!restored && detail && (
         <TechnicalAnalysisPanel
           weekly={detail.weekly_summary}
           daily={detail.chart_summary}
@@ -517,7 +612,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         <div className="section-grid">
           <div className="info-section">
             <h3>{t("detail.analystConsensus")}</h3>
-            {presentation.analystSectionNote.key && (
+            {!restored && presentation.analystSectionNote.key && (
               <p className="analyst-perspective-note">{renderText(presentation.analystSectionNote, t)}</p>
             )}
             <div className="kv-grid">
@@ -525,10 +620,13 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
               <span>{t("detail.recommendation")}</span><span>{fmt.recMean(detail.recommendation_mean_hundredths)}</span>
               <span>{t("detail.targetLow")}</span><span>{detail.low_fair_value_cents ? fmt.dollars(detail.low_fair_value_cents) : "—"}</span>
               <span>{t("detail.targetHigh")}</span><span>{detail.high_fair_value_cents ? fmt.dollars(detail.high_fair_value_cents) : "—"}</span>
-              <span>{t("detail.signalAge")}</span><span>{detail.signal_age_seconds != null ? `${Math.round(detail.signal_age_seconds / 3600)}h` : "—"}</span>
+              {!restored && <>
+                <span>{t("detail.signalAge")}</span>
+                <span>{detail.signal_age_seconds != null ? `${Math.round(detail.signal_age_seconds / 3600)}h` : "—"}</span>
+              </>}
             </div>
             {detail.strong_buy_count != null && <RecommendationBar detail={detail} />}
-            <InsiderActivity detail={detail} presentation={presentation} />
+            {!restored && <InsiderActivity detail={detail} presentation={presentation} />}
           </div>
 
           <div className="info-section">
@@ -550,7 +648,7 @@ export function DetailPanel({ symbol, row, scoringModel, profile, onProfileChang
         </div>
       )}
 
-      <QuantLensPanel symbol={symbol} valuationRevision={valuationRevision} />
+      {!restored && <QuantLensPanel symbol={symbol} valuationRevision={valuationRevision} />}
 
       {/* ── Full analysis breakdown (bottom) ── */}
       {row && detail && <AnalysisBuckets row={row} detail={detail} presentation={presentation} scoringModel={scoringModel} />}

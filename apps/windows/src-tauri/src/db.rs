@@ -10,7 +10,28 @@ use std::sync::Mutex;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
 
+use crate::saved_detail::SavedTickerDetail;
+
+pub(crate) mod saved_candles;
+pub(crate) mod saved_universe;
+mod ticker_notes;
+mod tracked_feed;
+mod watchlist;
+
+pub(crate) const MAX_SAVED_TICKER_DETAILS: usize = 128;
+const MAX_SAVED_TICKER_DETAIL_BYTES: usize = 256 * 1024;
+const SAVED_TICKER_DETAIL_VERSION: i64 = 1;
+
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS ticker_detail_cache (
+    profile             TEXT    NOT NULL,
+    symbol              TEXT    NOT NULL,
+    format_version      INTEGER NOT NULL,
+    saved_at_epoch_ms   INTEGER NOT NULL,
+    payload_json        TEXT    NOT NULL,
+    PRIMARY KEY (profile, symbol)
+);
+
 CREATE TABLE IF NOT EXISTS snapshots (
     symbol               TEXT    NOT NULL,
     captured_at          INTEGER NOT NULL,   -- unix epoch seconds
@@ -530,6 +551,16 @@ impl Db {
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         run_migrations(&conn)?;
+        conn.execute_batch(saved_candles::SCHEMA)
+            .map_err(|e| format!("saved candle schema: {e}"))?;
+        conn.execute_batch(saved_universe::SCHEMA)
+            .map_err(|e| format!("saved universe schema: {e}"))?;
+        conn.execute_batch(ticker_notes::SCHEMA)
+            .map_err(|e| format!("ticker notes schema: {e}"))?;
+        conn.execute_batch(tracked_feed::SCHEMA)
+            .map_err(|e| format!("tracked feed schema: {e}"))?;
+        conn.execute_batch(watchlist::SCHEMA)
+            .map_err(|e| format!("watchlist schema: {e}"))?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -3050,6 +3081,89 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
 }
 
 impl Db {
+    pub(crate) fn load_saved_ticker_detail(
+        &self,
+        profile: &str,
+        symbol: &str,
+    ) -> Result<Option<SavedTickerDetail>, String> {
+        let row: Option<(i64, i64, Option<String>)> = {
+            let conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+            conn.query_row(
+                "SELECT format_version, saved_at_epoch_ms,
+                        CASE WHEN length(CAST(payload_json AS BLOB)) <= ?3 THEN payload_json END
+                 FROM ticker_detail_cache WHERE profile = ?1 AND symbol = ?2",
+                params![profile, symbol, MAX_SAVED_TICKER_DETAIL_BYTES],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read saved ticker detail: {error}"))?
+        };
+        let Some((version, saved_at_epoch_ms, payload)) = row else {
+            return Ok(None);
+        };
+        if version != SAVED_TICKER_DETAIL_VERSION {
+            return Err("unsupported saved ticker detail format".into());
+        }
+        let payload = payload.ok_or("saved ticker detail exceeds its size limit")?;
+        let mut saved: SavedTickerDetail =
+            serde_json::from_str(&payload).map_err(|_| "invalid saved ticker detail payload")?;
+        if saved.detail.symbol != symbol
+            || saved.detail.market_price_cents <= 0
+            || saved_at_epoch_ms < 0
+        {
+            return Err("invalid saved ticker detail identity or quote".into());
+        }
+        saved.saved_at_epoch_ms = saved_at_epoch_ms;
+        Ok(Some(saved))
+    }
+
+    pub(crate) fn save_ticker_detail(
+        &self,
+        profile: &str,
+        saved: &SavedTickerDetail,
+    ) -> Result<(), String> {
+        let payload = serde_json::to_string(saved)
+            .map_err(|error| format!("encode saved ticker detail: {error}"))?;
+        if payload.len() > MAX_SAVED_TICKER_DETAIL_BYTES {
+            return Err("saved ticker detail exceeds its size limit".into());
+        }
+        let mut conn = self.conn.lock().map_err(|_| "db lock poisoned")?;
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("save ticker detail: {error}"))?;
+        let changed = tx.execute(
+            "INSERT INTO ticker_detail_cache (profile, symbol, format_version, saved_at_epoch_ms, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(profile, symbol) DO UPDATE SET
+               format_version = excluded.format_version,
+               saved_at_epoch_ms = excluded.saved_at_epoch_ms,
+               payload_json = excluded.payload_json
+             WHERE ticker_detail_cache.format_version <= excluded.format_version
+               AND (ticker_detail_cache.format_version <> excluded.format_version
+                 OR ticker_detail_cache.payload_json <> excluded.payload_json)",
+            params![
+                profile,
+                saved.detail.symbol,
+                SAVED_TICKER_DETAIL_VERSION,
+                saved.saved_at_epoch_ms,
+                payload,
+            ],
+        ).map_err(|error| format!("write saved ticker detail: {error}"))?;
+        if changed != 0 {
+            tx.execute(
+                "DELETE FROM ticker_detail_cache WHERE rowid IN (
+                     SELECT rowid FROM ticker_detail_cache
+                     ORDER BY saved_at_epoch_ms DESC, rowid DESC
+                     LIMIT -1 OFFSET ?1
+                 )",
+                params![MAX_SAVED_TICKER_DETAILS],
+            )
+            .map_err(|error| format!("prune saved ticker detail: {error}"))?;
+        }
+        tx.commit()
+            .map_err(|error| format!("commit saved ticker detail: {error}"))
+    }
+
     pub fn load_fmp_forecast_cache(
         &self,
         provider_day: &str,

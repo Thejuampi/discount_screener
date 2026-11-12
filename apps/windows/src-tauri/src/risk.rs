@@ -85,50 +85,28 @@ fn daily_returns(candles: &[HistoricalCandle]) -> BTreeMap<i64, f64> {
 }
 
 /// Compute ATR + pairwise correlation for the given holdings.
-/// Reuses cached daily candles from the screener and fetches the rest on demand.
+/// Reuses shared session candles and loads any missing series by ticker.
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn get_portfolio_risk(
     symbols: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<PortfolioRiskResponse, String> {
     // Heavy (network + correlation math) → run off the UI thread.
-    let screener_arc = state.screener.clone();
+    let cache = state.market_data.clone();
+    let load_client = crate::commands::market_data_client_loader(&state);
     crate::tauri_compat::async_runtime::spawn_blocking(
         move || -> Result<PortfolioRiskResponse, String> {
-            // Normalize + dedupe, preserving order.
-            let mut syms: Vec<String> = Vec::new();
-            for s in symbols {
-                let k = s.trim().to_uppercase();
-                if !k.is_empty() && !syms.contains(&k) {
-                    syms.push(k);
-                }
-            }
-
-            // Gather candles: cache first, fetch what's missing.
-            let mut candles_by_sym: BTreeMap<String, Vec<HistoricalCandle>> = BTreeMap::new();
-            let mut missing: Vec<String> = Vec::new();
-            {
-                let screener = screener_arc.lock().map_err(|_| "screener lock")?;
-                for sym in &syms {
-                    match screener.daily_candles.get(sym) {
-                        Some(c) if c.len() >= CORR_MIN_OVERLAP + 1 => {
-                            candles_by_sym.insert(sym.clone(), c.clone());
-                        }
-                        _ => missing.push(sym.clone()),
-                    }
-                }
-            }
-            if !missing.is_empty() {
-                let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
-                for sym in &missing {
-                    if let Ok(c) = client.fetch_candles(sym, "1y", "1d") {
-                        if c.len() >= 2 {
-                            candles_by_sym.insert(sym.clone(), c);
-                        }
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                }
-            }
+            let client = load_client().map_err(|error| error.to_string())?;
+            let syms = crate::market_data_cache::unique_symbols(symbols);
+            let candles_by_sym: BTreeMap<_, _> = syms
+                .iter()
+                .filter_map(|symbol| {
+                    let candles = cache.demand_daily(symbol, || {
+                        crate::market_data_cache::fetch_daily(&client, symbol)
+                    })?;
+                    (candles.len() >= 2).then(|| (symbol.clone(), candles))
+                })
+                .collect();
 
             // Per-symbol ATR + last close.
             let mut per_symbol = Vec::with_capacity(syms.len());

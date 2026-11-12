@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::analyst_forecasts::AnalystForecastService;
@@ -9,21 +9,24 @@ use crate::crypto_cycle::FngCache;
 use crate::db::Db;
 use crate::engine::ScreenerState;
 use crate::feed_log::FeedLog;
+use crate::feed_refresh::FeedRefresh;
 use crate::fetcher::YahooClient;
 use crate::launch_profile::ForcedProfile;
 use crate::news::NewsCache;
-use crate::profiles::{compose_universe, resolve_profile_membership};
+use crate::profiles::resolve_tracked_feed_membership;
 use crate::regime::{CnnFngCache, RegimeCache};
 use crate::ticker_search::YahooSearchQuote;
 
-#[derive(Clone)]
 pub struct FeedStatus {
     pub running: bool,
     pub symbols_loaded: usize,
+    pub symbols_total: usize,
+    /// Profile or worker issue independent of Yahoo refresh results.
     pub last_error: Option<String>,
     pub profile_name: String,
     /// Informational: QA sample used snapshots older than reporting threshold.
     pub stale_snapshots: bool,
+    pub(crate) refresh: FeedRefresh,
 }
 
 impl Default for FeedStatus {
@@ -31,10 +34,20 @@ impl Default for FeedStatus {
         Self {
             running: false,
             symbols_loaded: 0,
+            symbols_total: 0,
             last_error: None,
             profile_name: "sp500".into(),
             stale_snapshots: false,
+            refresh: FeedRefresh::default(),
         }
+    }
+}
+
+impl FeedStatus {
+    pub(crate) fn legacy_error(&self) -> Option<String> {
+        self.last_error
+            .clone()
+            .or_else(|| self.refresh.legacy_error())
     }
 }
 
@@ -97,7 +110,16 @@ impl Default for RemoteSearchCache {
 
 pub struct AppState {
     pub screener: Arc<Mutex<ScreenerState>>,
+    pub(crate) market_data: Arc<crate::market_data_cache::MarketDataCache>,
     pub feed_status: Arc<Mutex<FeedStatus>>,
+    pub(crate) feed_wakeup: Arc<Condvar>,
+    pub(crate) save_universe_rows: bool,
+    pub(crate) customize_tracked_feed: bool,
+    /// Keep the GUI feed's Yahoo cooldown when replacing its worker generation.
+    pub(crate) feed_yahoo: Arc<Mutex<Option<Arc<YahooClient>>>>,
+    #[cfg(feature = "gui")]
+    pub(crate) android_v3_year_charts: Arc<Mutex<crate::android_v3_charts::YearCharts>>,
+    pub(crate) edgar_feed_schedules: Arc<Mutex<crate::commands::EdgarFeedSchedules>>,
     pub db: Arc<Db>,
     pub analyst_forecasts: Arc<AnalystForecastService>,
     /// Append-only diagnostics next to the DB (`feed.log`).
@@ -149,6 +171,14 @@ impl AppState {
         db_path: PathBuf,
         forced: Option<ForcedProfile>,
     ) -> Result<Self, String> {
+        Self::new_with_profile_policy(db_path, forced, false)
+    }
+
+    pub(crate) fn new_with_profile_policy(
+        db_path: PathBuf,
+        forced: Option<ForcedProfile>,
+        customize_tracked_feed: bool,
+    ) -> Result<Self, String> {
         let log_path = db_path
             .parent()
             .map(|p| p.join("feed.log"))
@@ -166,21 +196,18 @@ impl AppState {
         let valuation_yahoo = YahooClient::new().ok().map(Arc::new);
 
         let locked = forced.is_some();
-        let (profile, symbols, stale, db_err) = match forced {
-            Some(f) => {
-                let resolved = resolve_profile_membership(&f.name, &db)?;
-                (
-                    resolved.name,
-                    resolved.symbols,
-                    resolved.stale_snapshots,
-                    resolved.db_error,
-                )
-            }
-            None => {
-                let (p, s) = compose_universe("sp500").expect("default sp500 universe");
-                (p, s, false, None)
-            }
-        };
+        let requested = forced
+            .as_ref()
+            .map_or("sp500", |profile| profile.name.as_str());
+        let membership =
+            resolve_tracked_feed_membership(requested, &db, customize_tracked_feed && !locked)?;
+        let resolved = membership.profile;
+        let profile = resolved.name;
+        let symbols = resolved.symbols;
+        let stale = resolved.stale_snapshots;
+        let db_err = resolved.db_error;
+        let mut screener = ScreenerState::new();
+        screener.set_feed_exclusions(membership.exclusions);
 
         let mut last_error = db_err.map(|e| format!("qa db fallback: {e}"));
         if stale {
@@ -192,13 +219,24 @@ impl AppState {
         }
 
         Ok(Self {
-            screener: Arc::new(Mutex::new(ScreenerState::new())),
+            screener: Arc::new(Mutex::new(screener)),
+            market_data: Arc::default(),
             feed_status: Arc::new(Mutex::new(FeedStatus {
                 profile_name: profile.clone(),
+                symbols_total: symbols.len(),
                 last_error,
                 stale_snapshots: stale,
                 ..FeedStatus::default()
             })),
+            feed_wakeup: Arc::new(Condvar::new()),
+            save_universe_rows: false,
+            customize_tracked_feed,
+            feed_yahoo: Arc::default(),
+            #[cfg(feature = "gui")]
+            android_v3_year_charts: Arc::default(),
+            edgar_feed_schedules: Arc::new(Mutex::new(
+                crate::commands::EdgarFeedSchedules::default(),
+            )),
             db,
             analyst_forecasts,
             feed_log: Arc::new(FeedLog::new(log_path)),

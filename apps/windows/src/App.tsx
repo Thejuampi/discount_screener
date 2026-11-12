@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { OpportunityList } from "./components/OpportunityList";
+import { OpportunityList, type OpportunitySort } from "./components/OpportunityList";
+import { AndroidLongV3List } from "./components/AndroidLongV3List";
+import { MarketsUpsideList } from "./components/MarketsUpsideList";
+import { RestoredUniverseList } from "./components/RestoredUniverseList";
+import { WatchlistPanel } from "./components/WatchlistPanel";
+import { TrackedFeedPanel } from "./components/TrackedFeedPanel";
 import { DetailPanel } from "./components/DetailPanel";
 import { AlertsPanel } from "./components/AlertsPanel";
 import { BacktestPanel } from "./components/BacktestPanel";
@@ -12,15 +17,15 @@ import { DashboardEditionToggle, DashboardV2Panel, type DashboardEdition } from 
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
 import { canPublishModelRows, createGenerationRefresh } from "./opportunityRefresh";
+import { createFeedRefreshRequest, isFeedRefreshBusy, type FeedRefreshRequestState } from "./feedRefresh";
 import { TickerSearch } from "./components/TickerSearch";
 import { EstimatesPanel } from "./components/EstimatesPanel";
 import { Toaster } from "./toast";
 import { StatusBar } from "./components/StatusBar";
 import type { Profile } from "./components/TechnicalAnalysisPanel";
 
-type ViewMode = "dashboard" | "screener" | "congress" | "advisor" | "scalping" | "settings" | "estimates";
 import { api } from "./api";
-import type { OpportunityRow, UniverseProfileInfo } from "./api";
+import type { AndroidLongV3Status, FeedStatus, OpportunityRow, SavedUniverseRow, TrackedFeedStatus, UniverseProfileInfo } from "./api";
 import { useT } from "./i18n";
 import { useTheme } from "./theme";
 import { useSignalAlerts } from "./useSignalAlerts";
@@ -28,8 +33,16 @@ import { useEmailNotifications } from "./useEmailNotifications";
 import { getScoringPresentation, isScoringModelId, type ScoringModelId } from "./scoringPresentation";
 import { warmMarketContext } from "./marketContextWarmup";
 import { canonicalUniverseName, planUniverseBoot } from "./universeBoot";
+import { visibleRestoredUniverseRows } from "./restoredUniverse";
+import { createWatchlist, INITIAL_WATCHLIST } from "./watchlist";
+import { filterAndroidLongV3 } from "./androidLongV3";
+import { projectMarketUpside } from "./marketUpside";
+import { singleFlight } from "./singleFlight";
 import { UiInspectProvider, UiInspectRoot } from "./uiInspect";
 import "./App.css";
+
+type ViewMode = "dashboard" | "screener" | "watchlist" | "congress" | "advisor" | "scalping" | "settings" | "estimates";
+type MarketsView = "opportunities" | "upside";
 
 const UNIVERSE_STORAGE_KEY = "ds_universe_profile";
 const SCORING_STORAGE_KEY = "ds_scoring_model";
@@ -47,7 +60,29 @@ export default function App() {
 
   const [appVersion, setAppVersion] = useState<string>("");
   const [rows, setRows] = useState<OpportunityRow[]>([]);
+  const [savedUniverse, setSavedUniverse] = useState<{
+    profile: string;
+    rows: SavedUniverseRow[];
+    unavailable: boolean;
+  } | null>(null);
+  const [trackedFeedRead, setTrackedFeedRead] = useState<{
+    profile: string;
+    feed: TrackedFeedStatus | null;
+  } | null>(null);
+  const [trackedFeedWriteFailed, setTrackedFeedWriteFailed] = useState(false);
+  const [universeReadRevision, setUniverseReadRevision] = useState(0);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+  const [watchlist, setWatchlist] = useState(INITIAL_WATCHLIST);
+  const watchlistController = useMemo(() => createWatchlist({
+    read: api.getWatchlist,
+    write: api.setWatchlistMember,
+    publish: setWatchlist,
+  }), []);
+  useEffect(() => {
+    void watchlistController.load();
+    return watchlistController.cancelRead;
+  }, [watchlistController]);
+  const selectedWatchlistSymbol = selectedSymbol?.trim().toUpperCase() ?? "";
   const [showAlerts, setShowAlerts] = useState(false);
   const [showBacktest, setShowBacktest] = useState(false);
   const [autostartOn, setAutostartOn] = useState(false);
@@ -76,18 +111,32 @@ export default function App() {
   };
   const [symbolsLoaded, setSymbolsLoaded] = useState(0);
   const [symbolsTotal, setSymbolsTotal] = useState(528);
+  const [feedStatus, setFeedStatus] = useState<FeedStatus | null>(null);
+  const [feedRefreshRequest, setFeedRefreshRequest] = useState<FeedRefreshRequestState>("idle");
   const [profile, setProfile] = useState<Profile>(() => {
     const saved = localStorage.getItem("ds_profile");
     return (saved === "investor" || saved === "swing" || saved === "daytrade") ? saved : "swing";
   });
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem("ds_view_mode");
-    return (saved === "congress" || saved === "advisor" || saved === "scalping" || saved === "screener" || saved === "settings" || saved === "estimates") ? saved : "dashboard";
+    return (saved === "congress" || saved === "advisor" || saved === "scalping" || saved === "screener" || saved === "watchlist" || saved === "settings" || saved === "estimates") ? saved : "dashboard";
   });
   const [scoringModel, setScoringModel] = useState<ScoringModelId>(() => {
     const saved = localStorage.getItem(SCORING_STORAGE_KEY);
     return isScoringModelId(saved) ? saved : "aggressive_v3";
   });
+  const [androidLongV3, setAndroidLongV3] = useState(false);
+  const [marketsView, setMarketsView] = useState<MarketsView>("opportunities");
+  const [opportunitySort, setOpportunitySort] = useState<OpportunitySort>({
+    key: "composite_score",
+    ascending: false,
+  });
+  const [androidV3Result, setAndroidV3Result] = useState<{
+    profile: string;
+    revision: number;
+    status: AndroidLongV3Status | null;
+    failed: boolean;
+  } | null>(null);
   const [regimeScoring, setRegimeScoring] = useState(() => {
     const saved = localStorage.getItem(REGIME_SCORING_KEY);
     return saved === null ? true : saved === "1";
@@ -103,6 +152,7 @@ export default function App() {
   useSignalAlerts(rows, scoringModel);
   useEmailNotifications(rows, scoringModel);
   const handleViewModeChange = (v: ViewMode) => {
+    if (v === "watchlist") setSelectedSymbol(null);
     setViewMode(v);
     localStorage.setItem("ds_view_mode", v);
   };
@@ -198,31 +248,53 @@ export default function App() {
 
   // The callback reads mutable coordination refs only when invoked, never during render.
   // eslint-disable-next-line react-hooks/refs
-  const refresh = useMemo(() => createGenerationRefresh({
+  const refreshRows = useMemo(() => createGenerationRefresh({
     generation: () => `${dataGenerationRef.current}:${universeGenerationRef.current}`,
     canRefresh: () => !modelSwitchingRef.current && !universeSwitchingRef.current,
-    fetch: () => Promise.allSettled([api.getOpportunities(), api.getFeedStatus()] as const),
-    publish: ([opportunities, status]) => {
-      if (opportunities.status === "fulfilled") {
-        setRows(opportunities.value);
-      } else {
-        console.error("opportunity refresh failed", opportunities.reason);
-      }
-
-      if (status.status === "fulfilled") {
-        setSymbolsLoaded(status.value.symbols_loaded);
-        setSymbolsTotal(status.value.symbols_total);
-        if (status.value.profile_name) {
-          setUniverseProfile(status.value.profile_name);
-        }
-        if (typeof status.value.profile_locked === "boolean") {
-          setProfileLocked(status.value.profile_locked);
-        }
-      } else {
-        console.error("feed status refresh failed", status.reason);
-      }
+    fetch: () => api.getOpportunities().catch((error) => {
+      console.error("opportunity refresh failed", error);
+      return null;
+    }),
+    publish: (opportunities) => {
+      if (opportunities) setRows(opportunities);
     },
-  }), [setRows, setSymbolsLoaded, setSymbolsTotal, setUniverseProfile, setProfileLocked]);
+  }), []);
+
+  // eslint-disable-next-line react-hooks/refs
+  const refreshFeedStatus = useMemo(() => createGenerationRefresh({
+    generation: () => `${dataGenerationRef.current}:${universeGenerationRef.current}`,
+    canRefresh: () => !modelSwitchingRef.current && !universeSwitchingRef.current,
+    fetch: () => api.getFeedStatus().catch((error) => {
+      console.error("feed status refresh failed", error);
+      return null;
+    }),
+    publish: (status) => {
+      if (!status) return;
+      setFeedStatus(status);
+      setSymbolsLoaded(status.symbols_loaded);
+      setSymbolsTotal(status.symbols_total);
+      setUniverseProfile(status.profile_name);
+      setProfileLocked(status.profile_locked);
+    },
+  }), []);
+
+  const refresh = useCallback(() => {
+    void refreshRows();
+    void refreshFeedStatus();
+  }, [refreshRows, refreshFeedStatus]);
+
+  // eslint-disable-next-line react-hooks/refs
+  const requestFeedRefresh = useMemo(() => createFeedRefreshRequest({
+    generation: () => universeGenerationRef.current,
+    request: api.requestFeedRefresh,
+    onStateChange: (state) => {
+      setFeedRefreshRequest(state);
+      if (state !== "requesting") void refreshFeedStatus();
+    },
+  }), [refreshFeedStatus]);
+
+  const feedRefreshBusy = feedRefreshRequest === "requesting" || isFeedRefreshBusy(feedStatus?.refresh?.phase);
+  const canRequestFeedRefresh = feedStatus?.running && !universeSwitching && !feedRefreshBusy;
 
   useEffect(() => {
     let cancelled = false;
@@ -318,6 +390,7 @@ export default function App() {
           universeSwitchingRef.current,
         )) {
           setRows(nextRows);
+          setFeedStatus(status);
           setSymbolsLoaded(status.symbols_loaded);
           setSymbolsTotal(status.symbols_total);
         } else {
@@ -349,7 +422,12 @@ export default function App() {
     localStorage.setItem(UNIVERSE_STORAGE_KEY, name);
     setSelectedSymbol(null);
     setRows([]);
+    setSavedUniverse(null);
+    setTrackedFeedRead(null);
+    setTrackedFeedWriteFailed(false);
     setSymbolsLoaded(0);
+    setFeedStatus(null);
+    setFeedRefreshRequest("idle");
     try {
       const status = await api.setUniverseProfile(name);
       if (generation !== universeGenerationRef.current) return;
@@ -437,13 +515,117 @@ export default function App() {
     })();
   }, [refresh, modelReady]);
 
+  const confirmedProfile =
+    modelReady && !universeSwitching && feedStatus?.profile_name === universeProfile
+      ? universeProfile
+      : null;
+  const activeTrackedFeed = trackedFeedRead?.profile === universeProfile ? trackedFeedRead : null;
+  const showingUpside = viewMode === "screener" && marketsView === "upside";
+  const showingAndroidV3 = viewMode === "screener" && marketsView === "opportunities" && androidLongV3;
+
+  useEffect(() => {
+    if (!confirmedProfile || universeSwitchingRef.current) return;
+    const generation = universeGenerationRef.current;
+    let cancelled = false;
+    const isCurrent = () =>
+      !cancelled && generation === universeGenerationRef.current && !universeSwitchingRef.current;
+    const publishSavedRows = (savedRows: SavedUniverseRow[], unavailable: boolean) => {
+      if (isCurrent()) {
+        setSavedUniverse({ profile: confirmedProfile, rows: savedRows, unavailable });
+      }
+    };
+    const publishTrackedFeed = (feed: TrackedFeedStatus | null) => {
+      if (isCurrent()) {
+        setTrackedFeedRead({ profile: confirmedProfile, feed: feed?.profile === confirmedProfile ? feed : null });
+      }
+    };
+    void api.getSavedUniverseRows(confirmedProfile).then(
+      (savedRows) => publishSavedRows(savedRows, false),
+      () => publishSavedRows([], true),
+    );
+    void api.getTrackedFeed(confirmedProfile).then(
+      publishTrackedFeed,
+      () => publishTrackedFeed(null),
+    );
+    return () => { cancelled = true; };
+  }, [confirmedProfile, universeReadRevision]);
+
+  useEffect(() => {
+    if (!showingAndroidV3 || !confirmedProfile || universeSwitchingRef.current) return;
+    const generation = universeGenerationRef.current;
+    let cancelled = false;
+    const read = singleFlight(async () => {
+      let status: AndroidLongV3Status | null = null;
+      try {
+        const response = await api.getAndroidLongV3(confirmedProfile);
+        if (response.profile === confirmedProfile) status = response;
+      } catch {
+        // Keep the last result for this universe while the next poll retries.
+      }
+      if (cancelled || generation !== universeGenerationRef.current || universeSwitchingRef.current) return;
+      setAndroidV3Result((current) => ({
+        profile: confirmedProfile,
+        revision: universeReadRevision,
+        status: status ?? (current?.profile === confirmedProfile && current.revision === universeReadRevision
+          ? current.status : null),
+        failed: status === null,
+      }));
+    });
+    void read();
+    const timer = window.setInterval(read, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [showingAndroidV3, confirmedProfile, universeReadRevision]);
+
+  const retryTrackedFeed = () => {
+    setTrackedFeedRead(null);
+    setUniverseReadRevision((revision) => revision + 1);
+  };
+
+  const handleTrackedFeedChange = async (symbol: string, included: boolean) => {
+    if (!confirmedProfile || !activeTrackedFeed?.feed?.editable || universeSwitchingRef.current) return;
+    const generation = ++universeGenerationRef.current;
+    universeSwitchingRef.current = true;
+    setUniverseSwitching(true);
+    setTrackedFeedWriteFailed(false);
+    try {
+      const feed = await api.setTrackedFeedMember(confirmedProfile, symbol, included);
+      if (generation !== universeGenerationRef.current) return;
+      setTrackedFeedRead({ profile: confirmedProfile, feed });
+      setSymbolsTotal(feed.symbols.length);
+      setFeedRefreshRequest("idle");
+      if (!feed.symbols.includes(symbol)) {
+        setRows((current) => current.filter((row) => row.symbol !== symbol));
+        setSavedUniverse((current) => current?.profile === confirmedProfile
+          ? { ...current, rows: current.rows.filter((row) => row.symbol !== symbol) }
+          : current);
+      }
+    } catch {
+      if (generation === universeGenerationRef.current) setTrackedFeedWriteFailed(true);
+    } finally {
+      if (generation === universeGenerationRef.current) {
+        universeSwitchingRef.current = false;
+        setUniverseSwitching(false);
+        setUniverseReadRevision((revision) => revision + 1);
+        void refresh();
+      }
+    }
+  };
+
   // Fast poll while the feed is still filling rows; slower once full.
   useEffect(() => {
     const loading = symbolsTotal === 0 || (rows.length < 8 && symbolsLoaded < symbolsTotal);
     const ms = loading ? 1500 : 5000;
-    const interval = window.setInterval(() => { void refresh(); }, ms);
+    const interval = window.setInterval(() => { void refreshRows(); }, ms);
     return () => window.clearInterval(interval);
-  }, [refresh, rows.length, symbolsLoaded, symbolsTotal]);
+  }, [refreshRows, rows.length, symbolsLoaded, symbolsTotal]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => { void refreshFeedStatus(); }, feedRefreshBusy ? 1500 : 3000);
+    return () => window.clearInterval(interval);
+  }, [refreshFeedStatus, feedRefreshBusy]);
 
   const filtered = rows.filter((r) => {
     const matchText =
@@ -457,6 +639,19 @@ export default function App() {
     const matchAsset = assetFilter === "all" || r.asset_type === assetFilter;
     return matchText && matchConf && matchAsset;
   });
+  const activeSavedUniverse = savedUniverse?.profile === confirmedProfile ? savedUniverse : null;
+  const activeAndroidV3 = showingAndroidV3 && androidV3Result?.profile === confirmedProfile
+    && androidV3Result.revision === universeReadRevision ? androidV3Result : null;
+  const androidRows = filterAndroidLongV3(activeAndroidV3?.status?.rows ?? [], filter);
+  const androidIncomplete = filterAndroidLongV3(activeAndroidV3?.status?.incomplete ?? [], filter);
+  const upsideSymbols = activeTrackedFeed?.feed?.symbols;
+  const upsideRows = useMemo(
+    () => showingUpside && upsideSymbols ? projectMarketUpside(upsideSymbols, rows, filter) : [],
+    [showingUpside, upsideSymbols, rows, filter],
+  );
+  const restoredRows = activeSavedUniverse
+    ? visibleRestoredUniverseRows(activeSavedUniverse.rows, rows, filter, assetFilter)
+    : [];
 
   const uiAppContext = useMemo(
     () => ({
@@ -506,14 +701,20 @@ export default function App() {
         </div>
         <nav className="sidebar-nav">
           {([
-            ["dashboard", "🏠"], ["screener", "📈"], ["estimates", "Σ"], ["scalping", "⚡"], ["congress", "🏛"], ["advisor", "🧭"],
-          ] as [ViewMode, string][]).map(([id, icon]) => (
+            ["dashboard", "🏠"], ["screener", "📈"], ["watchlist", null], ["estimates", "Σ"], ["scalping", "⚡"], ["congress", "🏛"], ["advisor", "🧭"],
+          ] as [ViewMode, string | null][]).map(([id, icon]) => (
             <button
               key={id}
               className={`sidebar-item ${viewMode === id ? "active" : ""}`}
               onClick={() => handleViewModeChange(id)}
             >
-              <span className="sidebar-item-icon">{icon}</span>
+              <span className="sidebar-item-icon" aria-hidden={icon === null ? true : undefined}>
+                {icon ?? (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M4 2.5h8v11l-4-2.75-4 2.75z" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </span>
               <span>{t(`view.${id}`)}</span>
             </button>
           ))}
@@ -536,8 +737,9 @@ export default function App() {
             onOpenSymbol={openSymbol}
             onQueryChange={setFilter}
           />
+          {!showingUpside && <>
           <div
-            className={`scoring-segment${scoringPresentation.isShort ? " scoring-segment--short" : ""}`}
+            className={`scoring-segment${!androidLongV3 && scoringPresentation.isShort ? " scoring-segment--short" : ""}`}
             role="radiogroup"
             aria-label={t("scoring.group")}
           >
@@ -548,7 +750,7 @@ export default function App() {
                 { id: "short_v3" as const, labelKey: "scoring.short", titleKey: "scoring.short.hint" },
               ] as const
             ).map((opt) => {
-              const active = scoringModel === opt.id;
+              const active = !androidLongV3 && scoringModel === opt.id;
               return (
                 <button
                   key={opt.id}
@@ -557,14 +759,26 @@ export default function App() {
                   aria-checked={active}
                   className={`scoring-segment__btn${active ? " is-active" : ""}${opt.id === "short_v3" ? " is-short" : ""}`}
                   title={t(opt.titleKey)}
-                  onClick={() => void selectScoringModel(opt.id)}
+                  onClick={() => {
+                    setAndroidLongV3(false);
+                    void selectScoringModel(opt.id);
+                  }}
                 >
                   {t(opt.labelKey)}
                 </button>
               );
             })}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={androidLongV3}
+              className={`scoring-segment__btn${androidLongV3 ? " is-active" : ""}`}
+              onClick={() => setAndroidLongV3(true)}
+            >
+              Android Long V3
+            </button>
           </div>
-          {(scoringModel === "aggressive_v3" || scoringModel === "short_v3") && (
+          {!androidLongV3 && (scoringModel === "aggressive_v3" || scoringModel === "short_v3") && (
             <button
               type="button"
               className={`scoring-segment__btn${regimeScoring ? " is-active" : ""}`}
@@ -575,16 +789,19 @@ export default function App() {
               {regimeScoring ? t("scoring.regime.on") : t("scoring.regime.off")}
             </button>
           )}
-          <select
-            className="filter-select"
-            value={confidenceFilter}
-            onChange={(e) => setConfidenceFilter(e.target.value)}
-          >
-            <option value="all">{t("filter.all")}</option>
-            <option value="High">{t("filter.high")}</option>
-            <option value="Provisional">{t("filter.provisional")}</option>
-            <option value="qualified">{t("filter.qualified")}</option>
-          </select>
+          {!androidLongV3 && (
+            <select
+              className="filter-select"
+              value={confidenceFilter}
+              onChange={(e) => setConfidenceFilter(e.target.value)}
+            >
+              <option value="all">{t("filter.all")}</option>
+              <option value="High">{t("filter.high")}</option>
+              <option value="Provisional">{t("filter.provisional")}</option>
+              <option value="qualified">{t("filter.qualified")}</option>
+            </select>
+          )}
+          </>}
 
           <select
             className="filter-select universe-select"
@@ -597,16 +814,16 @@ export default function App() {
             {(universeProfiles.length > 0
               ? universeProfiles
               : [{ name: universeProfile, description: "", symbol_count: symbolsTotal }]
-            ).map((p) => (
-              <option key={p.name} value={p.name}>
-                {p.name.toUpperCase()}
-                {p.symbol_count > 0 ? ` · ${p.symbol_count}` : ""}
-              </option>
-            ))}
+            ).map((p) => {
+              const count = p.name === universeProfile && activeTrackedFeed?.feed
+                ? activeTrackedFeed.feed.symbols.length
+                : p.symbol_count;
+              return <option key={p.name} value={p.name}>{p.name.toUpperCase()} · {count}</option>;
+            })}
           </select>
 
           {/* Asset type segmented filter */}
-          <div className="asset-filter">
+          {!showingUpside && !androidLongV3 && <div className="asset-filter">
             {[
               { id: "all",    label: t("filter.type.all"),    icon: "◎" },
               { id: "stock",  label: t("filter.type.stocks"), icon: "📊" },
@@ -623,7 +840,7 @@ export default function App() {
                 <span className="asset-filter-label">{opt.label}</span>
               </button>
             ))}
-          </div>
+          </div>}
           </>)}
         </div>
         <div className="header-right">
@@ -641,8 +858,19 @@ export default function App() {
           <button className="btn-ghost" onClick={() => setShowAlerts(!showAlerts)}>
             🔔 {t("btn.alerts")}
           </button>
-          <button className="btn-ghost" onClick={refresh}>
-            ↺ {t("btn.refresh")}
+          <button
+            type="button"
+            className="btn-ghost"
+            data-ui-action="refresh-universe"
+            disabled={!canRequestFeedRefresh}
+            aria-busy={feedRefreshBusy}
+            onClick={() => {
+              if (canRequestFeedRefresh && !universeSwitchingRef.current) {
+                void requestFeedRefresh(universeProfile);
+              }
+            }}
+          >
+            <span aria-hidden="true">↺</span> {t("btn.refresh")}
           </button>
           <button className="btn-ghost" title={t("view.settings")} onClick={() => handleViewModeChange("settings")}>
             ⚙
@@ -692,24 +920,96 @@ export default function App() {
               onToggleAutostart={toggleAutostart}
             />
           </div>
-        ) : viewMode === "screener" ? (
+        ) : viewMode === "screener" || viewMode === "watchlist" ? (
           <>
             <div className={`list-pane ${selectedSymbol ? "narrow" : ""}`}>
-              {!selectedSymbol && <RegimeBanner scoringModel={scoringModel} />}
-              {scoringPresentation.banner && (
-                <div className="scoring-mode-banner scoring-mode-banner--short" role="status">
-                  <span className="scoring-mode-banner__tag">{t(scoringPresentation.banner.tagKey)}</span>
-                  <span className="scoring-mode-banner__text">{t(scoringPresentation.banner.textKey)}</span>
-                </div>
+              {viewMode === "watchlist" ? (
+                <WatchlistPanel
+                  status={watchlist.status}
+                  symbols={watchlist.symbols}
+                  sessionRows={rows}
+                  selectedSymbol={selectedSymbol}
+                  onSelect={setSelectedSymbol}
+                  onRetry={watchlistController.load}
+                />
+              ) : (
+                <>
+                  <div className="scoring-segment markets-view-switch" role="group" aria-label={t("markets.views")}>
+                    {(["opportunities", "upside"] as const).map((view) => (
+                      <button
+                        key={view}
+                        type="button"
+                        className={`scoring-segment__btn${marketsView === view ? " is-active" : ""}`}
+                        aria-pressed={marketsView === view}
+                        onClick={() => setMarketsView(view)}
+                      >
+                        {t(`markets.${view}`)}
+                      </button>
+                    ))}
+                  </div>
+                  {!showingUpside && !androidLongV3 && !selectedSymbol && <RegimeBanner scoringModel={scoringModel} />}
+                  <TrackedFeedPanel
+                    key={universeProfile}
+                    profile={universeProfile}
+                    feed={activeTrackedFeed?.feed ?? null}
+                    unavailable={activeTrackedFeed?.feed === null}
+                    pending={universeSwitching}
+                    writeFailed={trackedFeedWriteFailed}
+                    onSetMember={(symbol, included) => void handleTrackedFeedChange(symbol, included)}
+                    onRetry={retryTrackedFeed}
+                  />
+                  {showingUpside ? (
+                    <MarketsUpsideList
+                      rows={upsideRows}
+                      status={activeTrackedFeed === null ? "loading" : activeTrackedFeed.feed ? "ready" : "unavailable"}
+                      selectedSymbol={selectedSymbol}
+                      onSelect={setSelectedSymbol}
+                      onRetry={retryTrackedFeed}
+                    />
+                  ) : androidLongV3 ? (
+                    <AndroidLongV3List
+                      key={`android-v3:${universeProfile}`}
+                      status={activeAndroidV3?.status ?? null}
+                      rows={androidRows}
+                      incomplete={androidIncomplete}
+                      failed={activeAndroidV3?.failed ?? false}
+                      selectedSymbol={selectedSymbol}
+                      onSelect={setSelectedSymbol}
+                    />
+                  ) : (
+                    <>
+                      {scoringPresentation.banner && (
+                        <div className="scoring-mode-banner scoring-mode-banner--short" role="status">
+                          <span className="scoring-mode-banner__tag">{t(scoringPresentation.banner.tagKey)}</span>
+                          <span className="scoring-mode-banner__text">{t(scoringPresentation.banner.textKey)}</span>
+                        </div>
+                      )}
+                      {(filtered.length > 0 || restoredRows.length === 0) && (
+                        <OpportunityList
+                          rows={filtered}
+                          selectedSymbol={selectedSymbol}
+                          onSelect={setSelectedSymbol}
+                          symbolsLoaded={symbolsLoaded}
+                          symbolsTotal={symbolsTotal}
+                          scoringModel={scoringModel}
+                          sort={opportunitySort}
+                          onSortChange={setOpportunitySort}
+                        />
+                      )}
+                      {restoredRows.length > 0 && (
+                        <RestoredUniverseList
+                          rows={restoredRows}
+                          selectedSymbol={selectedSymbol}
+                          onSelect={setSelectedSymbol}
+                        />
+                      )}
+                      {activeSavedUniverse?.unavailable && (
+                        <p className="restored-universe__status" role="status">{t("restored.readFailed")}</p>
+                      )}
+                    </>
+                  )}
+                </>
               )}
-              <OpportunityList
-                rows={filtered}
-                selectedSymbol={selectedSymbol}
-                onSelect={setSelectedSymbol}
-                symbolsLoaded={symbolsLoaded}
-                symbolsTotal={symbolsTotal}
-                scoringModel={scoringModel}
-              />
             </div>
 
             {selectedSymbol && (
@@ -717,7 +1017,14 @@ export default function App() {
                 <DetailPanel
                   key={selectedSymbol}
                   symbol={selectedSymbol}
-                  row={rows.find((r) => r.symbol === selectedSymbol) ?? null}
+                  sessionRows={rows}
+                  watchlist={{
+                    status: watchlist.status,
+                    included: watchlist.symbols.includes(selectedWatchlistSymbol),
+                    writeStatus: watchlist.writes.get(selectedWatchlistSymbol),
+                    onToggle: () => void watchlistController.toggle(selectedWatchlistSymbol),
+                    onRetry: watchlistController.load,
+                  }}
                   scoringModel={scoringModel}
                   profile={profile}
                   onProfileChange={handleProfileChange}
@@ -762,7 +1069,12 @@ export default function App() {
 
       </div>
 
-      <StatusBar rowCount={filtered.length} />
+      <StatusBar
+        rowCount={showingUpside ? upsideRows.length : showingAndroidV3 ? androidRows.length
+          : viewMode === "watchlist" ? watchlist.symbols.length : filtered.length}
+        status={feedStatus}
+        refreshRequest={feedRefreshRequest}
+      />
       </div>
 
       <CommandPalette

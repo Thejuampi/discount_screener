@@ -32,6 +32,8 @@ interface Props {
   symbolsTotal?: number;
   /** Backend scoring model id: aggressive_v2 | aggressive_v3 | short_v3 */
   scoringModel?: ScoringModelId;
+  sort: OpportunitySort;
+  onSortChange: (sort: OpportunitySort) => void;
 }
 
 type SortKey =
@@ -39,6 +41,11 @@ type SortKey =
   | "gap_bps" | "decision" | "setup_score" | "composite_score" | "fundamentals_score"
   | "technical_score" | "forecast_score" | "analyst_opinion_count"
   | "recommendation_mean_hundredths" | "sector_name";
+
+export interface OpportunitySort {
+  key: SortKey;
+  ascending: boolean;
+}
 
 type FilterField = "minSetupScore" | "minGapPct" | "minCompositeScore";
 
@@ -119,12 +126,11 @@ export function OpportunityList({
   symbolsLoaded = 0,
   symbolsTotal = 528,
   scoringModel = "aggressive_v3",
+  sort: { key: sortKey, ascending: sortAsc },
+  onSortChange,
 }: Props) {
   const { t } = useT();
   const presentation = getScoringPresentation(scoringModel);
-  // Default: Android V3 ranks by composite; setup_score mirrors composite under V3/Short.
-  const [sortKey, setSortKey] = useState<SortKey>("composite_score");
-  const [sortAsc, setSortAsc] = useState(false);
   const [filters, setFilters] = useState<ListFilterState>(() => loadListFiltersFromStorage());
   const [drafts, setDrafts] = useState(() => {
     var initial = loadListFiltersFromStorage();
@@ -140,8 +146,10 @@ export function OpportunityList({
   }, [filters]);
 
   const handleSort = (key: SortKey) => {
-    if (sortKey === key) setSortAsc((a) => !a);
-    else { setSortKey(key); setSortAsc(key === "symbol" || key === "company_name" || key === "sector_name"); }
+    onSortChange({
+      key,
+      ascending: sortKey === key ? !sortAsc : key === "symbol" || key === "company_name" || key === "sector_name",
+    });
   };
 
   const setFilterField = (field: FilterField, raw: string) => {
@@ -333,6 +341,7 @@ export function OpportunityList({
         <table className="stock-table">
           <thead>
             <tr>
+              <th className="market-ordinal" scope="col" title={t("markets.visiblePosition")}>#</th>
               {th(t("col.symbol"),    "symbol")}
               {th(
                 t("col.setup"),
@@ -371,7 +380,7 @@ export function OpportunityList({
             </tr>
           </thead>
           <tbody>
-            {sorted.map((row) => {
+            {sorted.map((row, index) => {
               const marketContext = createRegimePresentation(regimeRowInput(row, scoringModel));
               return (
                 <UiInspectable
@@ -402,6 +411,7 @@ export function OpportunityList({
                     scoringModel,
                   }}
                 >
+                  <td className="market-ordinal" data-market-ordinal>{index + 1}</td>
                   <td className="symbol-cell">
                     {row.asset_type === "crypto" ? (
                       <span className="crypto-badge" title="Cryptocurrency — scoring técnico solamente">₿</span>

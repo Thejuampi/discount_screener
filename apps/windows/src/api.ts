@@ -93,6 +93,15 @@ export interface CompactPricePath {
 }
 
 export type AssetType = "stock" | "crypto" | "etf";
+
+export interface SavedUniverseRow {
+  symbol: string;
+  company_name: string | null;
+  market_price_cents: number;
+  target_price_cents: number | null;
+  asset_type: AssetType;
+  saved_at_epoch_seconds: number;
+}
 export type RegimeScoreStatus = "Included" | "Disabled" | "Unavailable" | "NotApplicable";
 
 export type RegimeCauseFactor =
@@ -147,6 +156,10 @@ export interface NewsBundle {
 export interface SymbolDetail {
   symbol: string;
   company_name: string | null;
+  detail_source: "session" | "restored";
+  /** The time when Vantage saved the snapshot. */
+  saved_at_epoch_seconds: number | null;
+  asset_type: OpportunityRow["asset_type"] | null;
   market_price_cents: number;
   intrinsic_value_cents: number;
   /** Discount to fair value in bps; null when no usable target. */
@@ -280,10 +293,28 @@ export interface Candle {
   volume: number;
 }
 
+export interface DetailCandleSeries {
+  candles: Candle[];
+  source: "session" | "restored";
+  saved_at_epoch_seconds: number | null;
+}
+
 export interface AlertEvent {
   symbol: string;
   kind: AlertKind;
   timestamp_seconds: number;
+}
+
+export type FeedRefreshPhase = "idle" | "startup" | "retrying" | "queued" | "refreshing";
+
+export interface FeedRefreshStatus {
+  phase: FeedRefreshPhase;
+  trigger: "startup" | "manual" | "scheduled" | null;
+  processed: number;
+  total: number;
+  quote_failures: number;
+  chart_failures: number;
+  rate_limited: number;
 }
 
 export interface FeedStatus {
@@ -291,6 +322,8 @@ export interface FeedStatus {
   symbols_loaded: number;
   symbols_total: number;
   last_error: string | null;
+  system_error: string | null;
+  refresh: FeedRefreshStatus;
   profile_name: string;
   /** When true, launch forced the universe; UI must not switch away. */
   profile_locked: boolean;
@@ -417,6 +450,44 @@ export interface UniverseProfileStatus {
   symbols_loaded: number;
   profile_locked: boolean;
   stale_snapshots: boolean;
+}
+
+export interface TrackedFeedStatus {
+  profile: string;
+  symbols: string[];
+  editable: boolean;
+}
+
+export interface AndroidLongV3Row {
+  symbol: string;
+  company: string | null;
+  price_cents: number;
+  anchor_cents: number | null;
+  anchor: "street_weighted" | "street_consensus" | "identity" | "unavailable";
+  upside_bps: number | null;
+  composite_score: number;
+  coverage: number;
+  fundamentals: number | null;
+  technical: number | null;
+  forecast: number | null;
+  decision: Decision | null;
+  confidence: "high" | "provisional" | "low";
+  trust_signal: "SourceUncertain" | "SourceUnknown" | "ModelValue" | "NoAnalystTarget" | "ThinCoverage" | "CoverageUnknown" | null;
+  projection_gap: string | null;
+}
+
+export interface AndroidLongV3Incomplete {
+  symbol: string;
+  company: string | null;
+  reason: "not_loaded" | "invalid_price" | "no_intrinsic_value" | "score_error";
+}
+
+export interface AndroidLongV3Status {
+  profile: string;
+  rows: AndroidLongV3Row[];
+  incomplete: AndroidLongV3Incomplete[];
+  evaluated: number;
+  eligible: number;
 }
 
 export interface HistorySnapshot {
@@ -793,11 +864,20 @@ export type SearchSubmitOutcome =
 
 export const api = {
   getAppVersion: () => invoke<string>("get_app_version"),
+  getWatchlist: () => invoke<string[]>("get_watchlist"),
+  setWatchlistMember: (symbol: string, included: boolean) =>
+    invoke<void>("set_watchlist_member", { symbol, included }),
   getOpportunities: () => invoke<OpportunityRow[]>("get_opportunities"),
+  getAndroidLongV3: (profile: string) => invoke<AndroidLongV3Status>("get_android_long_v3", { profile }),
+  getSavedUniverseRows: (profile: string) =>
+    invoke<SavedUniverseRow[]>("get_saved_universe_rows", { profile }),
   getRegimeScoringEnabled: () => invoke<boolean>("get_regime_scoring_enabled"),
   setRegimeScoringEnabled: (enabled: boolean) =>
     invoke<boolean>("set_regime_scoring_enabled", { enabled }),
   getSymbolDetail: (symbol: string) => invoke<SymbolDetail | null>("get_symbol_detail", { symbol }),
+  getTickerNote: (symbol: string) => invoke<string | null>("get_ticker_note", { symbol }),
+  setTickerNote: (symbol: string, note: string | null) =>
+    invoke<void>("set_ticker_note", { symbol, note }),
   getAnalystForecasts: (symbol: string) =>
     invoke<AnalystForecastPanel>("get_analyst_forecasts", { symbol }),
   loadAnalystForecasts: (symbol: string) =>
@@ -808,7 +888,8 @@ export const api = {
     invoke<TipRanksSettingsStatus>("tipranks_save_key", { apiKey }),
   tipranksDeleteKey: () => invoke<TipRanksSettingsStatus>("tipranks_delete_key"),
   tipranksTestKey: () => invoke<AnalystForecastPanel>("tipranks_test_key"),
-  getCandles: (symbol: string, range: string) => invoke<Candle[]>("get_candles", { symbol, range }),
+  getCandles: (symbol: string, range: string) =>
+    invoke<DetailCandleSeries | null>("get_candles", { symbol, range }),
   loadSymbolCandles: (symbol: string, range: string) => invoke<Candle[]>("load_symbol_candles", { symbol, range }),
   getAlerts: () => invoke<AlertEvent[]>("get_alerts"),
   refreshSymbol: (symbol: string) => invoke<string>("refresh_symbol", { symbol }),
@@ -828,11 +909,15 @@ export const api = {
   getValuationDossier: (symbol: string) =>
     invoke<ValuationDossierView>("get_valuation_dossier", { symbol }),
   startFeed: () => invoke<void>("start_feed"),
+  requestFeedRefresh: (profile: string) => invoke<void>("request_feed_refresh", { profile }),
   getFeedStatus: () => invoke<FeedStatus>("get_feed_status"),
   listUniverseProfiles: () => invoke<UniverseProfileInfo[]>("list_universe_profiles"),
   getUniverseProfile: () => invoke<UniverseProfileStatus>("get_universe_profile"),
   setUniverseProfile: (name: string) =>
     invoke<UniverseProfileStatus>("set_universe_profile", { name }),
+  getTrackedFeed: (profile: string) => invoke<TrackedFeedStatus>("get_tracked_feed", { profile }),
+  setTrackedFeedMember: (profile: string, symbol: string, included: boolean) =>
+    invoke<TrackedFeedStatus>("set_tracked_feed_member", { profile, symbol, included }),
   getSymbolHistory: (symbol: string, days: number) =>
     invoke<HistorySnapshot[]>("get_symbol_history", { symbol, days }),
   getBacktest: (decision: Decision, daysAgo: number) =>
@@ -878,6 +963,8 @@ export const api = {
     invoke<PortfolioImportResult>("portfolio_replace", { positions }),
   getQuotePrices: (symbols: string[]) =>
     invoke<Record<string, number>>("get_quote_prices", { symbols }),
+  getPortfolioAnalysis: (symbols: string[]) =>
+    invoke<PortfolioAnalysis>("get_portfolio_analysis", { symbols }),
   getModelAccuracy: (horizonDays: number) =>
     invoke<AccuracyRow[]>("get_model_accuracy", { horizonDays }),
   getPortfolioRisk: (symbols: string[]) =>
@@ -1241,6 +1328,20 @@ export interface PortfolioPosition {
   avg_cost_cents: number;
   opened_at: string | null;
   notes: string | null;
+}
+
+export interface PortfolioSignal {
+  symbol: string;
+  sector_name: string | null;
+  asset_type: OpportunityRow["asset_type"];
+  setup_score: number;
+  setup_label: SetupLabel;
+  regime_score: number | null;
+}
+
+export interface PortfolioAnalysis {
+  rows: PortfolioSignal[];
+  pending: boolean;
 }
 
 export interface AccuracyRow {

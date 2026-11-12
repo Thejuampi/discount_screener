@@ -139,6 +139,6 @@ describe("symbol detail production path", () => {
     const chart = readFileSync(new URL("../src/components/CandleChart.tsx", import.meta.url), "utf8");
     assert.match(detail, /useState\(\{ range: "3mo", request: 0, revision: 0 \}\)/);
     assert.match(detail, /onClick=\{\(\) => setChartRange\(\(prior\) => \(\{ range: r, request: prior.request \+ 1/);
-    assert.match(chart, /await api\.getCandles\(symbol, range\);\s*if \(saved\.length > 0 \|\| !loadRequest \|\| cancelled\) return saved;\s*return api\.loadSymbolCandles\(symbol, range\)/);
+    assert.match(chart, /readDetailCandleSeries\(\s*\(\) => api\.getCandles\(symbol, range\),\s*async \(\) => loadRequest && !cancelled \? api\.loadSymbolCandles\(symbol, range\) : null/);
   });
 });

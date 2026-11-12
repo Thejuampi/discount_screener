@@ -15,6 +15,7 @@
 //! The frozen scoring input is persisted as a JSON snapshot so the daemon
 //! restarts warm and rankings can be replayed offline (`rank-snapshot`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -25,7 +26,7 @@ use crate::commands::{
     apply_universe_profile, capture_opportunity_projection, project_opportunity_rows,
     OpportunityProjection, OpportunityProjectionInput, OpportunityRow,
 };
-use crate::engine::ScreenerState;
+use crate::engine::{CandidateRow, ExternalValuationSignal, FundamentalSnapshot, ScreenerState};
 pub use crate::opportunity_v3::ScoringModel;
 use crate::state::AppState;
 
@@ -65,6 +66,42 @@ pub struct SnapshotRow {
     /// Android DCF state facts for the projection; `None` = no DCF for the symbol.
     #[serde(default)]
     android_dcf: Option<AndroidDcfFacts>,
+}
+
+impl SnapshotRow {
+    fn capture_android(
+        row: CandidateRow,
+        year: Option<&crate::android_chart::AndroidChartSummary>,
+        fundamentals: Option<&FundamentalSnapshot>,
+        signal: Option<&ExternalValuationSignal>,
+    ) -> Self {
+        // Kotlin ReportingEngine discards nonpositive Street fair values.
+        let signal = signal.filter(|signal| android_accepts_signal(signal));
+        let business_class =
+            fundamentals.map(|fundamentals| android_class(&row.symbol, fundamentals));
+        let android_dcf = AndroidDcfFacts::bulk_load(
+            business_class,
+            fundamentals,
+            row.market_price_cents,
+            Some(AndroidIdentity::Unknown),
+        );
+        Self {
+            row,
+            daily: None,
+            weekly: None,
+            hourly: None,
+            daily_candles: Vec::new(),
+            dcf_analysis: None,
+            crypto_setup: None,
+            year: year.cloned(),
+            business_class,
+            external: signal.map(|signal| (signal.fair_value_cents, signal.age_seconds)),
+            external_analysts: signal.and_then(android_analyst_count),
+            android_target: signal.map(android_forecast_target),
+            android_street: signal.map(AndroidStreet::from_signal),
+            android_dcf,
+        }
+    }
 }
 
 /// `ReportingEngine.sanitizeExternalSignal` fields read by `ScreenDataProjectionEngine`.
@@ -254,70 +291,66 @@ impl OpportunitySnapshot {
     pub fn capture_with_year(
         screener: &Mutex<ScreenerState>,
         profile: &str,
-        year: &std::collections::HashMap<String, crate::android_chart::AndroidChartSummary>,
+        year: &HashMap<String, crate::android_chart::AndroidChartSummary>,
     ) -> Self {
-        let (classes, externals, funds) = {
+        let (funds, signals) = {
             let s = screener.lock().unwrap();
-            let funds = s.fundamentals.clone();
-            let classes: std::collections::HashMap<String, crate::dcf_model::BusinessClass> = s
-                .fundamentals
-                .iter()
-                .map(|(sym, f)| (sym.clone(), android_class(sym, f)))
-                .collect();
-            type Ext = (
-                (i64, u64),
-                Option<u32>,
-                (Option<i64>, Option<u32>),
-                AndroidStreet,
-            );
-            let externals: std::collections::HashMap<String, Ext> = s
-                .signals
-                .iter()
-                // Kotlin `ReportingEngine.ingestExternal` drops fair <= 0 signals
-                // entirely (status Missing, no forecast target).
-                .filter(|(_, x)| android_accepts_signal(x))
-                .map(|(sym, x)| {
-                    (
-                        sym.clone(),
-                        (
-                            (x.fair_value_cents, x.age_seconds),
-                            android_analyst_count(x),
-                            android_forecast_target(x),
-                            AndroidStreet::from_signal(x),
-                        ),
-                    )
-                })
-                .collect();
-            (classes, externals, funds)
+            (s.fundamentals.clone(), s.signals.clone())
         };
         let projection = capture_opportunity_projection(screener);
         let rows = projection
             .rows
             .into_iter()
-            .map(|i| SnapshotRow {
-                daily: i.daily,
-                weekly: i.weekly,
-                hourly: i.hourly,
-                daily_candles: i.daily_candles,
-                dcf_analysis: i.dcf_analysis,
-                crypto_setup: i.crypto_setup.map(|(s, l)| (s, l.to_string())),
-                year: year.get(&i.row.symbol).cloned(),
-                business_class: classes.get(&i.row.symbol).copied(),
-                external: externals.get(&i.row.symbol).map(|e| e.0),
-                external_analysts: externals.get(&i.row.symbol).and_then(|e| e.1),
-                android_target: externals.get(&i.row.symbol).map(|e| e.2),
-                android_street: externals.get(&i.row.symbol).map(|e| e.3.clone()),
-                android_dcf: AndroidDcfFacts::bulk_load(
-                    classes.get(&i.row.symbol).copied(),
-                    funds.get(&i.row.symbol),
-                    i.row.market_price_cents,
-                    Some(AndroidIdentity::Unknown),
-                ),
-                row: i.row,
+            .map(|i| {
+                let chart = year.get(&i.row.symbol);
+                let fundamentals = funds.get(&i.row.symbol);
+                let signal = signals.get(&i.row.symbol);
+                SnapshotRow {
+                    daily: i.daily,
+                    weekly: i.weekly,
+                    hourly: i.hourly,
+                    daily_candles: i.daily_candles,
+                    dcf_analysis: i.dcf_analysis,
+                    crypto_setup: i.crypto_setup.map(|(s, l)| (s, l.to_string())),
+                    ..SnapshotRow::capture_android(i.row, chart, fundamentals, signal)
+                }
             })
             .collect();
         Self {
             profile: profile.to_string(),
+            captured_at_epoch: chrono::Utc::now().timestamp(),
+            rows,
+        }
+    }
+
+    /// Capture only the inputs used by the GUI Android ranking. The desktop
+    /// projection can reconcile DCF caches; this path only reads live state.
+    #[cfg(feature = "gui")]
+    pub(crate) fn capture_android_equities(
+        screener: &ScreenerState,
+        profile: &str,
+        universe: &[String],
+        year: &HashMap<String, crate::android_chart::AndroidChartSummary>,
+    ) -> Self {
+        let allowed: std::collections::HashSet<&str> =
+            universe.iter().map(String::as_str).collect();
+        let rows = screener
+            .candidate_rows()
+            .into_iter()
+            .filter(|row| allowed.contains(row.symbol.as_str()))
+            .map(|mut row| {
+                // A missing live price cannot establish a discount.
+                if row.market_price_cents <= 0 {
+                    row.gap_bps = None;
+                }
+                let chart = year.get(&row.symbol);
+                let fundamentals = screener.fundamentals.get(&row.symbol);
+                let signal = screener.signals.get(&row.symbol);
+                SnapshotRow::capture_android(row, chart, fundamentals, signal)
+            })
+            .collect();
+        Self {
+            profile: profile.to_owned(),
             captured_at_epoch: chrono::Utc::now().timestamp(),
             rows,
         }
@@ -894,7 +927,11 @@ fn android_row(r: &SnapshotRow) -> crate::engine::CandidateRow {
 
 /// V3 scores for one snapshot row (the body `rank_android_v3` used inline on main).
 /// Returns the row and its confidence rank (sort tie-break).
-fn android_score(r: &SnapshotRow, row: &crate::engine::CandidateRow) -> (AndroidRow, u8) {
+fn android_score(
+    r: &SnapshotRow,
+    row: &crate::engine::CandidateRow,
+    include_shadow: bool,
+) -> (AndroidRow, u8) {
     use crate::opportunity_v3::{
         composite_score_v3_android, score_forecast_v3, score_forecast_v3_with,
         score_fundamentals_v3_android,
@@ -945,7 +982,7 @@ fn android_score(r: &SnapshotRow, row: &crate::engine::CandidateRow) -> (Android
             projection_gap: p.projection_gap.map(str::to_string),
             fundamentals_signals: sig,
             // V3.1 shadow, computed from the official decision; never feeds back.
-            shadow: Some({
+            shadow: include_shadow.then(|| {
                 let (ratio, warmup) = crate::opportunity_v31::momentum_input(r.year.as_ref());
                 let src = crate::opportunity_v31::hist_source(r.year.as_ref());
                 let mut g =
@@ -986,6 +1023,22 @@ pub fn evaluate_android_v3(
     snapshot: &OpportunitySnapshot,
     universe: Option<&[String]>,
 ) -> Vec<Evaluation> {
+    evaluate_android_v3_with_shadow(snapshot, universe, true)
+}
+
+#[cfg(feature = "gui")]
+pub(crate) fn evaluate_android_v3_screener(
+    snapshot: &OpportunitySnapshot,
+    universe: &[String],
+) -> Vec<Evaluation> {
+    evaluate_android_v3_with_shadow(snapshot, Some(universe), false)
+}
+
+fn evaluate_android_v3_with_shadow(
+    snapshot: &OpportunitySnapshot,
+    universe: Option<&[String]>,
+    include_shadow: bool,
+) -> Vec<Evaluation> {
     use crate::engine::QualificationStatus;
     let allowed: Option<std::collections::HashSet<&str>> =
         universe.map(|u| u.iter().map(|s| s.as_str()).collect());
@@ -1009,8 +1062,9 @@ pub fn evaluate_android_v3(
             },
         };
         let gate_gap_bps = row.gap_bps;
-        let scored =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| android_score(r, &row)));
+        let scored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            android_score(r, &row, include_shadow)
+        }));
         let (status, reason, row, confidence_rank) = match scored {
             Ok((mut a, c)) => {
                 if status != "ok" {
@@ -1465,16 +1519,24 @@ impl HeadlessEngine {
     }
 
     pub fn status(&self) -> EngineStatus {
-        let fs = self.state.feed_status.lock().unwrap().clone();
+        let (feed_running, symbols_loaded, symbols_total, last_error) = {
+            let status = self.state.feed_status.lock().unwrap();
+            (
+                status.running,
+                status.symbols_loaded,
+                status.symbols_total,
+                status.legacy_error(),
+            )
+        };
         let (snap, source) = self.current_snapshot();
         EngineStatus {
             year_charts_loaded: self.year.lock().unwrap().len(),
             profile: self.profile(),
             market_context: self.cfg.market_context,
-            feed_running: fs.running,
-            symbols_loaded: fs.symbols_loaded,
-            symbols_total: self.state.active_symbols.lock().unwrap().len(),
-            last_error: fs.last_error,
+            feed_running,
+            symbols_loaded,
+            symbols_total,
+            last_error,
             ranked_rows: self.status_ranked_rows(&snap),
             snapshot_rows: snap.len(),
             score_panics: SCORE_PANICS.load(Ordering::Relaxed),
@@ -2067,13 +2129,29 @@ mod android_parity_tests {
     }
 
     fn rank_fixture_at(path: &std::path::Path) -> Vec<AndroidRow> {
+        let (snapshot, _) = capture_fixture_at(path, |screener, _, year| {
+            OpportunitySnapshot::capture_with_year(screener, "fixture", year)
+        });
+        rank_android_v3(&snapshot, None)
+    }
+
+    fn capture_fixture_at(
+        path: &std::path::Path,
+        capture: impl FnOnce(
+            &Mutex<ScreenerState>,
+            &[String],
+            &HashMap<String, crate::android_chart::AndroidChartSummary>,
+        ) -> OpportunitySnapshot,
+    ) -> (OpportunitySnapshot, Vec<String>) {
         let raw: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let fx = snake(raw);
         let screener = Mutex::new(ScreenerState::new());
-        let mut year = std::collections::HashMap::new();
+        let mut year = HashMap::new();
+        let mut universe = Vec::new();
         for case in fx["symbols"].as_array().unwrap() {
             let snap: MarketSnapshot = serde_json::from_value(case["snapshot"].clone()).unwrap();
             let sym = snap.symbol.clone();
+            universe.push(sym.clone());
             let mut s = screener.lock().unwrap();
             s.ingest_snapshot(snap);
             if !case["external"].is_null() {
@@ -2092,7 +2170,7 @@ mod android_parity_tests {
                 year.insert(sym, crate::android_chart::build_summary(&candles));
             }
         }
-        let mut snap = OpportunitySnapshot::capture_with_year(&screener, "fixture", &year);
+        let mut snap = capture(&screener, &universe, &year);
         // Recorded inputs carry no operating DCF (no timeseries); an injected `dcf`
         // replaces the bulk-load state.
         let cases: std::collections::HashMap<&str, &Value> = fx["symbols"]
@@ -2120,7 +2198,27 @@ mod android_parity_tests {
                 )
             };
         }
-        rank_android_v3(&snap, None)
+        (snap, universe)
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn android_long_v3_screener_matches_the_headless_kotlin_fixture_rows() {
+        let path = contracts().join("opportunity-v3-headless-fixture.json");
+        let (snapshot, universe) = capture_fixture_at(&path, |screener, universe, year| {
+            OpportunitySnapshot::capture_android_equities(
+                &screener.lock().unwrap(),
+                "fixture",
+                universe,
+                year,
+            )
+        });
+        let result = crate::android_v3_screener::rank_snapshot_for_screener(&snapshot, &universe);
+        let mut expected = rank_fixture_at(&path);
+        for row in &mut expected {
+            row.shadow = None;
+        }
+        assert_eq!(result.rows, expected);
     }
 
     #[test]
