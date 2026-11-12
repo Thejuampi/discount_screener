@@ -67,6 +67,22 @@ All commands run from the repository root via `make`.
 | `make desktop-smoke` | Non-interactive smoke check (no live network needed) |
 | `make desktop-release` | Build optimised release binary |
 
+### Blaze Rust Checks
+
+Run these commands from Linux or WSL. Blaze also distributes an Apple silicon build.
+
+```sh
+make blaze-setup
+make blaze-check
+```
+
+`make blaze-check` checks the Rust terminal app and the Windows `valuation-core` library.
+Use `make blaze-desktop-check` or `make blaze-valuation-check` to check one target.
+The setup installs Blaze `0.20261027.0` in a dedicated user cache.
+The first check downloads Blaze's Rust toolchain and dependencies. Use `BLAZE_FLAGS=--offline` after they are cached.
+Use Cargo for native Vantage builds, Headless, the full test suite, CI, and releases.
+See the [pinned Blaze release](https://github.com/indexable-inc/blaze/releases/tag/v0.20261027.0) for its platform requirements.
+
 ### Android
 
 | Command | Purpose |

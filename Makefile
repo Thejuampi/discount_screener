@@ -9,12 +9,18 @@ FLUTTER_DIR := $(REPO_ROOT)/apps/flutter
 DIST_DIR := $(REPO_ROOT)/dist
 
 CARGO := cargo
+BLAZE_VERSION := 0.20261027.0
+BLAZE_DIR ?= $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/discount-screener/blaze-v$(BLAZE_VERSION)
+BLAZE ?= $(BLAZE_DIR)/cargo/bin/blaze
+BLAZE_FLAGS ?=
+BLAZE_ENV = CARGO_HOME="$(BLAZE_DIR)/cargo" BLAZE_HOME="$(BLAZE_DIR)/home" BLAZE_CACHE="$(BLAZE_DIR)/cache"
 # Absolute, not bare: cmd.exe resolves a bare `gradlew.bat` from the working directory, sh does not.
 GRADLE := $(ANDROID_DIR)/gradlew.bat
 NPX := npx
 
 .PHONY: all build test clean fmt check release version run \
         desktop-build desktop-test desktop-clean desktop-fmt desktop-check desktop-release desktop-smoke desktop-run \
+        blaze-setup blaze-check blaze-desktop-check blaze-valuation-check \
         android-build android-test android-clean android-release android-run android-run-qa android-signing-bootstrap apk \
         windows-run windows-dev windows-stop windows-build windows-test run-windows \
         flutter-test flutter-build-windows flutter-run-windows flutter-build-android flutter-run-android \
@@ -56,6 +62,21 @@ desktop-release:
 
 desktop-smoke:
 	$(CARGO) run --manifest-path $(DESKTOP_DIR)/Cargo.toml -- --smoke
+
+# ── Blaze development checks (Linux / WSL and Apple silicon) ──
+
+blaze-setup:
+	install -d -m 700 "$(BLAZE_DIR)" "$(BLAZE_DIR)/home"
+	curl --proto '=https' --tlsv1.2 -fsSL -o "$(BLAZE_DIR)/install.sh" https://ix.dev/blaze
+	$(BLAZE_ENV) sh "$(BLAZE_DIR)/install.sh" --version $(BLAZE_VERSION) --no-toolchain
+
+blaze-check: blaze-desktop-check blaze-valuation-check
+
+blaze-desktop-check:
+	cd "$(DESKTOP_DIR)" && $(BLAZE_ENV) CARGO_TARGET_DIR="$(BLAZE_DIR)/desktop-target" "$(BLAZE)" check --locked $(BLAZE_FLAGS)
+
+blaze-valuation-check:
+	cd "$(WINDOWS_DIR)/src-tauri" && $(BLAZE_ENV) CARGO_TARGET_DIR="$(BLAZE_DIR)/valuation-target" "$(BLAZE)" check --locked -p valuation-core --lib $(BLAZE_FLAGS)
 
 # ── Android (Gradle) ──
 
