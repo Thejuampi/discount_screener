@@ -134,6 +134,8 @@ BusinessClassClassifier
 
 Policy lives in pure core as data (`BusinessClassPolicy v1`), unit-tested, versioned. Adding a SIC/NAICS map later is an extension, not a redesign.
 
+Classify payment networks as operating companies. Use FCFF even when a provider uses the Credit Services label.
+
 **Anti-patterns rejected:**
 
 - “If DCF/price > 3 → reclassify as financial”

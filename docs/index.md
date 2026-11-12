@@ -25,12 +25,15 @@ Use this page to find the current source for each concern.
 
 ## Operations
 
+- [Change validation](operations/change-validation.md)
 - [Valuation live QA](operations/valuation-live-qa.md)
 - [Valuation baseline policy](operations/valuation-baseline-policy.md)
 - [Operational anti-patterns](operations/operational-anti-patterns.md)
 - [Analyst-method lifecycle](operations/analyst-method-lifecycle.md)
 - [Windows UI inspection](operations/windows-ui-inspect.md)
 - [Windows dashboard regression](operations/windows-dashboard-regression.md)
+- [Windows feed refresh validation](operations/windows-feed-refresh.md)
+- [Vantage branch handoff](operations/vantage-android-parity-handoff.md)
 
 ## Application Guides
 

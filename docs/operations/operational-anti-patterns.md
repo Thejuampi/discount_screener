@@ -2,7 +2,7 @@
 
 Failure modes that already bit this repo, with what broke and the fix. Read this file before a change that re-triggers the same failure shape. Green tests are evidence for the encoded properties, never the conclusion that all required properties were encoded.
 
-**Rule:** when a new operational failure mode appears, add a row here (and a step to the manual procedures in `AGENTS.md` if it changes a standing gate) — do not leave it only in chat.
+Record each new operational failure in this ledger. Update the relevant procedure when the failure changes a standing gate.
 
 | Anti-pattern | What happened | Do instead |
 | --- | --- | --- |
@@ -46,7 +46,7 @@ Failure modes that already bit this repo, with what broke and the fix. Read this
 | “I’ll just open the normal app for QA” | Full universe + thrash restarts | Wrong. **QA is profile `qa`.** No silent default to `sp500` |
 | One acquisition zeroes the whole growth window | Historical M&A made BSX/ADSK/AVGO-class estimates ignore later clean growth | Contaminate only Y−1→Y; require two clean recent transitions and a clean latest transition, otherwise zero growth explicitly |
 | Analyst gap pill sits beside DCF with no source | A positive Street upside looked like it described a below-market DCF | Label the analyst relation and show DCF-vs-market independently |
-| Naked `sum / n` over an annual series | One 5208% implied coupon inverted a whole cross-sectional credit fit; a plain mean of 19 annual returns reported restructuring years as return | `valuation_core::robust_mean` / `standardize` — never a hand-rolled average. See **Aggregation — no naked averages** in `AGENTS.md` |
+| Naked `sum / n` over an annual series | One 5208% implied coupon inverted a whole cross-sectional credit fit; a plain mean of 19 annual returns reported restructuring years as return | Use `valuation_core::robust_mean` and `standardize`. See [numerical checks](change-validation.md#numerical-checks). |
 | 3-sigma rule built on mean and standard deviation | Provably cannot fire at `n <= 10` (max score is `(n-1)/sqrt(n)`); the outlier inflates its own scale and hides | Median/MAD scores, which have 50% breakdown and no such ceiling |
 | Cash-flow tag used as an income-statement equivalent | `InterestPaidNet` (interest *paid*) sat in the interest-**expense** qname list and gap-filled an accrual series year by year; it was one issuer's only source across nine years | Equivalence classes hold one statement's concept only; an issuer that files none reads **absent**, not a substitute from another statement |
 | Lease-subset interest used as the coupon | `FinanceLeaseInterestExpense` is the finance-lease slice. Lowe's 2020-2022 had only that line (~$30M) while later years file ~$1.3B of net interest, so coverage looked like AAA (59 bps) | Drop the lease subset from the expense class. Keep the income-statement net lines. Use the magnitude when the issuer files the net as a negative |

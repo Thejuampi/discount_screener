@@ -17,6 +17,7 @@ This guide extends the root `AGENTS.md` for the Kotlin Android workstation.
 ## Delivery
 
 - Use the debug APK for Juan's normal sideload.
+- Use `make apk` to deliver `dist/discount-screener-debug-<version>.apk`.
 - Keep the compatible debug signature.
 - Preserve installed data.
 - Do not build a custom signed release unless Juan asks.
