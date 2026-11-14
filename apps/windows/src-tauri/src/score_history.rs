@@ -2329,7 +2329,7 @@ impl ScoreHistoryStore {
             .unwrap_or_else(std::env::temp_dir);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = ExportTmps::new(
-            local.join(format!("{name}.export-{}-{seq}.tmp", std::process::id())),
+            local.join(export_tmp_name(&name, std::process::id(), seq)),
             PathBuf::from(format!("{}.partial", dest.display())),
         );
         let (runs, rows, shadow) = self.copy_history_into(&tmp.db, dest.parent())?;
@@ -2541,8 +2541,15 @@ pub const EXPORT_QUARANTINE_DIR: &str = "quarantine";
 /// Only temps at least this old are treated as orphans (a live export is minutes).
 pub const ORPHAN_EXPORT_MIN_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Exact names an export attempt creates: `score-history-YYYY-MM-DD.sqlite.export-<id>.tmp`
-/// (+ `-journal`/`-wal`/`-shm`, `<id>` = digits or digits-digits) and
+/// Name of the local plain-SQLite temp [`ScoreHistoryStore::export_to`] builds for the
+/// backup file `dest_name` (e.g. `score-history-YYYY-MM-DD.sqlite.gz.export-<pid>-<seq>.tmp`).
+fn export_tmp_name(dest_name: &str, pid: u32, seq: u64) -> String {
+    format!("{dest_name}.export-{pid}-{seq}.tmp")
+}
+
+/// Exact names an export attempt creates: `score-history-YYYY-MM-DD.sqlite.gz.export-<id>.tmp`
+/// (this binary, see [`export_tmp_name`]) or `score-history-YYYY-MM-DD.sqlite.export-<id>.tmp`
+/// (older binaries), + `-journal`/`-wal`/`-shm`, `<id>` = digits or digits-digits; and
 /// `score-history-YYYY-MM-DD.sqlite.gz.partial`. Anything else is never touched.
 fn is_orphan_export_name(s: &str) -> bool {
     let Some(rest) = s.strip_prefix(BACKUP_PREFIX) else {
@@ -2555,7 +2562,10 @@ fn is_orphan_export_name(s: &str) -> bool {
     if rest == ".sqlite.gz.partial" {
         return true;
     }
-    let Some(rest) = rest.strip_prefix(".sqlite.export-") else {
+    let Some(rest) = rest
+        .strip_prefix(".sqlite.gz.export-")
+        .or_else(|| rest.strip_prefix(".sqlite.export-"))
+    else {
         return false;
     };
     let Some((id, tail)) = rest.split_once(".tmp") else {
@@ -5885,6 +5895,32 @@ mod tests {
         ] {
             assert!(!is_orphan_export_name(no), "{no}");
         }
+    }
+
+    /// The sweep recognizes the temp names export_to itself creates (same helper).
+    #[test]
+    fn orphan_sweep_matches_export_to_temp_names() {
+        let dir = tmpdir("bk-own-tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = format!("{BACKUP_PREFIX}2026-11-10{BACKUP_SUFFIX}");
+        let base = export_tmp_name(&dest, 4242, 7);
+        assert_eq!(base, "score-history-2026-11-10.sqlite.gz.export-4242-7.tmp");
+        let names = [
+            base.clone(),
+            format!("{base}-journal"),
+            format!("{base}-wal"),
+        ];
+        for n in &names {
+            assert!(is_orphan_export_name(n), "{n}");
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        assert!(!is_orphan_export_name(&format!("{base}.bak")));
+        assert_eq!(quarantine_orphan_exports(&dir, Duration::ZERO), names.len());
+        for n in &names {
+            assert!(!dir.join(n).exists());
+            assert!(dir.join(EXPORT_QUARANTINE_DIR).join(n).exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
