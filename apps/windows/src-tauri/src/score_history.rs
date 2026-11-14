@@ -2826,100 +2826,29 @@ impl ScoreHistoryStore {
         if let Some(p) = dest.parent() {
             std::fs::create_dir_all(p).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
         }
-        let tmp = dest.with_extension(format!("export-{}.tmp", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
-        let (runs, rows, shadow) = {
-            let b = Connection::open(&tmp).map_err(err)?;
-            b.execute_batch(MIGRATION_LOG).map_err(err)?;
-            for (_, sql) in MIGRATIONS {
-                b.execute_batch(sql).map_err(err)?;
-            }
-            drop(b);
-            let c = self.conn.lock().map_err(|_| "lock")?;
-            let counts = (
-                table_count(&c, "score_runs"),
-                table_count(&c, "score_history"),
-                table_count(&c, "score_shadow"),
-            );
-            // Every history table must exist in the source (a store opened with an older
-            // migration set, or damaged): say which, instead of an SQL syntax error.
-            let missing: Vec<&str> = HISTORY_TABLES
-                .iter()
-                .copied()
-                .filter(|t| !has_table(&c, "main", t))
-                .collect();
-            if !missing.is_empty() {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(format!(
-                    "export: history table(s) {} missing from the store (schema v{}, need v{}); \
-                     nothing exported",
-                    missing.join(", "),
-                    current_version(&c).unwrap_or(0),
-                    SCHEMA_VERSION
-                ));
-            }
-            c.execute("ATTACH DATABASE ?1 AS bk", params![tmp.to_string_lossy()])
-                .map_err(err)?;
-            // Incremental `score_inputs`: payload bytes live under
-            // `<backup_dir>/inputs/<sha256>` (append-only by content hash). The
-            // gzip sqlite carries metadata + empty bytes for that table; other
-            // tables stay full copies. Legacy backups with inline bytes still restore.
-            let blob_dir = dest.parent().map(|p| p.to_path_buf());
-            let copied = (|| -> Result<(), String> {
-                c.execute_batch("BEGIN").map_err(err)?;
-                for t in HISTORY_TABLES {
-                    if t == "score_inputs" {
-                        let mut st = c
-                            .prepare(
-                                "SELECT hash, encoding, raw_size, bytes FROM main.score_inputs",
-                            )
-                            .map_err(err)?;
-                        let mut rows = st.query([]).map_err(err)?;
-                        let mut insert = c
-                            .prepare(
-                                "INSERT INTO bk.score_inputs (hash, encoding, raw_size, bytes)                                  VALUES (?1, ?2, ?3, x'')",
-                            )
-                            .map_err(err)?;
-                        while let Some(r) = rows.next().map_err(err)? {
-                            let hash: String = r.get(0).map_err(err)?;
-                            let enc: String = r.get(1).map_err(err)?;
-                            let raw_size: i64 = r.get(2).map_err(err)?;
-                            let bytes: Vec<u8> = r.get(3).map_err(err)?;
-                            if let Some(dir) = blob_dir.as_deref() {
-                                write_input_blob(dir, &hash, &bytes)?;
-                            }
-                            insert
-                                .execute(params![hash, enc, raw_size])
-                                .map_err(|e| format!("export score_inputs: {e}"))?;
-                        }
-                        continue;
-                    }
-                    // Copied by column NAME, never by position.
-                    let cols = columns(&c, "main", t)?
-                        .into_iter()
-                        .map(|x| x.name)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    if let Err(e) = c.execute(
-                        &format!("INSERT INTO bk.{t} ({cols}) SELECT {cols} FROM main.{t}"),
-                        [],
-                    ) {
-                        let _ = c.execute_batch("ROLLBACK");
-                        return Err(format!("export {t}: {e}"));
-                    }
-                }
-                c.execute_batch("COMMIT").map_err(err)
-            })();
-            let _ = c.execute("DETACH DATABASE bk", []);
-            if let Err(e) = copied {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e);
-            }
-            counts
-        };
-        let zipped = gzip_file(&tmp, dest);
-        let _ = std::fs::remove_file(&tmp);
-        zipped?;
+        // The plain SQLite copy is built on local disk (next to the live file), never
+        // inside the possibly-remote backup dir; only the finished gzip goes there.
+        // Every file this attempt creates is removed on any exit (guard drop).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let name = dest
+            .file_name()
+            .ok_or("backup path has no file name")?
+            .to_string_lossy()
+            .to_string();
+        let local = self
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = ExportTmps::new(
+            local.join(export_tmp_name(&name, std::process::id(), seq)),
+            PathBuf::from(format!("{}.partial", dest.display())),
+        );
+        let (runs, rows, shadow) = self.copy_history_into(&tmp.db, dest.parent())?;
+        gzip_file(&tmp.db, dest)?;
+        drop(tmp);
         let rep = check_backup(dest, runs, rows)?;
         if rep.score_shadow < shadow {
             let bad = PathBuf::from(format!("{}.failed", dest.display()));
@@ -2932,6 +2861,111 @@ impl ScoreHistoryStore {
             ));
         }
         Ok(rep)
+    }
+
+    /// Copies [`HISTORY_TABLES`] into a fresh SQLite file at `tmp` and returns the live
+    /// counts of the same snapshot. A file-backed store uses its OWN connection, so a
+    /// failure here can never leave a transaction or `bk` attached on the recording
+    /// connection; the in-memory store (tests) shares it behind [`ExportGuard`], which
+    /// rolls back and detaches on every exit either way.
+    fn copy_history_into(
+        &self,
+        tmp: &Path,
+        blob_dir: Option<&Path>,
+    ) -> Result<(i64, i64, i64), String> {
+        {
+            let b = Connection::open(tmp).map_err(err)?;
+            b.execute_batch(MIGRATION_LOG).map_err(err)?;
+            for (_, sql) in MIGRATIONS {
+                b.execute_batch(sql).map_err(err)?;
+            }
+        }
+        let own;
+        let shared;
+        let c: &Connection = match &self.path {
+            Some(p) => {
+                own = Connection::open(p).map_err(|e| format!("open {}: {e}", p.display()))?;
+                own.busy_timeout(BUSY_TIMEOUT).map_err(err)?;
+                &own
+            }
+            None => {
+                shared = self.conn.lock().map_err(|_| "lock")?;
+                &shared
+            }
+        };
+        // Every history table must exist in the source (a store opened with an older
+        // migration set, or damaged): say which, instead of an SQL syntax error.
+        let missing: Vec<&str> = HISTORY_TABLES
+            .iter()
+            .copied()
+            .filter(|t| !has_table(c, "main", t))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "export: history table(s) {} missing from the store (schema v{}, need v{}); \
+                 nothing exported",
+                missing.join(", "),
+                current_version(c).unwrap_or(0),
+                SCHEMA_VERSION
+            ));
+        }
+        let mut g = ExportGuard { c, attached: false };
+        g.c.execute("ATTACH DATABASE ?1 AS bk", params![tmp.to_string_lossy()])
+            .map_err(err)?;
+        g.attached = true;
+        export_fault(ExportFault::Attach)?;
+        c.execute_batch("BEGIN").map_err(err)?;
+        let counts = (
+            table_count(c, "score_runs"),
+            table_count(c, "score_history"),
+            table_count(c, "score_shadow"),
+        );
+        // Incremental `score_inputs`: payload bytes live under
+        // `<backup_dir>/inputs/<sha256>` (append-only by content hash). The
+        // gzip sqlite carries metadata + empty bytes for that table; other
+        // tables stay full copies. Legacy backups with inline bytes still restore.
+        for t in HISTORY_TABLES {
+            if t == "score_inputs" {
+                let mut st = c
+                    .prepare("SELECT hash, encoding, raw_size, bytes FROM main.score_inputs")
+                    .map_err(err)?;
+                let mut rows = st.query([]).map_err(err)?;
+                let mut insert = c
+                    .prepare(
+                        "INSERT INTO bk.score_inputs (hash, encoding, raw_size, bytes) \
+                         VALUES (?1, ?2, ?3, x'')",
+                    )
+                    .map_err(err)?;
+                while let Some(r) = rows.next().map_err(err)? {
+                    let hash: String = r.get(0).map_err(err)?;
+                    let enc: String = r.get(1).map_err(err)?;
+                    let raw_size: i64 = r.get(2).map_err(err)?;
+                    let bytes: Vec<u8> = r.get(3).map_err(err)?;
+                    if let Some(dir) = blob_dir {
+                        write_input_blob(dir, &hash, &bytes)?;
+                    }
+                    export_fault(ExportFault::MidCopy)?;
+                    insert
+                        .execute(params![hash, enc, raw_size])
+                        .map_err(|e| format!("export score_inputs: {e}"))?;
+                }
+                continue;
+            }
+            // Copied by column NAME, never by position.
+            let cols = columns(c, "main", t)?
+                .into_iter()
+                .map(|x| x.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            c.execute(
+                &format!("INSERT INTO bk.{t} ({cols}) SELECT {cols} FROM main.{t}"),
+                [],
+            )
+            .map_err(|e| format!("export {t}: {e}"))?;
+        }
+        export_fault(ExportFault::Commit)?;
+        c.execute_batch("COMMIT").map_err(err)?;
+        Ok(counts)
     }
 
     /// Daily backup `score-history-YYYY-MM-DD.sqlite.gz` (UTC day of `now`) when missing,
@@ -2949,10 +2983,173 @@ impl ScoreHistoryStore {
         if dest.exists() {
             return Ok(None);
         }
+        // Orphans of earlier failed attempts (older binaries built the copy inside the
+        // backup dir): moved aside, never deleted.
+        let local = self.path.as_deref().and_then(Path::parent);
+        for d in std::iter::once(dir).chain(local) {
+            let n = quarantine_orphan_exports(d, ORPHAN_EXPORT_MIN_AGE);
+            if n > 0 {
+                eprintln!(
+                    "score history backup: moved {n} orphan temp file(s) to {}",
+                    d.join(EXPORT_QUARANTINE_DIR).display()
+                );
+            }
+        }
         let rep = self.export_to(&dest)?;
         rotate_backups(dir)?;
         Ok(Some(rep))
     }
+}
+
+/// Undoes a half-done export on the connection it used, on every exit path:
+/// rolls back an open transaction and detaches `bk`, so the next attempt starts clean.
+struct ExportGuard<'a> {
+    c: &'a Connection,
+    attached: bool,
+}
+impl Drop for ExportGuard<'_> {
+    fn drop(&mut self) {
+        if !self.c.is_autocommit() {
+            let _ = self.c.execute_batch("ROLLBACK");
+        }
+        if self.attached {
+            let _ = self.c.execute_batch("DETACH DATABASE bk");
+        }
+    }
+}
+
+/// Files one export attempt may create; all removed on drop (success or failure).
+struct ExportTmps {
+    db: PathBuf,
+    partial: PathBuf,
+}
+impl ExportTmps {
+    fn new(db: PathBuf, partial: PathBuf) -> Self {
+        let t = ExportTmps { db, partial };
+        t.remove();
+        t
+    }
+    fn remove(&self) {
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", self.db.display()));
+        }
+        let _ = std::fs::remove_file(&self.partial);
+    }
+}
+impl Drop for ExportTmps {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ExportFault {
+    Attach,
+    MidCopy,
+    Commit,
+}
+#[cfg(test)]
+thread_local! {
+    static EXPORT_FAULT: std::cell::Cell<Option<ExportFault>> = const { std::cell::Cell::new(None) };
+}
+/// Test-only fault injection point (always `Ok` outside tests).
+fn export_fault(at: ExportFault) -> Result<(), String> {
+    #[cfg(test)]
+    if EXPORT_FAULT.with(|f| f.get()) == Some(at) {
+        return Err(match at {
+            ExportFault::Attach => "database is locked".into(),
+            ExportFault::MidCopy => "Software caused connection abort (os error 103)".into(),
+            ExportFault::Commit => "disk I/O error".into(),
+        });
+    }
+    let _ = at;
+    Ok(())
+}
+
+/// Subdirectory (of the backup or data dir) orphan export temps are moved into.
+pub const EXPORT_QUARANTINE_DIR: &str = "quarantine";
+/// Only temps at least this old are treated as orphans (a live export is minutes).
+pub const ORPHAN_EXPORT_MIN_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Name of the local plain-SQLite temp [`ScoreHistoryStore::export_to`] builds for the
+/// backup file `dest_name` (e.g. `score-history-YYYY-MM-DD.sqlite.gz.export-<pid>-<seq>.tmp`).
+fn export_tmp_name(dest_name: &str, pid: u32, seq: u64) -> String {
+    format!("{dest_name}.export-{pid}-{seq}.tmp")
+}
+
+/// Exact names an export attempt creates: `score-history-YYYY-MM-DD.sqlite.gz.export-<id>.tmp`
+/// (this binary, see [`export_tmp_name`]) or `score-history-YYYY-MM-DD.sqlite.export-<id>.tmp`
+/// (older binaries), + `-journal`/`-wal`/`-shm`, `<id>` = digits or digits-digits; and
+/// `score-history-YYYY-MM-DD.sqlite.gz.partial`. Anything else is never touched.
+fn is_orphan_export_name(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix(BACKUP_PREFIX) else {
+        return false;
+    };
+    let (date, rest) = rest.split_at(rest.len().min(10));
+    if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+        return false;
+    }
+    if rest == ".sqlite.gz.partial" {
+        return true;
+    }
+    let Some(rest) = rest
+        .strip_prefix(".sqlite.gz.export-")
+        .or_else(|| rest.strip_prefix(".sqlite.export-"))
+    else {
+        return false;
+    };
+    let Some((id, tail)) = rest.split_once(".tmp") else {
+        return false;
+    };
+    let id_ok = !id.is_empty()
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+        && id.matches('-').count() <= 1
+        && id.bytes().all(|b| b.is_ascii_digit() || b == b'-');
+    id_ok && ["", "-journal", "-wal", "-shm"].contains(&tail)
+}
+
+/// Moves orphan export temps (exact [`is_orphan_export_name`] names, regular files,
+/// older than `min_age`) from `dir` into `dir/quarantine/`. Never deletes anything.
+/// Returns how many were moved.
+pub fn quarantine_orphan_exports(dir: &Path, min_age: Duration) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let q = dir.join(EXPORT_QUARANTINE_DIR);
+    let mut n = 0;
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(s) = name.to_str() else { continue };
+        if !is_orphan_export_name(s) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(ent.path()) else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= min_age);
+        if !meta.file_type().is_file() || !old {
+            continue;
+        }
+        if std::fs::create_dir_all(&q).is_err() {
+            return n;
+        }
+        let mut to = q.join(s);
+        let mut i = 1;
+        while to.exists() {
+            to = q.join(format!("{s}.{i}"));
+            i += 1;
+        }
+        if std::fs::rename(ent.path(), &to).is_ok() {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Verifies a fresh backup against counts taken before it; a failing file is renamed
@@ -7982,5 +8179,188 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
                 assert_eq!(due_close(slot + dn, slot + dl), want, "dn={dn} dl={dl}");
             }
         }
+    }
+
+    // --- backup isolation (hotfix): a failed backup never blocks recording ---
+
+    const FAULT_DAY: i64 = 1_800_000_000;
+
+    fn export_leftovers(dirs: &[&Path]) -> Vec<String> {
+        dirs.iter()
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flat_map(|rd| rd.flatten())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.contains(".export-") || n.ends_with(".partial"))
+            .collect()
+    }
+
+    /// A backup fails (`fault`, or a real I/O error when `None`); then the next run
+    /// must still record, no temp file is left, and a later backup recovers.
+    fn backup_failure_is_isolated(tag: &str, fault: Option<ExportFault>) {
+        let root = tmpdir(tag);
+        let (data, bdir) = (root.join("data"), root.join("store"));
+        let s = ScoreHistoryStore::open(&data.join("history.sqlite"), Some(&bdir)).unwrap();
+        s.record_run_full(
+            &meta(FAULT_DAY),
+            &[row("AAA", "Act", 30, 60, 0, 30)],
+            Some(&tiny_eval(&["AAA", "BBB"])),
+        )
+        .unwrap();
+        // Real I/O failure while copying blobs: `inputs` is a file, not a directory.
+        let blocker = bdir.join("inputs");
+        match fault {
+            Some(f) => EXPORT_FAULT.with(|c| c.set(Some(f))),
+            None => {
+                std::fs::create_dir_all(&bdir).unwrap();
+                std::fs::write(&blocker, b"x").unwrap();
+            }
+        }
+        let e = s.daily_backup_if_due(&bdir, FAULT_DAY).unwrap_err();
+        EXPORT_FAULT.with(|c| c.set(None));
+        if fault.is_none() {
+            std::fs::remove_file(&blocker).unwrap();
+        }
+        assert!(!e.is_empty());
+        assert_eq!(export_leftovers(&[&bdir, &data]), Vec::<String>::new());
+        // The next run records on the same store, despite the failed backup.
+        s.record_run(&meta(FAULT_DAY + 3600), &[row("AAA", "Watch", 1, 1, 1, 1)])
+            .expect("recording must not depend on the backup");
+        assert_eq!(s.run_count().unwrap(), 2);
+        // And the backup recovers on the next attempt.
+        let rep = s
+            .daily_backup_if_due(&bdir, FAULT_DAY + 7200)
+            .expect("backup recovers")
+            .expect("backup written");
+        assert_eq!(rep.score_runs, 2);
+        assert_eq!(export_leftovers(&[&bdir, &data]), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backup_io_error_does_not_block_next_record() {
+        backup_failure_is_isolated("bk-io", None);
+    }
+
+    #[test]
+    fn backup_disconnect_mid_copy_does_not_block_next_record() {
+        backup_failure_is_isolated("bk-midcopy", Some(ExportFault::MidCopy));
+    }
+
+    #[test]
+    fn backup_attach_failure_does_not_block_next_record() {
+        backup_failure_is_isolated("bk-attach", Some(ExportFault::Attach));
+    }
+
+    #[test]
+    fn backup_commit_io_error_does_not_block_next_record() {
+        backup_failure_is_isolated("bk-commit", Some(ExportFault::Commit));
+    }
+
+    /// In-memory store shares the recording connection: the guard must still undo it.
+    #[test]
+    fn backup_failure_on_shared_connection_is_rolled_back() {
+        let root = tmpdir("bk-shared");
+        let s = ScoreHistoryStore::open_in_memory().unwrap();
+        s.record_run(&meta(FAULT_DAY), &[row("AAA", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        EXPORT_FAULT.with(|c| c.set(Some(ExportFault::Commit)));
+        assert!(s.export_to(&root.join("a.sqlite.gz")).is_err());
+        EXPORT_FAULT.with(|c| c.set(None));
+        {
+            let c = s.conn.lock().unwrap();
+            assert!(c.is_autocommit(), "no transaction left open");
+            assert!(!has_table(&c, "bk", "score_runs"), "bk detached");
+        }
+        s.record_run(&meta(FAULT_DAY + 3600), &[row("AAA", "Watch", 1, 1, 1, 1)])
+            .unwrap();
+        assert_eq!(
+            s.export_to(&root.join("b.sqlite.gz")).unwrap().score_runs,
+            2
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn orphan_export_names_are_exact() {
+        for ok in [
+            "score-history-2026-11-10.sqlite.export-1234.tmp",
+            "score-history-2026-11-11.sqlite.export-1234.tmp-journal",
+            "score-history-2026-11-11.sqlite.export-1234-7.tmp-wal",
+            "score-history-2026-11-11.sqlite.gz.partial",
+        ] {
+            assert!(is_orphan_export_name(ok), "{ok}");
+        }
+        for no in [
+            "score-history-2026-11-10.sqlite.gz",
+            "score-history-2026-11-10.sqlite.export-1234.2026-11-10T19-29-32-745Z.abc.conflict.tmp",
+            "score-history-2026-11-10.sqlite.export-.tmp",
+            "score-history-2026-11-10.sqlite.export-12a.tmp",
+            "score-history-2026-13-10.sqlite.export-1.tmp",
+            "score-history-2026-11-10.sqlite.export-1.tmp.bak",
+            "history.sqlite",
+            "other-2026-11-10.sqlite.export-1.tmp",
+        ] {
+            assert!(!is_orphan_export_name(no), "{no}");
+        }
+    }
+
+    /// The sweep recognizes the temp names export_to itself creates (same helper).
+    #[test]
+    fn orphan_sweep_matches_export_to_temp_names() {
+        let dir = tmpdir("bk-own-tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = format!("{BACKUP_PREFIX}2026-11-10{BACKUP_SUFFIX}");
+        let base = export_tmp_name(&dest, 4242, 7);
+        assert_eq!(base, "score-history-2026-11-10.sqlite.gz.export-4242-7.tmp");
+        let names = [
+            base.clone(),
+            format!("{base}-journal"),
+            format!("{base}-wal"),
+        ];
+        for n in &names {
+            assert!(is_orphan_export_name(n), "{n}");
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        assert!(!is_orphan_export_name(&format!("{base}.bak")));
+        assert_eq!(quarantine_orphan_exports(&dir, Duration::ZERO), names.len());
+        for n in &names {
+            assert!(!dir.join(n).exists());
+            assert!(dir.join(EXPORT_QUARANTINE_DIR).join(n).exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_exports_are_moved_not_deleted() {
+        let dir = tmpdir("bk-orphans");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = "score-history-2026-11-10.sqlite.export-1234.tmp";
+        let journal = "score-history-2026-11-11.sqlite.export-1234.tmp-journal";
+        let foreign = "score-history-2026-11-10.sqlite.export-1.x.conflict.tmp";
+        let good = "score-history-2026-11-09.sqlite.gz";
+        for n in [old, journal, foreign, good] {
+            std::fs::write(dir.join(n), n.as_bytes()).unwrap();
+        }
+        // Too young: nothing moves.
+        assert_eq!(
+            quarantine_orphan_exports(&dir, Duration::from_secs(3600)),
+            0
+        );
+        // Old enough (threshold 0): only our exact names move, contents intact.
+        assert_eq!(quarantine_orphan_exports(&dir, Duration::ZERO), 2);
+        let q = dir.join(EXPORT_QUARANTINE_DIR);
+        for n in [old, journal] {
+            assert!(!dir.join(n).exists());
+            assert_eq!(std::fs::read(q.join(n)).unwrap(), n.as_bytes());
+        }
+        assert!(dir.join(foreign).exists() && dir.join(good).exists());
+        // A same-named orphan later never overwrites the quarantined one.
+        std::fs::write(dir.join(old), b"second").unwrap();
+        assert_eq!(quarantine_orphan_exports(&dir, Duration::ZERO), 1);
+        assert_eq!(
+            std::fs::read(q.join(format!("{old}.1"))).unwrap(),
+            b"second"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
