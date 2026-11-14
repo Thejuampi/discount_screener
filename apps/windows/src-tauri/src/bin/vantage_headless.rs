@@ -78,6 +78,7 @@ fn parse_opts(args: &[String]) -> Opts {
                     | "no-feed"
                     | "verify"
                     | "force"
+                    | "dry-run"
             ) {
                 flags.insert(name.to_string(), "1".into());
             } else if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -155,6 +156,7 @@ history TICKER [--days N] [--changes] [--profile P] [--tz IANA] [--json]\n\
      history-record-snapshot --data-dir DIR [--history-backup-dir B]   (offline: record the persisted snapshot)\n\
      history-backup --data-dir DIR [--history-backup-dir B] [--verify]   (verified backup now; --verify checks all)\n\
      history-restore FILE --data-dir DIR [--history-backup-dir B]   (append-only merge; refused while serve runs)\n\
+     history-record-gap --profile P --from EPOCH --to EPOCH --reason record_failed|process_down [--note TEXT] [--history-interval-hours H] [--dry-run] [--data-dir DIR]   (one-shot: run_deferrals rows for the scheduled slots in (from, to]; idempotent; refuses < v6 or runs inside the range)\n\
      history-annotate RUN_ID --reason TEXT [--data-dir DIR]   (append-only run note; CLI-only, writes the store file, OK while serve runs)\n\
      history-deferrals [--profile P] [--since EPOCH] [--before EPOCH] [--limit N]   (read-only: scheduled slots that did not record, newest first, via GET /history/deferrals; page back with --before = oldest slot shown)\n\
      history-shadow-report --data-dir DIR [--profile P] [--min-n N] [--json]   (V3.1 shadow: demoted vs kept, 5/20/60d)\n\
@@ -405,6 +407,64 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 now_epoch(),
             )?;
             println!("{}", serde_json::to_string(&a).unwrap());
+            Ok(())
+        }
+        "history-record-gap" => {
+            // One-shot, CLI-only: durable run_deferrals rows for a known recording gap.
+            for k in o.flags.keys() {
+                if ![
+                    "data-dir",
+                    "profile",
+                    "from",
+                    "to",
+                    "reason",
+                    "note",
+                    "history-interval-hours",
+                    "dry-run",
+                ]
+                .contains(&k.as_str())
+                {
+                    return Err(format!("history-record-gap: unknown flag --{k}"));
+                }
+            }
+            let int = |k: &str| -> Result<i64, String> {
+                o.flags
+                    .get(k)
+                    .ok_or(format!("history-record-gap needs --{k} EPOCH"))?
+                    .parse()
+                    .map_err(|_| format!("history-record-gap: --{k} must be an integer epoch"))
+            };
+            let (from, to) = (int("from")?, int("to")?);
+            let hours: i64 = match o.flags.get("history-interval-hours") {
+                Some(h) => h
+                    .parse()
+                    .map_err(|_| format!("bad --history-interval-hours {h}"))?,
+                None => 6,
+            };
+            let profile = o
+                .flags
+                .get("profile")
+                .ok_or("history-record-gap needs --profile P")?;
+            let reason = o
+                .flags
+                .get("reason")
+                .ok_or("history-record-gap needs --reason record_failed|process_down")?;
+            let data_dir = data_dir_flag(&o)?;
+            let rep = discount_screener_windows_lib::score_history::record_gap_file(
+                &data_dir.join("history.sqlite"),
+                profile,
+                discount_screener_windows_lib::headless::HISTORY_MODEL,
+                hours * 3600,
+                from,
+                to,
+                reason,
+                now_epoch(),
+                o.flags.contains_key("dry-run"),
+            )?;
+            if let Some(n) = o.flags.get("note") {
+                eprintln!("note (not stored: run_deferrals has no note column): {n}");
+            }
+            println!("{}", serde_json::to_string(&rep).unwrap());
             Ok(())
         }
         "history-shadow-report" => {

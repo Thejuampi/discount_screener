@@ -3995,6 +3995,152 @@ pub fn annotate_file(
     annotate_conn(&c, run_id, reason, now)
 }
 
+/// What [`record_gap_file`] wrote (or, on a dry run, would write).
+#[derive(Clone, Debug, Serialize)]
+pub struct GapReport {
+    pub profile: String,
+    pub reason: String,
+    /// Scheduled slots in `(from, to]`, oldest first.
+    pub slots: Vec<i64>,
+    pub inserted: usize,
+    /// Slots that already had a `run_deferrals` row (first record wins).
+    pub skipped: usize,
+    pub dry_run: bool,
+}
+
+/// One-shot durable record of a known recording gap: one `run_deferrals` row per
+/// scheduled slot in `(from, to]`, by the scheduler's own schedule
+/// ([`process_down_plan`] anchored at the last run at or before `from`, plus the slot
+/// [`due_slot`] gives at `to`). Append-only, first record wins per `(profile, slot)`,
+/// so re-running inserts nothing. Refuses: a store not at [`SCHEMA_VERSION`] (v6),
+/// missing triggers, a reason other than `record_failed` / `process_down`, no run at
+/// or before `from` (no schedule anchor), any run recorded in `(from, to]`, and a range
+/// longer than [`PROCESS_DOWN_DETAIL_DAYS`]. Nothing is written on refusal.
+/// `run_deferrals` has no note column: the caller's note is not stored.
+#[allow(clippy::too_many_arguments)]
+pub fn record_gap_file(
+    path: &Path,
+    profile: &str,
+    model: &str,
+    interval: i64,
+    from: i64,
+    to: i64,
+    reason: &str,
+    now: i64,
+    dry_run: bool,
+) -> Result<GapReport, String> {
+    if reason != SkipReason::RecordFailed.code() && reason != SkipReason::ProcessDown.code() {
+        return Err(format!(
+            "history-record-gap: --reason must be record_failed or process_down, got {reason}"
+        ));
+    }
+    if interval <= 0 || from >= to {
+        return Err("history-record-gap: need interval > 0 and --from < --to".into());
+    }
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    c.busy_timeout(BUSY_TIMEOUT).map_err(err)?;
+    let v = if has_table(&c, "main", "score_history_migrations") {
+        current_version(&c)?
+    } else {
+        0
+    };
+    if v != SCHEMA_VERSION {
+        return Err(format!(
+            "history schema v{v}, need v{SCHEMA_VERSION} (start the new serve once to migrate)"
+        ));
+    }
+    let missing = missing_triggers(&c);
+    if !missing.is_empty() {
+        return Err(format!(
+            "refusing: missing append-only triggers {missing:?}"
+        ));
+    }
+    c.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
+    let res = (|| -> Result<GapReport, String> {
+        let base: Option<i64> = c
+            .query_row(
+                "SELECT MAX(captured_at) FROM score_runs \
+                 WHERE profile = ?1 AND model = ?2 AND captured_at <= ?3",
+                params![profile, model, from],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        let Some(base) = base else {
+            return Err(format!(
+                "refusing: no {profile}/{model} run at or before --from {from} to anchor the schedule"
+            ));
+        };
+        let inside: Option<String> = c
+            .query_row(
+                "SELECT run_id FROM score_runs WHERE profile = ?1 AND model = ?2 \
+                 AND captured_at > ?3 AND captured_at <= ?4 ORDER BY captured_at LIMIT 1",
+                params![profile, model, from, to],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?;
+        if let Some(run) = inside {
+            return Err(format!(
+                "refusing: run {run} was recorded inside the range; nothing written"
+            ));
+        }
+        let plan = process_down_plan(Some(base), None, interval, to);
+        if plan.summary.is_some() {
+            return Err(format!(
+                "refusing: range longer than {PROCESS_DOWN_DETAIL_DAYS} days; split it"
+            ));
+        }
+        let mut slots: std::collections::BTreeMap<i64, &'static str> =
+            plan.slots.into_iter().collect();
+        if let Some((s, t)) = due_slot(to, Some(base), interval) {
+            slots.insert(s, t);
+        }
+        slots.retain(|s, _| *s > from && *s <= to);
+        let mut rep = GapReport {
+            profile: profile.into(),
+            reason: reason.into(),
+            slots: slots.keys().copied().collect(),
+            inserted: 0,
+            skipped: 0,
+            dry_run,
+        };
+        for (slot, trigger) in slots {
+            let added = insert_deferral(
+                &c,
+                &RunDeferral {
+                    profile: profile.into(),
+                    slot,
+                    trigger: trigger.into(),
+                    observed_at: now,
+                    reason: reason.into(),
+                    stale_count: 0,
+                    total: 0,
+                    covers: 1,
+                    covers_from: None,
+                },
+            )
+            .map_err(err)?;
+            if added {
+                rep.inserted += 1;
+            } else {
+                rep.skipped += 1;
+            }
+        }
+        Ok(rep)
+    })();
+    match res {
+        Ok(rep) if !dry_run => {
+            c.execute_batch("COMMIT").map_err(err)?;
+            Ok(rep)
+        }
+        other => {
+            let _ = c.execute_batch("ROLLBACK");
+            other
+        }
+    }
+}
+
 /// Quote-freshness inputs for one due run (wall-clock epochs).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreshInputs {
@@ -8361,6 +8507,61 @@ BEGIN SELECT RAISE(ABORT, 'score history is append-only'); END;
             std::fs::read(q.join(format!("{old}.1"))).unwrap(),
             b"second"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_gap_writes_scheduled_slots_once_and_refuses_bad_ranges() {
+        let dir = tmpdir("gap");
+        let p = dir.join("history.sqlite");
+        let s = ScoreHistoryStore::open(&p, None).unwrap();
+        s.record_run(&meta(SAT_10), &[row("AAA", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        let to = SAT_10 + 18 * HR;
+        let gap = |from: i64, to: i64, reason: &str, dry: bool| {
+            record_gap_file(&p, "sp500", "v3", 6 * HR, from, to, reason, to + 60, dry)
+        };
+        // Weekend, 6 h schedule anchored at the run: exactly the three missed slots.
+        let want = vec![SAT_10 + 6 * HR, SAT_10 + 12 * HR, SAT_10 + 18 * HR];
+        let dry = gap(SAT_10, to, "record_failed", true).unwrap();
+        assert_eq!((dry.slots.clone(), dry.inserted), (want.clone(), 3));
+        let defs = |s: &ScoreHistoryStore| s.deferrals(None, "v3", None, None, 100).unwrap();
+        assert!(defs(&s).is_empty(), "dry run writes nothing");
+        let r = gap(SAT_10, to, "record_failed", false).unwrap();
+        assert_eq!((r.slots, r.inserted, r.skipped), (want.clone(), 3, 0));
+        let again = gap(SAT_10, to, "process_down", false).unwrap();
+        assert_eq!((again.inserted, again.skipped), (0, 3), "idempotent");
+        let rows = defs(&s);
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter().all(|(d, _)| d.reason == "record_failed"),
+            "first wins"
+        );
+        // Refusals, nothing written.
+        assert!(gap(SAT_10, to, "stale_share_too_high", false).is_err());
+        assert!(
+            gap(SAT_10 - HR, to, "record_failed", false).is_err(),
+            "no anchor"
+        );
+        let e = gap(SAT_10, SAT_10 + 9 * 86_400, "record_failed", false).unwrap_err();
+        assert!(e.contains("longer than"), "{e}");
+        s.record_run(&meta(to + HR), &[row("AAA", "Act", 30, 60, 0, 30)])
+            .unwrap();
+        let e = gap(SAT_10, to + 2 * HR, "record_failed", false).unwrap_err();
+        assert!(e.contains("inside the range"), "{e}");
+        assert_eq!(defs(&s).len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_gap_refuses_a_store_below_v6() {
+        let dir = tmpdir("gap-v4");
+        let p = dir.join("history.sqlite");
+        let s = ScoreHistoryStore::open_with(&p, None, &MIGRATIONS[..4]).unwrap();
+        drop(s);
+        let e = record_gap_file(&p, "sp500", "v3", 6 * HR, 0, HR, "record_failed", HR, false)
+            .unwrap_err();
+        assert!(e.contains("need v6"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
