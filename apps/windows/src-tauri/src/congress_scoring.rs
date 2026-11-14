@@ -299,5 +299,8 @@ pub struct OutcomeForAggregation {
 /// Fetch enough historical candles to cover all trades for one symbol.
 /// We use Yahoo's 5y/1d range (plenty for our backtest window).
 pub fn fetch_history(client: &YahooClient, symbol: &str) -> Option<Vec<HistoricalCandle>> {
-    client.fetch_candles(symbol, "5y", "1d").ok()
+    client
+        .fetch_candles(symbol, "5y", "1d")
+        .ok()
+        .map(|f| f.candles)
 }

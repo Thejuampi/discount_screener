@@ -121,7 +121,8 @@ pub async fn get_portfolio_risk(
             if !missing.is_empty() {
                 let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
                 for sym in &missing {
-                    if let Ok(c) = client.fetch_candles(sym, "1y", "1d") {
+                    if let Ok(fetch) = client.fetch_candles(sym, "1y", "1d") {
+                        let c = fetch.candles;
                         if c.len() >= 2 {
                             candles_by_sym.insert(sym.clone(), c);
                         }

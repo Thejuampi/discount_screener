@@ -131,7 +131,7 @@ fn fetch_closes(client: &YahooClient, symbol: &str, range: &str) -> Vec<f64> {
     client
         .fetch_candles(symbol, range, "1d")
         .ok()
-        .map(|c| closes_from_candles(&c))
+        .map(|f| closes_from_candles(&f.candles))
         .unwrap_or_default()
 }
 
@@ -233,7 +233,8 @@ fn compute_market_regime_parts(
     let (mut spy_summary, mut spy_closes) = (spy_summary_cached, spy_closes_cached);
     if let Some(ref y) = yahoo {
         if spy_summary.is_none() || spy_closes.len() < 60 {
-            if let Ok(candles) = y.fetch_candles("SPY", "1y", "1d") {
+            if let Ok(fetch) = y.fetch_candles("SPY", "1y", "1d") {
+                let candles = fetch.candles;
                 if !candles.is_empty() {
                     let closes = closes_from_candles(&candles);
                     if !closes.is_empty() {

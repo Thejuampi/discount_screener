@@ -214,3 +214,176 @@ churn move the number).
 
 Plan disk for `backup_dir` separately from the live data-dir; rotation never deletes a
 kept gzip or an `inputs/` blob.
+
+## Quote freshness (migration v5)
+
+This fixes the 11/04 wake race. The box was frozen from 10/29 ~21:10 EDT to 11/04 ~17:18 EST. About a minute after
+wake, the 18 h close catch-up recorded `sp500-1793830789-v3` while 50 of its 89 rows still carried 10/29 prices.
+The Director approved this design on 2026-11-04, including the defaults: 1800 s stale threshold, 300 s clock-jump gap,
+10% stale share, and the 90% full-pass rule.
+
+- **`quote_ts`** is the wall-clock epoch at which OUR feed fetched the quote (`MarketSnapshot.quote_fetched_at`,
+  stamped on every priced ingest). Chart-close fallbacks prefer Yahoo chart `meta.regularMarketTime`, then the
+  last candle epoch, each only when present, `> 0`, and not more than 120 s ahead of wall; wall is used **only**
+  when both are genuinely missing (absent or `<= 0`). A present timestamp beyond that skew is left unknown
+  (`quote_fetched_at = None`) so the row is stale and does **not** count toward the 90% full-pass rule
+  (fail-closed — never substitute wall for a future stamp). A Yahoo equity daily bar is stamped at the session
+  open (~09:30 ET) and crypto at 00:00 UTC, so the bar time alone must not be preferred over
+  `regularMarketTime` or chart-path closes would never count toward full-pass after the open. After the regular
+  session, `regularMarketTime` sits near the 16:00 ET close, so a pass started after hours also fails safe
+  (that stamp is before `pass_start` and does not count). `quote_fetched_at` lives in memory only
+  (`#[serde(skip)]`), so stored input bytes and hashes are unchanged; only the derived `quote_ts` column is stored.
+- **No new time, no new stamp:** a refresh that yields no fresh quote time (quote fetch failed, or the chart ran on a
+  row that already has a price, which the chart does not overwrite) keeps the row's previous stamp. It is never
+  wiped and never refreshed, so the row stays stale until a real quote arrives.
+- **Known limit (no `market_ts`):** the price path (quoteSummary) does not give us Yahoo's `regularMarketTime`;
+  only the chart endpoint has it. Carrying it would add a field to the serialized snapshot rows and change input
+  bytes/hashes and official output, so it is not stored. A stale exchange quote fetched recently therefore looks
+  fresh; the gate only catches quotes WE have not refreshed.
+- **Future `quote_ts`** (wall clock stepped back below a fetch time): no age is computed (`quote_age_secs` NULL) and
+  the row counts as stale, in storage and in `/status`; ages are never clamped to 0.
+- **Deferral episode:** `deferred_since_epoch`/`deferred_reason` are set on a gate hit and cleared when a run is
+  recorded or when the tick is simply not due (`Due::No`). `/status` deferral warnings via `--defer-warn-hours`
+  fire **once per deferral episode** (tracked by `deferred_since`), not on every tick.
+- **Full pass:** a refresh pass counts as full only if ≥ 90% of the universe received a fresh quote during it
+  (`last_full_pass_at`, wall clock). "During it" means stamped at or after the pass start, a sealed `PassStart`
+  taken from the wall clock when the pass begins; a raw number such as `0` cannot be passed in. If the wall clock
+  reads 0 (broken clock), the pass start is treated as "never" and no pass counts as full (fail-closed).
+- **v5 columns on `score_history`** (additive; pre-v5 rows read as `stale = 0`, `quote_ts` and `quote_age_secs` NULL):
+  - `quote_ts`;
+  - `quote_age_secs` (CHECK `>= 0`);
+  - `stale` (NOT NULL DEFAULT 0, CHECK `IN (0,1)`).
+- **Stale rows:** a row is stale when its age is greater than `--quote-stale-secs` (default 1800; an age of exactly
+  1800 s is fresh).
+  - It fails closed: a priced row with no `quote_ts` is stale.
+  - Stale rows are stored but excluded from `/history`, decision changes and `history-shadow-report`.
+  - `/history?all=1` returns every evaluation with a boolean `stale`: `true` when that run's stored row was stale
+    (excluded from `/history`), `false` otherwise.
+- **Deferral.** A due run (interval or close, including the 18 h catch-up) is deferred while any of these holds:
+  1. `clock jump: waiting for a quote pass after wake`: a tick gap greater than `--clock-jump-secs` (default 300) in
+     either direction (suspend or backward step) was seen, and no NEW full pass has ended strictly after it. A pass
+     stamped in the jump second, or an older pass that looks later after a backward step, does not count.
+  2. `waiting for a fresh quote pass`: the last full pass is more than the threshold old.
+  3. `too many stale quotes`: more than `--max-stale-share` (default 0.10, so 2 of 20 is OK and 3 of 20 defers) of the
+     rows are stale.
+
+  Deferrals are logged once per change. After `--defer-warn-hours` (default 6) of continuous deferral, a `WARNING`
+  line is logged once. On fresh data the gate does nothing, and official rows and decisions are identical.
+- **`TickClock`** (tick and deferral tracking) is in memory only. It is never persisted, and a restart starts clean.
+- **`/status`** adds:
+  - `oldest_quote_age_secs`;
+  - `stale_symbols` (including priced symbols with no quote time);
+  - `last_full_pass_at_epoch`;
+  - `deferred_since_epoch` and `deferred_reason`.
+- **`run_annotations (run_id, reason, created_at)`** is append-only: triggers block delete, update and overwrite,
+  backed by the startup check, backups and the restore merge.
+  - Writing is **CLI-only**: `vantage-headless history-annotate RUN_ID --reason TEXT [--data-dir DIR]` writes
+    straight to `history.sqlite`. It is safe while `serve` runs (SQLite locking), never creates or migrates the file,
+    and refuses a store that is not at the current schema (v6) or is missing any trigger.
+  - The daemon has no write route. Read annotations with `GET /history/annotations?run=`.
+  - **Machine-readable for validation.** Every annotated run's notes appear as `annotations`, a JSON array of the
+    reason strings, oldest first, and `[]` when there are none (the field is always present):
+    - on every `/history?symbol=` point;
+    - in the `/history?all=1` run export, both at the top level and on each evaluation;
+    - on each evaluation of `/history?all=1&symbol=`.
+    Annotated runs are not hidden or filtered. A forward-return validation that wants to drop them filters
+    `annotations != []`. Example (run export, trimmed):
+    `{"run_id":"sp500-1793538000-v3","annotations":["made-up note"],"evaluations":[{"symbol":"S01","annotations":["made-up note"],"stale":false,...}],...}`
+- **`run_deferrals` (no silent gaps; migration v6).** Every scheduled slot that does not record leaves one durable,
+  append-only row in `history.sqlite`. The in-memory `TickClock` deferral is only what `/status` shows.
+  - **Migration v6** holds the table, its 3 triggers and the `score_runs_profile_model_at` index on
+    `score_runs (profile, model, captured_at)`. v5 is frozen exactly as released at 3c2e275, and a test pins its
+    hash. A v4 or older store migrates straight to v6 in one open, with one pre-migration backup
+    (`history.pre-score-history-v4-to-v6-*.sqlite.gz`).
+  - **Pre-release v5 is refused.** A store at v5 that already has `run_deferrals` was migrated by a pre-release #74
+    build (271df3b-era v5). It is refused untouched (no migration, no backup, no write) with:
+    `score history store is at schema v5 but already has a run_deferrals table: it was migrated by a pre-release
+    build of PR #74 (271df3b-era v5), whose v5 differs from the released v5. Refusing to open or migrate it; nothing
+    was changed. Move this history.sqlite aside and restore the pre-migration backup
+    (history.pre-score-history-v4-to-v5-*.sqlite.gz), then start again.`
+  - **No `model` column.** The recorder schedules one model (`HISTORY_MODEL`, v3) per profile, so a slot belongs to
+    a profile. `next_run` (below) is filtered on that model.
+  - Columns: `profile`, `slot` (UTC epoch of the scheduled due time), `trigger` (`interval` or `close`),
+    `observed_at` (UTC epoch of the first tick that did not record it), `reason`, `stale_count` and `total` (priced
+    rows at that tick), `covers` and `covers_from` (see `process_down`). The stale share is derived as
+    `stale_count / total` (none when `total = 0`); it is not stored. A CHECK refuses free text, an unknown trigger
+    and `stale_count > total`.
+  - `reason` codes, one per existing skip or defer message:
+
+    | code | message |
+    |---|---|
+    | `initial_pass_in_progress` | `initial pass in progress` |
+    | `year_charts_pending` | `waiting for year charts` |
+    | `no_live_ranking` | `no live ranking` |
+    | `close_snapshot_imminent` | `close snapshot imminent` (the close run replaces that interval slot) |
+    | `clock_jump` | `clock jump: waiting for a quote pass after wake` |
+    | `no_fresh_full_pass` | `waiting for a fresh quote pass` |
+    | `stale_share_too_high` | `too many stale quotes` |
+    | `process_down` | no tick message: written at startup for slots missed while the process was down (below) |
+    | `record_failed` | no tick message: the slot was due but evaluating or writing the run failed with an error |
+
+    **`record_failed`** is best effort. A run-path error on a scheduled slot writes one row for the slot that
+    `due_slot` gives (first wins, so a failure that repeats inside one slot adds nothing), with
+    `stale_count = total = 0`. If that row cannot be written either, the tick returns both errors and nothing else
+    happens: no retry, no loop, and the next tick proceeds normally. `serve` logs each distinct tick error once
+    until a tick succeeds. An error on a tick that has no scheduled slot (`interval not elapsed`) writes nothing.
+
+    `interval not elapsed` is not a scheduled slot and writes nothing. A test fails if `history_due` or
+    `freshness_gate` gains a message without a code.
+  - **Slot rule** (`due_slot`, which mirrors `history_due`):
+    - A pending close catch-up uses that close slot.
+    - Once the interval has elapsed, the slot is the latest due interval time, `last + k·interval` with
+      `k = ⌊(now − last) / interval⌋`. A long deferral therefore leaves one row per elapsed interval.
+    - With no run yet, or with the clock behind the last run, the slot is the interval bucket
+      `⌊now / interval⌋·interval`.
+  - **No flooding.** `PRIMARY KEY (profile, slot)`, and the insert is `INSERT … SELECT … WHERE NOT EXISTS` on that
+    key (the `no_overwrite` trigger aborts a duplicate insert, as on every other history table). The first tick of a
+    slot wins: retry ticks, a later different reason, and a restart inside the same slot add nothing and change
+    nothing.
+  - **Append-only.** `BEFORE DELETE`, `BEFORE UPDATE` and `BEFORE INSERT` (existing key) triggers
+    `RAISE(ABORT)`. They are required at open, covered by the behavioural self-check and the backups, and merged by
+    restore (key `profile, slot`; 0 rows from a pre-v6 backup).
+  - **A slot never records late, and it keeps its deferral row.**
+    - `GET /history/deferrals?profile=&since=&before=&limit=` returns the rows newest first, with
+      `since <= slot < before`. The default limit is 100 and the maximum is 10 000.
+    - The CLI is `vantage-headless history-deferrals [--profile P] [--since EPOCH] [--before EPOCH] [--limit N]`. It
+      refuses unknown flags and value flags given without a value.
+    - To page back, pass `before` = the oldest slot shown.
+    - Each row has `next_run`: the first v3 run of the same profile captured at or after the slot, or `null` while
+      no run has happened since. It is not "the run that recorded the slot".
+    - `next_run` is computed only for the returned page, on the v6 index: 10k deferrals and 3k runs, limit 100,
+      take about 5 ms, against about 2.7 s for the first version of the query.
+    - This is read-only, and the daemon has no write route.
+  - **Downtime gap (`process_down`).** At `serve` startup (`backfill_process_down`, in one transaction), every
+    scheduled slot that came due while the process was not running gets one `process_down` row:
+    - **Since when.** The anchor is the later of the profile's last recorded run and its latest `run_deferrals` slot.
+      Candidates are the slots in `(anchor, now]`.
+    - **Which slots.** The same schedule as `due_slot`: interval slots `last + k·interval` (or the
+      `now − now mod interval` buckets when only deferrals exist) and every weekday 16:10 ET close. A running process
+      gets `Due::Close` for each close, so missed closes get rows too, with `trigger = 'close'`. A close that lands
+      on an interval slot is one `close` row.
+    - **Not the slot due now.** Whatever `due_slot(now)` returns, including a close still inside its 18 h
+      catch-up, is left to the live process. It records that slot, or defers it with its real reason. So a run at
+      `T`, a restart just after `T + 4·interval` gives exactly 3 rows (`T + 1..3·interval`).
+    - **`stale_count = 0`, `total = 0`.** Nothing was priced because no process was running. This satisfies
+      `total >= stale_count >= 0`, and the derived stale share is `null`, which does not claim a 0 % share.
+      `observed_at` is the startup time.
+    - **Cap: `PROCESS_DOWN_DETAIL_DAYS = 7`.** Slots at or after `now − 7 d` get one row each. All older missed
+      slots collapse into ONE summary row:
+      - `slot` is the newest of those older slots, and `trigger` is that slot's trigger;
+      - `covers` is how many missed slots the row stands for (interval and close);
+      - `covers_from` is the earliest of them, so the row covers `[covers_from, slot]`.
+      Every other row has `covers = 1, covers_from = NULL`. CHECKs: `covers >= 1`, `covers_from <= slot`, and both
+      `covers > 1` and a non-NULL `covers_from` are allowed only on `process_down`. Keying the summary on its newest
+      slot keeps the anchor rule exact, so a later restart never re-summarises the same span.
+    - **Idempotent.** First record wins per `(profile, slot)`, and the anchor moves past the written slots, so a
+      second restart adds nothing.
+    - **Nothing on a fresh store.** No run and no deferral for the profile means no rows, so the first open of an
+      empty store writes nothing. History disabled (`--history-interval-hours 0`) also writes nothing.
+    - **Clock behind the last run** (a backwards jump): no rows. With the wall clock behind the anchor, "missed
+      since" is not trustworthy.
+    - The interval is the current `--history-interval-hours`. If the interval changed while the process was down,
+      the missed slots follow the new schedule from the last run.
+    - A failure is logged on stderr and does not stop `serve`.
+- **`POST /persist`** refuses any request that carries an `Origin` header and requires `X-Vantage-Cli: 1` (the CLI
+  sends it).

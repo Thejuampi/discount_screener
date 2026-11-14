@@ -636,6 +636,40 @@ pub(crate) mod opportunity_projection_tests {
     use crate::regime::MarketRegime;
     use std::sync::{mpsc, Arc, Mutex};
 
+    #[test]
+    fn history_tick_full_pass_needs_90pct_fresh_quotes() {
+        let mut st = ScreenerState::new();
+        let syms: Vec<String> = (0..10).map(|k| format!("S{k}")).collect();
+        for (k, sym) in syms.iter().enumerate() {
+            st.ingest_snapshot(MarketSnapshot {
+                symbol: sym.clone(),
+                company_name: None,
+                profitable: true,
+                market_price_cents: 100,
+                intrinsic_value_cents: 0,
+                previous_close_cents: 0,
+                next_earnings_epoch: None,
+                // S0..S8 quoted in this pass (>= 1000), S9 before it.
+                quote_fetched_at: Some(if k < 9 { 1_000 + k as i64 } else { 999 }),
+            });
+        }
+        assert!(
+            super::full_pass_succeeded(&syms, &st, PassStart::at(1_000)),
+            "9/10 = 90%"
+        );
+        assert!(
+            !super::full_pass_succeeded(&syms, &st, PassStart::at(1_001)),
+            "8/10 < 90%"
+        );
+        let mut more = syms.clone();
+        more.push("NEVER".into());
+        assert!(
+            !super::full_pass_succeeded(&more, &st, PassStart::at(1_000)),
+            "9/11 < 90%"
+        );
+        assert!(super::full_pass_succeeded(&[], &st, PassStart::at(1_000)));
+    }
+
     pub(crate) fn fixture_state() -> Arc<Mutex<ScreenerState>> {
         let mut state = ScreenerState::new();
         for (symbol, price, intrinsic, sector) in [
@@ -651,6 +685,7 @@ pub(crate) mod opportunity_projection_tests {
                 intrinsic_value_cents: intrinsic,
                 previous_close_cents: price - 100,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             });
             state.ingest_signal(ExternalValuationSignal {
                 symbol: symbol.into(),
@@ -822,6 +857,7 @@ pub(crate) mod opportunity_projection_tests {
                 intrinsic_value_cents: 30_000,
                 previous_close_cents: 24_000,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             });
         }
 
@@ -1019,9 +1055,9 @@ fn request_demand_valuation_if_needed(symbol: &str, state: &AppState) {
     let request_context = match prep {
         DemandPrep::Refuse(envelope) => {
             let _ = ingest_operating_valuation_if_current(
-            &EnrichmentGate::from_app(&state),
-            generation,
-            symbol.to_string(),
+                &EnrichmentGate::from_app(&state),
+                generation,
+                symbol.to_string(),
                 None,
                 envelope,
             );
@@ -1371,25 +1407,22 @@ where
                 let mut new_fund = None;
                 let mut new_rev = None;
                 let mut new_ctx = None;
-                let applied = gate.mutate(
-                    generation,
-                    |state| {
-                        if !demand_publication_inputs_are_current(
-                            state,
-                            symbol,
-                            &fund,
-                            price,
-                            &dcf_revision,
-                        ) {
-                            refused = Some(DEMAND_INPUTS_CHANGED.into());
-                            return;
-                        }
-                        state.ingest_fundamentals(refreshed);
-                        new_ctx = Some(DemandFailureContext::capture(state, symbol));
-                        new_rev = Some(dcf_revision_key(state, symbol));
-                        new_fund = state.fundamentals.get(symbol).cloned();
-                    },
-                );
+                let applied = gate.mutate(generation, |state| {
+                    if !demand_publication_inputs_are_current(
+                        state,
+                        symbol,
+                        &fund,
+                        price,
+                        &dcf_revision,
+                    ) {
+                        refused = Some(DEMAND_INPUTS_CHANGED.into());
+                        return;
+                    }
+                    state.ingest_fundamentals(refreshed);
+                    new_ctx = Some(DemandFailureContext::capture(state, symbol));
+                    new_rev = Some(dcf_revision_key(state, symbol));
+                    new_fund = state.fundamentals.get(symbol).cloned();
+                });
                 if !applied {
                     return Err("profile changed during demand valuation".into());
                 }
@@ -1427,24 +1460,21 @@ where
             let mut new_rev = None;
             let mut new_ctx = None;
             let fund_to_write = fund.clone();
-            let applied = gate.mutate(
-                    generation,
-                    |state| {
-                    if !demand_publication_inputs_are_current(
-                        state,
-                        symbol,
-                        &previous_fund,
-                        price,
-                        &dcf_revision,
-                    ) {
-                        refused = Some(DEMAND_INPUTS_CHANGED.into());
-                        return;
-                    }
-                    state.ingest_fundamentals(fund_to_write);
-                    new_ctx = Some(DemandFailureContext::capture(state, symbol));
-                    new_rev = Some(dcf_revision_key(state, symbol));
-                },
-                );
+            let applied = gate.mutate(generation, |state| {
+                if !demand_publication_inputs_are_current(
+                    state,
+                    symbol,
+                    &previous_fund,
+                    price,
+                    &dcf_revision,
+                ) {
+                    refused = Some(DEMAND_INPUTS_CHANGED.into());
+                    return;
+                }
+                state.ingest_fundamentals(fund_to_write);
+                new_ctx = Some(DemandFailureContext::capture(state, symbol));
+                new_rev = Some(dcf_revision_key(state, symbol));
+            });
             if !applied {
                 return Err("profile changed during demand valuation".into());
             }
@@ -1533,24 +1563,21 @@ where
                         let mut new_rev = None;
                         let mut new_ctx = None;
                         let fund_to_write = fund.clone();
-                        let applied = gate.mutate(
-                    generation,
-                    |state| {
-                                if !demand_publication_inputs_are_current(
-                                    state,
-                                    symbol,
-                                    &previous_fund,
-                                    price,
-                                    &dcf_revision,
-                                ) {
-                                    refused = Some(DEMAND_INPUTS_CHANGED.into());
-                                    return;
-                                }
-                                state.ingest_fundamentals(fund_to_write);
-                                new_ctx = Some(DemandFailureContext::capture(state, symbol));
-                                new_rev = Some(dcf_revision_key(state, symbol));
-                            },
-                );
+                        let applied = gate.mutate(generation, |state| {
+                            if !demand_publication_inputs_are_current(
+                                state,
+                                symbol,
+                                &previous_fund,
+                                price,
+                                &dcf_revision,
+                            ) {
+                                refused = Some(DEMAND_INPUTS_CHANGED.into());
+                                return;
+                            }
+                            state.ingest_fundamentals(fund_to_write);
+                            new_ctx = Some(DemandFailureContext::capture(state, symbol));
+                            new_rev = Some(dcf_revision_key(state, symbol));
+                        });
                         if !applied {
                             return Err("profile changed during demand valuation".into());
                         }
@@ -1612,15 +1639,15 @@ where
         },
     );
     publish_demand_operating_valuation_if_current(
-            &gate,
-            generation,
-            symbol,
+        &gate,
+        generation,
+        symbol,
         &fund,
         price,
         &dcf_revision,
         analysis,
         envelope,
-        )
+    )
 }
 
 fn analyst_price_history(state: &AppState, symbol: &str) -> Vec<ForecastPricePoint> {
@@ -1895,15 +1922,13 @@ fn apply_universe_profile_serial_with(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         + 1;
     reset_initial_pass_completion(&state.initial_pass_completed_generation);
+    state.last_full_pass_at.store(0, Ordering::SeqCst);
 
     {
         // Closed-world clear: bump rank_input via the central mutation helper so
         // `/status` ranked_rows cannot keep a stale count across profile switches.
         let gen = state.feed_generation.load(Ordering::SeqCst);
-        let _ = clear_universe_if_current(
-            &EnrichmentGate::from_app(&state),
-            gen,
-        );
+        let _ = clear_universe_if_current(&EnrichmentGate::from_app(&state), gen);
     }
     *state.active_profile.lock().unwrap() = profile_name.clone();
     *state.active_symbols.lock().unwrap() = Arc::clone(&symbols);
@@ -1940,12 +1965,286 @@ fn apply_universe_profile_serial_with(
     spawn_feed_workers(state, symbols, generation)
 }
 
+/// Wall-clock epoch seconds (quote freshness is wall-clock so it survives suspend).
+pub fn wall_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Wall-clock start of a coordinator quote pass, sealed so a raw integer (in
+/// particular `0`, which would let every pre-pass stamp count as fresh) can never
+/// reach the full-pass check. Production mints it only with [`PassStart::now`];
+/// tests use `PassStart::at` (`cfg(test)`, rejects `<= 0`).
+mod pass_start_seal {
+    /// Epoch seconds at which a quote pass began. See the module docs.
+    ///
+    /// Deliberately **neither `Copy` nor `Clone`**, and every consumer takes it by
+    /// value: each pass consumes its own start, so reusing the first pass's start for a
+    /// later pass (fail-open: old quotes would count toward that pass's 90% rule) is a
+    /// use-of-moved-value compile error; `.clone()` does not exist to dodge it. The
+    /// only way to get another one is a fresh [`PassStart::now`].
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct PassStart(i64);
+
+    /// Build-time guard: if `PassStart` ever becomes `Clone` (or `Copy`), both impls
+    /// below apply, the `_` is ambiguous, and the crate stops compiling.
+    const _: fn() = || {
+        trait AmbiguousIfClone<A> {
+            fn some_item() {}
+        }
+        impl<T> AmbiguousIfClone<()> for T {}
+        struct IsClone;
+        impl<T: Clone> AmbiguousIfClone<IsClone> for T {}
+        let _ = <PassStart as AmbiguousIfClone<_>>::some_item;
+    };
+
+    impl PassStart {
+        /// Capture the wall clock as the pass start.
+        pub fn now() -> Self {
+            Self::from_wall(super::wall_epoch())
+        }
+
+        /// A broken clock (`wall_epoch() == 0`) fails closed: the pass start becomes
+        /// "never", so no quote counts as fresh and the run is deferred.
+        fn from_wall(epoch: i64) -> Self {
+            if epoch > 0 {
+                Self(epoch)
+            } else {
+                Self(i64::MAX)
+            }
+        }
+
+        #[cfg(test)]
+        pub fn at(epoch: i64) -> Self {
+            assert!(epoch > 0, "PassStart::at needs a real epoch, got {epoch}");
+            Self(epoch)
+        }
+
+        // INVARIANT: no method may construct `Self` from `&self` (no `copy()`,
+        // `same_start()`, `with_epoch()`, `From<&PassStart>` …): that would be `Clone`
+        // by another name and reopen the reuse hole. New starts come only from `now()`
+        // (and the cfg(test) `at()`).
+
+        /// Read-only view; consumers still take the `PassStart` itself by value.
+        pub fn epoch(&self) -> i64 {
+            self.0
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::PassStart;
+
+        #[test]
+        fn pass_start_broken_clock_fails_closed() {
+            assert_eq!(PassStart::from_wall(0).epoch(), i64::MAX);
+            assert_eq!(PassStart::from_wall(-7).epoch(), i64::MAX);
+            assert_eq!(PassStart::from_wall(42).epoch(), 42);
+            assert!(PassStart::now().epoch() > 0);
+        }
+
+        /// `now()` must read the wall clock (not a constant like `Self(1)`, which would
+        /// let every quote since 1970 count toward the pass).
+        #[test]
+        fn pass_start_now_reads_wall_clock() {
+            let before = super::super::wall_epoch();
+            let got = PassStart::now().epoch();
+            let after = super::super::wall_epoch();
+            assert!(before > 0, "test needs a working clock");
+            assert!(
+                (before..=after).contains(&got),
+                "PassStart::now() = {got}, wall clock was {before}..={after}"
+            );
+        }
+
+        /// Each coordinator pass mints its own start: the initial pass mints one before
+        /// its first round and hands it to exactly one full-pass mark; the refresh loop
+        /// mints a fresh one after each sleep, before any worker runs, and hands it to
+        /// that pass's completion. (Reusing the initial start is also a compile error:
+        /// it is moved into the first mark and `PassStart` is not `Clone`.)
+        #[test]
+        fn each_feed_pass_mints_a_fresh_pass_start() {
+            let src = include_str!("commands.rs");
+            let at = src
+                .find("\nfn spawn_feed_workers(")
+                .expect("spawn_feed_workers");
+            let body = &src[at..at + 1 + src[at + 1..].find("\n}\n").unwrap()];
+            assert_eq!(
+                body.matches("PassStart::now()").count(),
+                2,
+                "one start for the initial pass, one per refresh pass"
+            );
+            assert_eq!(
+                body.matches("PassStart::").count(),
+                2,
+                "no other constructor"
+            );
+            let init = body
+                .find("let initial_start = PassStart::now();")
+                .expect("initial pass mints its start");
+            assert_eq!(
+                body.matches("initial_start").count(),
+                2,
+                "initial_start: minted once, consumed once"
+            );
+            let first_mark = body.find("mark_full_pass_if_current(").unwrap();
+            let used = init + body[init..].find("initial_start,").unwrap();
+            assert!(init < first_mark && first_mark < used);
+            let lp = used + body[used..].find("loop {").expect("refresh loop");
+            let lb = &body[lp..];
+            let sleep = lb.find("thread::sleep(").unwrap();
+            let mint = lb.find("let pass_start = PassStart::now();").unwrap();
+            let spawn = lb.find(".spawn(").unwrap();
+            let done = lb.find("complete_coordinator_quote_pass(").unwrap();
+            let passed = done + lb[done..].find("pass_start,").unwrap();
+            assert!(sleep < mint && mint < spawn && spawn < done && done < passed);
+            assert!(!lb[..passed].contains("initial_start"));
+            assert!(!body.contains("pass_start.clone()") && !body.contains("start.clone()"));
+        }
+
+        #[test]
+        #[should_panic(expected = "real epoch")]
+        fn pass_start_at_rejects_zero() {
+            let _ = PassStart::at(0);
+        }
+    }
+}
+pub(crate) use pass_start_seal::PassStart;
+
+/// Share of a pass's symbols that must get a fresh quote for it to count as a full pass.
+pub const FULL_PASS_MIN_SUCCESS: f64 = 0.90;
+
+/// True when at least [`FULL_PASS_MIN_SUCCESS`] of `symbols` were quoted at or after
+/// `pass_start` (an empty universe is trivially full).
+pub(crate) fn full_pass_succeeded(
+    symbols: &[String],
+    screener: &crate::engine::ScreenerState,
+    pass_start: PassStart,
+) -> bool {
+    let pass_start = pass_start.epoch();
+    let ok = symbols
+        .iter()
+        .filter(|s| {
+            screener
+                .snapshots
+                .get(s.as_str())
+                .and_then(|x| x.quote_fetched_at)
+                .is_some_and(|t| t >= pass_start)
+        })
+        .count();
+    ok as f64 >= symbols.len() as f64 * FULL_PASS_MIN_SUCCESS
+}
+
+/// How far ahead of wall clock a chart timestamp may be and still count as usable
+/// (clock skew / exchange clock). Beyond this a *present* time is unknown/stale —
+/// never substituted with wall (fail-closed).
+const CHART_TS_FUTURE_SKEW_SECS: i64 = 120;
+
+/// Quote time for a chart-close ingest (in memory only, `#[serde(skip)]`).
+/// Fallback chain:
+/// 1. Yahoo chart `meta.regularMarketTime` when present, `> 0`, and not more than
+///    [`CHART_TS_FUTURE_SKEW_SECS`] ahead of `now`;
+/// 2. last candle epoch under the same rules;
+/// 3. wall clock ONLY when both candidates are genuinely missing (absent or `<= 0`).
+///
+/// A present timestamp beyond the skew returns `None` (unknown → stale, does **not**
+/// count toward the 90% full-pass rule). Daily bar opens (~09:30 ET / 00:00 UTC crypto)
+/// must NOT be preferred over `regularMarketTime`, or chart-path closes would never
+/// count toward full-pass after the open. After the regular session, Yahoo's
+/// `regularMarketTime` sits near the 16:00 ET close, so a pass started after hours
+/// also fails safe (that stamp is before `pass_start`).
+fn chart_quote_ts(
+    regular_market_time: Option<i64>,
+    candles: &[crate::engine::HistoricalCandle],
+) -> Option<i64> {
+    chart_quote_ts_at(wall_epoch(), regular_market_time, candles)
+}
+
+/// Testable form of [`chart_quote_ts`] with an injected `now` (skew boundary).
+fn chart_quote_ts_at(
+    now: i64,
+    regular_market_time: Option<i64>,
+    candles: &[crate::engine::HistoricalCandle],
+) -> Option<i64> {
+    // Present+usable / missing (<=0) / present+future-beyond-skew.
+    let mut saw_future = false;
+    let consider = |t: i64, saw_future: &mut bool| -> Option<i64> {
+        if t <= 0 {
+            None
+        } else if t <= now + CHART_TS_FUTURE_SKEW_SECS {
+            Some(t)
+        } else {
+            *saw_future = true;
+            None
+        }
+    };
+    if let Some(t) = regular_market_time {
+        if let Some(ok) = consider(t, &mut saw_future) {
+            return Some(ok);
+        }
+    }
+    if let Some(t) = candles.last().map(|c| c.epoch_seconds) {
+        if let Some(ok) = consider(t, &mut saw_future) {
+            return Some(ok);
+        }
+    }
+    if saw_future {
+        None
+    } else {
+        Some(now)
+    }
+}
+
+/// Stamps the wall-clock end of a full quote pass for the current generation, only
+/// when at least 90% of its fetches succeeded (fresh quote since `pass_start`).
+fn mark_full_pass_if_current(
+    feed_gen: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    last_full_pass_at: &std::sync::atomic::AtomicI64,
+    symbols: &[String],
+    screener: &std::sync::Mutex<crate::engine::ScreenerState>,
+    pass_start: PassStart,
+) {
+    if generation_is_current(feed_gen, generation)
+        && full_pass_succeeded(symbols, &screener.lock().unwrap(), pass_start)
+    {
+        last_full_pass_at.store(wall_epoch(), Ordering::SeqCst);
+    }
+}
+
+/// Coordinator refresh-loop end of pass: marks the pass full using the
+/// [`PassStart`] captured when it began (a literal `0` no longer type-checks).
+fn complete_coordinator_quote_pass(
+    feed_gen: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    last_full_pass_at: &std::sync::atomic::AtomicI64,
+    symbols: &[String],
+    screener: &std::sync::Mutex<crate::engine::ScreenerState>,
+    pass_start: PassStart,
+) {
+    mark_full_pass_if_current(
+        feed_gen,
+        generation,
+        last_full_pass_at,
+        symbols,
+        screener,
+        pass_start,
+    );
+}
+
 fn ingest_fetch_result(
     screener: &mut crate::engine::ScreenerState,
-    result: crate::fetcher::FetchResult,
+    mut result: crate::fetcher::FetchResult,
     crypto: bool,
     etf: bool,
 ) -> RefreshOutcome {
+    if let Some(snap) = result.snapshot.as_mut() {
+        if snap.market_price_cents > 0 {
+            snap.quote_fetched_at = Some(wall_epoch());
+        }
+    }
     let visible = is_list_ready(&result, crypto, etf);
     let enriched = is_enrichment_complete(&result, crypto, etf);
     let has_fundamentals = result.fundamentals.is_some();
@@ -2380,12 +2679,12 @@ pub(crate) fn ensure_symbol_loaded_inner(
     match client.fetch_symbol(&symbol) {
         Ok(result) => {
             apply_refresh_quote_if_current(
-        &EnrichmentGate::from_app(&state),
-        generation,
-        result,
-        is_crypto(&symbol),
-        is_etf(&symbol),
-    )
+                &EnrichmentGate::from_app(&state),
+                generation,
+                result,
+                is_crypto(&symbol),
+                is_etf(&symbol),
+            )
             .ok_or_else(|| "profile changed during detail load".to_string())?;
         }
         Err(_) => {
@@ -2397,12 +2696,13 @@ pub(crate) fn ensure_symbol_loaded_inner(
         return Err("profile changed during detail load".into());
     }
 
-    if let Ok(candles) = client.fetch_candles(&symbol, "1y", "1d") {
+    if let Ok(fetch) = client.fetch_candles(&symbol, "1y", "1d") {
+        let candles = fetch.candles;
         if let Some(summary) = compute_chart_summary(&candles) {
             if !ingest_daily_chart_if_current(
-            &EnrichmentGate::from_app(&state),
-            generation,
-            symbol.clone(),
+                &EnrichmentGate::from_app(&state),
+                generation,
+                symbol.clone(),
                 summary,
                 candles,
             ) {
@@ -2429,13 +2729,14 @@ pub(crate) fn ensure_symbol_loaded_inner(
                 Ok(c) => c,
                 Err(_) => return,
             };
-            if let Ok(candles) = client.fetch_candles(&deep_symbol, "5y", "1wk") {
+            if let Ok(fetch) = client.fetch_candles(&deep_symbol, "5y", "1wk") {
+                let candles = fetch.candles;
                 if let Some(summary) = compute_chart_summary(&candles) {
                     let crypto = is_crypto(&deep_symbol);
                     if !ingest_weekly_summary_if_current(
-            &gate,
-            generation,
-            deep_symbol.clone(),
+                        &gate,
+                        generation,
+                        deep_symbol.clone(),
                         summary,
                         crypto.then(|| candles.clone()),
                     ) {
@@ -2462,9 +2763,9 @@ pub(crate) fn ensure_symbol_loaded_inner(
                             now_e,
                         );
                         if !ingest_crypto_metrics_if_current(
-            &gate,
-            generation,
-            deep_symbol.clone(),
+                            &gate,
+                            generation,
+                            deep_symbol.clone(),
                             metrics,
                         ) {
                             return;
@@ -2475,12 +2776,13 @@ pub(crate) fn ensure_symbol_loaded_inner(
             if !generation_is_current(gate.active_generation.as_ref(), generation) {
                 return;
             }
-            if let Ok(candles) = client.fetch_candles(&deep_symbol, "1mo", "1h") {
+            if let Ok(fetch) = client.fetch_candles(&deep_symbol, "1mo", "1h") {
+                let candles = fetch.candles;
                 if let Some(summary) = compute_chart_summary(&candles) {
                     if !ingest_hourly_summary_if_current(
-            &gate,
-            generation,
-            deep_symbol.clone(),
+                        &gate,
+                        generation,
+                        deep_symbol.clone(),
                         summary,
                     ) {
                         return;
@@ -2490,16 +2792,17 @@ pub(crate) fn ensure_symbol_loaded_inner(
             if !generation_is_current(gate.active_generation.as_ref(), generation) {
                 return;
             }
-            if let Ok(candles) = client.fetch_candles(
+            if let Ok(fetch) = client.fetch_candles(
                 &deep_symbol,
                 DETAIL_MONTHLY_CHART_REQUEST.range,
                 DETAIL_MONTHLY_CHART_REQUEST.interval,
             ) {
+                let candles = fetch.candles;
                 if let Some(summary) = compute_chart_summary(&candles) {
                     let _ = ingest_monthly_summary_if_current(
-            &gate,
-            generation,
-            deep_symbol.clone(),
+                        &gate,
+                        generation,
+                        deep_symbol.clone(),
                         summary,
                     );
                 }
@@ -2529,6 +2832,7 @@ pub fn get_candles(
     };
     client
         .fetch_candles(&symbol, range_str, interval_str)
+        .map(|f| f.candles)
         .map_err(|e| e.to_string())
 }
 
@@ -2858,6 +3162,9 @@ fn mutate_current_enrichment_state(
     mutate(&mut state);
     // Central bump: every ranking-affecting screener mutation (quote, chart, DCF,
     // closed-world clear, …) invalidates `/status` ranked_rows via this helper.
+    // Early returns inside `mutate` (e.g. chart with no summary / zero close) still
+    // bump once: the helper ran and may have written chart summary / candles.
+    // Callers that must not bump on a no-op should gate before calling.
     rank_input_generation.fetch_add(1, Ordering::Relaxed);
     true
 }
@@ -2967,7 +3274,9 @@ fn publish_financial_dcf_if_current(
     symbol: String,
     analysis: crate::dcf_model::DcfAnalysis,
 ) -> bool {
-    gate.mutate(generation, |state| state.ingest_dcf_analysis(symbol, analysis))
+    gate.mutate(generation, |state| {
+        state.ingest_dcf_analysis(symbol, analysis)
+    })
 }
 
 fn publish_universe_financial_dcf_from_fundamentals_if_current(
@@ -3080,7 +3389,9 @@ fn ingest_hourly_summary_if_current(
     symbol: String,
     summary: crate::engine::ChartSummary,
 ) -> bool {
-    gate.mutate(generation, |state| state.ingest_hourly_summary(symbol, summary))
+    gate.mutate(generation, |state| {
+        state.ingest_hourly_summary(symbol, summary)
+    })
 }
 
 fn ingest_monthly_summary_if_current(
@@ -3089,7 +3400,9 @@ fn ingest_monthly_summary_if_current(
     symbol: String,
     summary: crate::engine::ChartSummary,
 ) -> bool {
-    gate.mutate(generation, |state| state.ingest_monthly_summary(symbol, summary))
+    gate.mutate(generation, |state| {
+        state.ingest_monthly_summary(symbol, summary)
+    })
 }
 
 fn ingest_crypto_metrics_if_current(
@@ -3098,7 +3411,9 @@ fn ingest_crypto_metrics_if_current(
     symbol: String,
     metrics: crate::crypto_cycle::CryptoMetrics,
 ) -> bool {
-    gate.mutate(generation, |state| state.ingest_crypto_metrics(symbol, metrics))
+    gate.mutate(generation, |state| {
+        state.ingest_crypto_metrics(symbol, metrics)
+    })
 }
 
 fn publish_demand_financial_dcf_if_current(
@@ -3251,8 +3566,8 @@ mod feed_coordinator_tests {
     use super::{
         apply_refresh_chart_if_current, apply_refresh_quote_if_current, apply_universe_profile,
         batch_retry_delay_ms, clear_dcf_and_ingest_operating_if_current,
-        clear_dcf_and_set_valuation_error_if_current, clear_dcf_if_current, clear_universe_if_current,
-        compute_demand_valuation_once_with_financial_refresh, EnrichmentGate,
+        clear_dcf_and_set_valuation_error_if_current, clear_dcf_if_current,
+        clear_universe_if_current, compute_demand_valuation_once_with_financial_refresh,
         financial_required_drivers_missing, format_incomplete_retry_status,
         format_terminal_incomplete_status, ingest_crypto_metrics_if_current,
         ingest_daily_chart_if_current, ingest_fetch_result, ingest_fundamentals_if_current,
@@ -3260,10 +3575,10 @@ mod feed_coordinator_tests {
         ingest_monthly_summary_if_current, ingest_operating_valuation_if_current,
         ingest_weekly_summary_if_current, mark_initial_pass_complete_if_current,
         needs_enrichment_retry, publish_demand_operating_valuation_if_current,
-        publish_universe_financial_dcf_from_fundamentals_if_current,
+        publish_universe_financial_dcf_from_fundamentals_if_current, refresh_one_symbol,
         reset_initial_pass_completion, resolve_regime_score_status,
-        symbol_state_enrichment_complete, warmable_completed_generation, RefreshOutcome,
-        RegimeScoreStatus,
+        symbol_state_enrichment_complete, warmable_completed_generation, EnrichmentGate, PassStart,
+        RefreshOutcome, RefreshSource, RegimeScoreStatus,
     };
     use crate::engine::{
         compute_chart_summary, FundamentalSnapshot, InsiderData, MarketSnapshot, ScreenerState,
@@ -3450,7 +3765,11 @@ mod feed_coordinator_tests {
         let active = std::sync::Arc::new(AtomicU64::new(1));
         let rank = std::sync::Arc::new(AtomicU64::new(0));
         let screener = std::sync::Arc::new(Mutex::new(ScreenerState::new()));
-        let gate = EnrichmentGate::for_test(std::sync::Arc::clone(&active), std::sync::Arc::clone(&screener), std::sync::Arc::clone(&rank));
+        let gate = EnrichmentGate::for_test(
+            std::sync::Arc::clone(&active),
+            std::sync::Arc::clone(&screener),
+            std::sync::Arc::clone(&rank),
+        );
 
         let candle = |epoch| crate::engine::HistoricalCandle {
             epoch_seconds: epoch,
@@ -3460,7 +3779,9 @@ mod feed_coordinator_tests {
             close_cents: 10_500,
             volume: 1_000,
         };
-        let candles: Vec<_> = (0..40).map(|i| candle(1_700_000_000 + i * 86_400)).collect();
+        let candles: Vec<_> = (0..40)
+            .map(|i| candle(1_700_000_000 + i * 86_400))
+            .collect();
         let summary = compute_chart_summary(&candles).expect("summary");
 
         let bump = |rank: &AtomicU64, label: &str, before: u64| {
@@ -3471,6 +3792,15 @@ mod feed_coordinator_tests {
             );
         };
         let rank_ref = rank.as_ref();
+        // Quote + refresh-chart paths must bump exactly once (kills a double bump).
+        let bump_once = |rank: &AtomicU64, label: &str, before: u64| {
+            let after = rank.load(Ordering::Relaxed);
+            assert_eq!(
+                after,
+                before + 1,
+                "{label}: expected exactly one bump ({before} -> {after})"
+            );
+        };
 
         // Quote + refresh chart (existing production helpers).
         let before = rank.load(Ordering::Relaxed);
@@ -3484,6 +3814,7 @@ mod feed_coordinator_tests {
                 intrinsic_value_cents: 0,
                 previous_close_cents: 0,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             }),
             signal: None,
             fundamentals: Some(FundamentalSnapshot {
@@ -3493,7 +3824,7 @@ mod feed_coordinator_tests {
             }),
         };
         assert!(apply_refresh_quote_if_current(&gate, 1, quote, false, false).is_some());
-        bump(rank_ref, "quote", before);
+        bump_once(rank_ref, "quote", before);
 
         let before = rank.load(Ordering::Relaxed);
         assert!(apply_refresh_chart_if_current(
@@ -3501,36 +3832,51 @@ mod feed_coordinator_tests {
             1,
             "AAA",
             candles.clone(),
+            None,
             RefreshOutcome {
                 visible: true,
                 enriched: true,
             },
         )
         .is_some());
-        bump(rank_ref, "refresh chart", before);
+        bump_once(rank_ref, "refresh chart", before);
 
         // Detail daily / weekly / hourly / monthly.
         let before = rank.load(Ordering::Relaxed);
         assert!(ingest_daily_chart_if_current(
-            &gate, 1, "AAA".into(), summary.clone(), candles.clone(),
+            &gate,
+            1,
+            "AAA".into(),
+            summary.clone(),
+            candles.clone(),
         ));
         bump(rank_ref, "detail daily", before);
 
         let before = rank.load(Ordering::Relaxed);
         assert!(ingest_weekly_summary_if_current(
-            &gate, 1, "AAA".into(), summary.clone(), Some(candles.clone()),
+            &gate,
+            1,
+            "AAA".into(),
+            summary.clone(),
+            Some(candles.clone()),
         ));
         bump(rank_ref, "detail/bulk weekly", before);
 
         let before = rank.load(Ordering::Relaxed);
         assert!(ingest_hourly_summary_if_current(
-            &gate, 1, "AAA".into(), summary.clone(),
+            &gate,
+            1,
+            "AAA".into(),
+            summary.clone(),
         ));
         bump(rank_ref, "detail/bulk hourly", before);
 
         let before = rank.load(Ordering::Relaxed);
         assert!(ingest_monthly_summary_if_current(
-            &gate, 1, "AAA".into(), summary.clone(),
+            &gate,
+            1,
+            "AAA".into(),
+            summary.clone(),
         ));
         bump(rank_ref, "detail monthly", before);
 
@@ -3558,7 +3904,10 @@ mod feed_coordinator_tests {
         };
         let before = rank.load(Ordering::Relaxed);
         assert!(ingest_crypto_metrics_if_current(
-            &gate, 1, "BTC-USD".into(), metrics,
+            &gate,
+            1,
+            "BTC-USD".into(),
+            metrics,
         ));
         bump(rank_ref, "crypto metrics", before);
 
@@ -3575,7 +3924,11 @@ mod feed_coordinator_tests {
         let before = rank.load(Ordering::Relaxed);
         assert!(
             publish_universe_financial_dcf_from_fundamentals_if_current(
-                &gate, 1, "COF", &fund, Some(15_000),
+                &gate,
+                1,
+                "COF",
+                &fund,
+                Some(15_000),
             ),
             "universe financial DCF publish must succeed for COF-like fund"
         );
@@ -3603,7 +3956,10 @@ mod feed_coordinator_tests {
         // Demand failure seams.
         let before = rank.load(Ordering::Relaxed);
         assert!(clear_dcf_and_set_valuation_error_if_current(
-            &gate, 1, "COF", "test failure".into(),
+            &gate,
+            1,
+            "COF",
+            "test failure".into(),
         ));
         bump(rank_ref, "demand failure financial", before);
 
@@ -3628,16 +3984,22 @@ mod feed_coordinator_tests {
         );
         let before = rank.load(Ordering::Relaxed);
         assert!(clear_dcf_and_ingest_operating_if_current(
-            &gate, 1, "TECH", envelope.clone(),
+            &gate,
+            1,
+            "TECH",
+            envelope.clone(),
         ));
         bump(rank_ref, "demand failure operating", before);
 
         // Demand operating publish seam via gated helper.
-        screener.lock().unwrap().ingest_fundamentals(FundamentalSnapshot {
-            symbol: "TECH".into(),
-            sector_name: Some("Technology".into()),
-            ..Default::default()
-        });
+        screener
+            .lock()
+            .unwrap()
+            .ingest_fundamentals(FundamentalSnapshot {
+                symbol: "TECH".into(),
+                sector_name: Some("Technology".into()),
+                ..Default::default()
+            });
         let dcf_revision = {
             let s = screener.lock().unwrap();
             super::dcf_revision_key(&s, "TECH")
@@ -3677,7 +4039,11 @@ mod feed_coordinator_tests {
         let active = std::sync::Arc::new(AtomicU64::new(1));
         let rank = std::sync::Arc::new(AtomicU64::new(0));
         let screener = std::sync::Arc::new(Mutex::new(ScreenerState::new()));
-        let gate = EnrichmentGate::for_test(std::sync::Arc::clone(&active), std::sync::Arc::clone(&screener), std::sync::Arc::clone(&rank));
+        let gate = EnrichmentGate::for_test(
+            std::sync::Arc::clone(&active),
+            std::sync::Arc::clone(&screener),
+            std::sync::Arc::clone(&rank),
+        );
         let market_params = crate::dcf_model::MarketParams::default_usd();
         let fund = FundamentalSnapshot {
             symbol: "TECH".into(),
@@ -3721,7 +4087,11 @@ mod feed_coordinator_tests {
         let active = std::sync::Arc::new(AtomicU64::new(1));
         let rank = std::sync::Arc::new(AtomicU64::new(0));
         let screener = std::sync::Arc::new(Mutex::new(ScreenerState::new()));
-        let gate = EnrichmentGate::for_test(std::sync::Arc::clone(&active), std::sync::Arc::clone(&screener), std::sync::Arc::clone(&rank));
+        let gate = EnrichmentGate::for_test(
+            std::sync::Arc::clone(&active),
+            std::sync::Arc::clone(&screener),
+            std::sync::Arc::clone(&rank),
+        );
         let before = rank.load(Ordering::Relaxed);
         assert!(ingest_fundamentals_if_current(
             &gate,
@@ -3791,7 +4161,6 @@ mod feed_coordinator_tests {
         assert!(screener.lock().unwrap().dcf_analyses.contains_key("COF"));
     }
 
-
     /// `from_app` must bind AppState's process-wide Arc — ptr identity against
     /// `state.rank_input_generation` (static/`AtomicU64::new(0)` cannot mint a
     /// `RankInputCounter` in production; this catches a wrong Arc if one slipped in).
@@ -3806,8 +4175,8 @@ mod feed_coordinator_tests {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let state = AppState::new_with_forced_profile(dir.join("history.sqlite"), None)
-            .expect("state");
+        let state =
+            AppState::new_with_forced_profile(dir.join("history.sqlite"), None).expect("state");
         let gate = EnrichmentGate::from_app(&state);
         assert!(
             std::sync::Arc::ptr_eq(&state.rank_input_generation, gate.rank_input.as_arc()),
@@ -3902,8 +4271,8 @@ mod feed_coordinator_tests {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let state = AppState::new_with_forced_profile(dir.join("history.sqlite"), None)
-            .expect("state");
+        let state =
+            AppState::new_with_forced_profile(dir.join("history.sqlite"), None).expect("state");
         apply_universe_profile("qa", &state).expect("qa");
         {
             let mut s = state.screener.lock().unwrap();
@@ -3915,6 +4284,7 @@ mod feed_coordinator_tests {
                 intrinsic_value_cents: 0,
                 previous_close_cents: 0,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             });
         }
         let before = state.rank_input_generation.load(Ordering::Relaxed);
@@ -3925,7 +4295,12 @@ mod feed_coordinator_tests {
             "profile switch clear must bump rank_input"
         );
         assert!(
-            !state.screener.lock().unwrap().snapshots.contains_key("KEEP"),
+            !state
+                .screener
+                .lock()
+                .unwrap()
+                .snapshots
+                .contains_key("KEEP"),
             "closed-world clear drops prior symbols"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3957,6 +4332,713 @@ mod feed_coordinator_tests {
         assert_eq!(screener.lock().unwrap().scoring_model, "current");
     }
 
+    fn snap(sym: &str, price: i64, ts: Option<i64>) -> MarketSnapshot {
+        MarketSnapshot {
+            symbol: sym.into(),
+            company_name: None,
+            profitable: true,
+            market_price_cents: price,
+            intrinsic_value_cents: 0,
+            previous_close_cents: 0,
+            next_earnings_epoch: None,
+            quote_fetched_at: ts,
+        }
+    }
+
+    #[test]
+    fn coordinator_marks_full_pass_only_at_90pct_and_current_generation() {
+        use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+        use std::sync::Mutex;
+        let syms: Vec<String> = (0..10).map(|k| format!("S{k}")).collect();
+        let screener = Mutex::new(ScreenerState::new());
+        // Only 8/10 refreshed after pass_start = 1_000.
+        for (k, s) in syms.iter().enumerate() {
+            let ts = if k < 8 { 1_000 + k as i64 } else { 500 };
+            screener
+                .lock()
+                .unwrap()
+                .ingest_snapshot(snap(s, 100, Some(ts)));
+        }
+        let gen = AtomicU64::new(3);
+        let last = AtomicI64::new(42);
+        super::mark_full_pass_if_current(&gen, 3, &last, &syms, &screener, PassStart::at(1_000));
+        assert_eq!(last.load(Ordering::SeqCst), 42, "8/10 is not a full pass");
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S8", 100, Some(1_100)));
+        super::mark_full_pass_if_current(&gen, 2, &last, &syms, &screener, PassStart::at(1_000));
+        assert_eq!(last.load(Ordering::SeqCst), 42, "stale generation");
+        super::mark_full_pass_if_current(&gen, 3, &last, &syms, &screener, PassStart::at(1_000));
+        assert!(last.load(Ordering::SeqCst) > 42, "9/10 marks the pass");
+    }
+
+    fn candles_at(last_ts: i64) -> Vec<crate::engine::HistoricalCandle> {
+        use crate::engine::HistoricalCandle;
+        (0..3)
+            .map(|d| HistoricalCandle {
+                epoch_seconds: last_ts - (2 - d) * 86_400,
+                open_cents: 100,
+                high_cents: 110,
+                low_cents: 90,
+                close_cents: 105,
+                volume: 1,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chart_and_fetch_ingest_stamp_quote_fetched_at() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Mutex;
+        let last = 1_700_000_000i64;
+        let before = super::wall_epoch();
+        let active = std::sync::Arc::new(AtomicU64::new(1));
+        let rank = std::sync::Arc::new(AtomicU64::new(0));
+        let screener = std::sync::Arc::new(Mutex::new(ScreenerState::new()));
+        let gate = EnrichmentGate::for_test(
+            std::sync::Arc::clone(&active),
+            std::sync::Arc::clone(&screener),
+            std::sync::Arc::clone(&rank),
+        );
+        super::apply_refresh_chart_if_current(
+            &gate,
+            1,
+            "NEWC",
+            candles_at(last),
+            None,
+            Default::default(),
+        );
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("OLDC", 0, None));
+        super::apply_refresh_chart_if_current(
+            &gate,
+            1,
+            "OLDC",
+            candles_at(last),
+            None,
+            Default::default(),
+        );
+        let r = FetchResult {
+            symbol: "FQ".into(),
+            snapshot: Some(snap("FQ", 500, None)),
+            signal: None,
+            fundamentals: None,
+        };
+        super::apply_refresh_quote_if_current(&gate, 1, r, false, false);
+        let st = screener.lock().unwrap();
+        assert_eq!(
+            st.snapshots["NEWC"].quote_fetched_at,
+            Some(last),
+            "new uses last candle"
+        );
+        assert_eq!(
+            st.snapshots["OLDC"].quote_fetched_at,
+            Some(last),
+            "fill uses last candle"
+        );
+        assert!(
+            st.snapshots["FQ"]
+                .quote_fetched_at
+                .is_some_and(|t| t >= before),
+            "fetch still stamps wall"
+        );
+    }
+
+    #[test]
+    fn chart_close_prefers_regular_market_time_for_full_pass() {
+        use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+        use std::sync::Mutex;
+        // 8 symbols already fresh; S8/S9 still need a quote.
+        let pass_start = 1_000_000_000i64;
+        // Yahoo equity daily bar open (~09:30 ET) — alone must NOT count as fresh.
+        let bar_open = pass_start - 86_400;
+        let syms: Vec<String> = (0..10).map(|k| format!("S{k}")).collect();
+        let screener = std::sync::Arc::new(Mutex::new(ScreenerState::new()));
+        for s in &syms[..8] {
+            screener
+                .lock()
+                .unwrap()
+                .ingest_snapshot(snap(s, 100, Some(pass_start + 10)));
+        }
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S8", 100, Some(pass_start - 10)));
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S9", 0, None));
+        let active = std::sync::Arc::new(AtomicU64::new(1));
+        let rank = std::sync::Arc::new(AtomicU64::new(0));
+        let last = AtomicI64::new(0);
+        let gen = AtomicU64::new(1);
+        let gate = EnrichmentGate::for_test(
+            std::sync::Arc::clone(&active),
+            std::sync::Arc::clone(&screener),
+            std::sync::Arc::clone(&rank),
+        );
+
+        // No regularMarketTime: falls back to the (old) bar open → not a fresh fetch.
+        super::apply_refresh_chart_if_current(
+            &gate,
+            1,
+            "S9",
+            candles_at(bar_open),
+            None,
+            Default::default(),
+        );
+        assert_eq!(
+            screener.lock().unwrap().snapshots["S9"].quote_fetched_at,
+            Some(bar_open),
+            "no meta → last candle"
+        );
+        super::mark_full_pass_if_current(
+            &gen,
+            1,
+            &last,
+            &syms,
+            &screener,
+            PassStart::at(pass_start),
+        );
+        assert_eq!(
+            last.load(Ordering::SeqCst),
+            0,
+            "09:30 bar alone is not fresh"
+        );
+
+        // Same 09:30 bar, but meta.regularMarketTime is a real fetch during the pass.
+        let rmt = pass_start + 60;
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S9", 0, None));
+        super::apply_refresh_chart_if_current(
+            &gate,
+            1,
+            "S9",
+            candles_at(bar_open),
+            Some(rmt),
+            Default::default(),
+        );
+        assert_eq!(
+            screener.lock().unwrap().snapshots["S9"].quote_fetched_at,
+            Some(rmt),
+            "regularMarketTime preferred over bar open"
+        );
+        super::mark_full_pass_if_current(
+            &gen,
+            1,
+            &last,
+            &syms,
+            &screener,
+            PassStart::at(pass_start),
+        );
+        assert!(
+            last.load(Ordering::SeqCst) > 0,
+            "regularMarketTime during the pass counts toward 90%"
+        );
+
+        // Future rmt + future candle (beyond skew) → None (fail-closed, no wall).
+        last.store(0, Ordering::SeqCst);
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S9", 0, None));
+        let before = super::wall_epoch();
+        let future = before + super::CHART_TS_FUTURE_SKEW_SECS + 60;
+        super::apply_refresh_chart_if_current(
+            &gate,
+            1,
+            "S9",
+            candles_at(future),
+            Some(future), // also future → both rejected
+            Default::default(),
+        );
+        assert_eq!(
+            screener.lock().unwrap().snapshots["S9"].quote_fetched_at,
+            None,
+            "present-but-future stamp must be unknown, not wall"
+        );
+        super::mark_full_pass_if_current(
+            &gen,
+            1,
+            &last,
+            &syms,
+            &screener,
+            PassStart::at(pass_start),
+        );
+        assert_eq!(
+            last.load(Ordering::SeqCst),
+            0,
+            "future stamp must not count toward 90% full pass"
+        );
+
+        // Genuinely missing times (no rmt, non-positive candle) still fall back to wall.
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("S9", 0, None));
+        let before_wall = super::wall_epoch();
+        super::apply_refresh_chart_if_current(
+            &gate,
+            1,
+            "S9",
+            candles_at(0),
+            None,
+            Default::default(),
+        );
+        let ts = screener.lock().unwrap().snapshots["S9"]
+            .quote_fetched_at
+            .expect("missing → wall");
+        assert!(
+            ts >= before_wall && ts <= before_wall + 5,
+            "absent/non-positive times fall back to wall, got {ts}"
+        );
+    }
+
+    #[test]
+    fn chart_quote_ts_skew_boundary_accepts_plus_120_rejects_plus_121() {
+        let now = 2_000_000_000i64;
+        let candle = |epoch| {
+            vec![crate::engine::HistoricalCandle {
+                epoch_seconds: epoch,
+                open_cents: 100,
+                high_cents: 100,
+                low_cents: 100,
+                close_cents: 100,
+                volume: 1,
+            }]
+        };
+        assert_eq!(
+            super::chart_quote_ts_at(now, Some(now + 120), &candle(0)),
+            Some(now + 120),
+            "now+120 accepted"
+        );
+        assert_eq!(
+            super::chart_quote_ts_at(now, Some(now + 121), &candle(0)),
+            None,
+            "now+121 rejected (present future → unknown, not wall)"
+        );
+        assert_eq!(
+            super::chart_quote_ts_at(now, None, &candle(now + 120)),
+            Some(now + 120),
+            "candle now+120 accepted"
+        );
+        assert_eq!(
+            super::chart_quote_ts_at(now, None, &candle(now + 121)),
+            None,
+            "candle now+121 rejected"
+        );
+        // Missing (None / <=0) → wall.
+        assert_eq!(super::chart_quote_ts_at(now, None, &candle(0)), Some(now));
+        assert_eq!(super::chart_quote_ts_at(now, Some(0), &[]), Some(now));
+        assert_eq!(super::chart_quote_ts_at(now, Some(-5), &[]), Some(now));
+    }
+
+    /// Scripted network boundary for `refresh_one_symbol`. Each hook may bump the
+    /// feed generation to simulate a profile switch landing mid-fetch.
+    struct ScriptedSource {
+        active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        quote: Box<dyn Fn() -> std::io::Result<FetchResult> + Send + Sync>,
+        candles: Box<dyn Fn() -> std::io::Result<crate::fetcher::CandleFetch> + Send + Sync>,
+        bump_on_quote: bool,
+        bump_on_candles: bool,
+        candle_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RefreshSource for ScriptedSource {
+        fn fetch_symbol(&self, _sym: &str) -> std::io::Result<FetchResult> {
+            if self.bump_on_quote {
+                self.active
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            (self.quote)()
+        }
+
+        fn fetch_candles(
+            &self,
+            _sym: &str,
+            _range: &str,
+            _interval: &str,
+        ) -> std::io::Result<crate::fetcher::CandleFetch> {
+            self.candle_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.bump_on_candles {
+                self.active
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            (self.candles)()
+        }
+    }
+
+    struct RefreshRig {
+        active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        rank: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        screener: std::sync::Arc<std::sync::Mutex<ScreenerState>>,
+        gate: EnrichmentGate,
+        feed_status: std::sync::Mutex<crate::state::FeedStatus>,
+    }
+
+    fn refresh_rig() -> RefreshRig {
+        use std::sync::{atomic::AtomicU64, Arc, Mutex};
+        let active = Arc::new(AtomicU64::new(1));
+        let rank = Arc::new(AtomicU64::new(0));
+        let screener = Arc::new(Mutex::new(ScreenerState::new()));
+        let gate = EnrichmentGate::for_test(
+            Arc::clone(&active),
+            Arc::clone(&screener),
+            Arc::clone(&rank),
+        );
+        RefreshRig {
+            active,
+            rank,
+            screener,
+            gate,
+            feed_status: Mutex::new(Default::default()),
+        }
+    }
+
+    fn scripted(
+        rig: &RefreshRig,
+        quote: impl Fn() -> std::io::Result<FetchResult> + Send + Sync + 'static,
+        candles: impl Fn() -> std::io::Result<crate::fetcher::CandleFetch> + Send + Sync + 'static,
+    ) -> ScriptedSource {
+        ScriptedSource {
+            active: std::sync::Arc::clone(&rig.active),
+            quote: Box::new(quote),
+            candles: Box::new(candles),
+            bump_on_quote: false,
+            bump_on_candles: false,
+            candle_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn priced_quote(sym: &'static str) -> impl Fn() -> std::io::Result<FetchResult> + Send + Sync {
+        move || {
+            Ok(FetchResult {
+                symbol: sym.into(),
+                snapshot: Some(snap(sym, 12_345, None)),
+                signal: None,
+                fundamentals: None,
+            })
+        }
+    }
+
+    fn chart_with_rmt(
+        rmt: i64,
+    ) -> impl Fn() -> std::io::Result<crate::fetcher::CandleFetch> + Send + Sync {
+        move || {
+            Ok(crate::fetcher::CandleFetch::for_test(
+                candles_at(rmt - 3_600),
+                Some(rmt),
+            ))
+        }
+    }
+
+    fn net_err() -> std::io::Result<crate::fetcher::CandleFetch> {
+        Err(std::io::Error::other("connection reset"))
+    }
+
+    /// Control for the None tests: same rig, no generation move → `Some`, the
+    /// symbol is visible and stamped by the quote fetch.
+    #[test]
+    fn refresh_one_symbol_current_generation_ingests_and_stamps() {
+        let rig = refresh_rig();
+        let src = scripted(
+            &rig,
+            priced_quote("RQ1"),
+            chart_with_rmt(super::wall_epoch()),
+        );
+        let before = super::wall_epoch();
+        let out = refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ1")
+            .expect("current generation returns Some");
+        assert!(out.visible);
+        let st = rig.screener.lock().unwrap();
+        assert_eq!(st.snapshots["RQ1"].market_price_cents, 12_345);
+        assert!(st.snapshots["RQ1"]
+            .quote_fetched_at
+            .is_some_and(|t| t >= before));
+        assert!(st.daily_candles.contains_key("RQ1"), "chart applied");
+        assert!(rig.rank.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    /// Generation moves while the quote is in flight: `None`, nothing from the
+    /// stale generation lands (no snapshot, no rank bump) and the chart fetch is
+    /// never even attempted.
+    #[test]
+    fn refresh_one_symbol_returns_none_when_generation_moves_during_quote() {
+        let rig = refresh_rig();
+        let mut src = scripted(
+            &rig,
+            priced_quote("RQ2"),
+            chart_with_rmt(super::wall_epoch()),
+        );
+        src.bump_on_quote = true;
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ2").is_none());
+        assert!(!rig.screener.lock().unwrap().snapshots.contains_key("RQ2"));
+        assert_eq!(rig.rank.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            src.candle_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        // Same move while a *failing* quote is in flight (a 404 records no feed
+        // error, so only the post-quote generation check stops it): still `None`
+        // before any chart fetch.
+        let rig = refresh_rig();
+        let mut src = scripted(
+            &rig,
+            || Err(std::io::Error::other("HTTP 404 not found")),
+            chart_with_rmt(super::wall_epoch()),
+        );
+        src.bump_on_quote = true;
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ2").is_none());
+        assert_eq!(
+            src.candle_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(
+            rig.feed_status.lock().unwrap().last_error.is_none(),
+            "stale error not recorded"
+        );
+    }
+
+    /// Generation moves while the chart is in flight: `None`, and the stale chart
+    /// (candles + a fresh regularMarketTime) is not applied.
+    #[test]
+    fn refresh_one_symbol_returns_none_when_generation_moves_during_chart() {
+        let rig = refresh_rig();
+        // Quote fails so only the chart could create/stamp the row.
+        let mut src = scripted(
+            &rig,
+            || Err(std::io::Error::other("connection reset")),
+            chart_with_rmt(super::wall_epoch()),
+        );
+        src.bump_on_candles = true;
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ3").is_none());
+        let st = rig.screener.lock().unwrap();
+        assert!(
+            !st.snapshots.contains_key("RQ3"),
+            "stale chart must not create the row"
+        );
+        assert!(
+            !st.daily_candles.contains_key("RQ3"),
+            "stale candles not ingested"
+        );
+        assert_eq!(rig.rank.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Preserve-on-None: a refresh that yields no new quote time (quote fetch
+    /// fails, chart fails) keeps the prior stamp — it neither wipes it nor
+    /// refreshes it, so the row stays stale for the next pass's 90% check.
+    #[test]
+    fn refresh_one_symbol_without_new_quote_preserves_prior_stamp() {
+        let rig = refresh_rig();
+        let old = 1_000_000_000i64;
+        rig.screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("RQ4", 500, Some(old)));
+        let src = scripted(&rig, || Err(std::io::Error::other("timed out")), net_err);
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ4").is_some());
+        let st = rig.screener.lock().unwrap();
+        assert_eq!(
+            st.snapshots["RQ4"].quote_fetched_at,
+            Some(old),
+            "stamp preserved"
+        );
+        assert_eq!(st.snapshots["RQ4"].market_price_cents, 500);
+        assert!(
+            !super::full_pass_succeeded(&["RQ4".to_string()], &st, PassStart::at(old + 1)),
+            "a preserved pre-pass stamp is still stale"
+        );
+    }
+
+    /// Quote fails but the chart succeeds with a fresh regularMarketTime on a row
+    /// that already has a price: the chart does not touch that price, so it must
+    /// not refresh the stamp either (a stale price can't be made to look fresh).
+    #[test]
+    fn refresh_one_symbol_chart_only_keeps_priced_row_stamp() {
+        let rig = refresh_rig();
+        let old = 1_000_000_000i64;
+        rig.screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("RQ6", 500, Some(old)));
+        let src = scripted(
+            &rig,
+            || Err(std::io::Error::other("timed out")),
+            chart_with_rmt(super::wall_epoch()),
+        );
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ6").is_some());
+        let st = rig.screener.lock().unwrap();
+        assert!(st.daily_candles.contains_key("RQ6"), "chart was applied");
+        assert_eq!(
+            st.snapshots["RQ6"].market_price_cents, 500,
+            "price untouched"
+        );
+        assert_eq!(
+            st.snapshots["RQ6"].quote_fetched_at,
+            Some(old),
+            "stamp untouched"
+        );
+    }
+
+    /// Engine merge rule the refresh paths rely on: an incoming snapshot with no
+    /// stamp keeps the prior one (partial and full ingest); a stamped one wins.
+    #[test]
+    fn ingest_snapshot_preserves_stamp_on_none_and_replaces_on_some() {
+        let mut st = ScreenerState::new();
+        st.ingest_snapshot(snap("RQ7", 100, Some(1_000)));
+        st.ingest_partial_snapshot(snap("RQ7", 110, None));
+        assert_eq!(
+            st.snapshots["RQ7"].quote_fetched_at,
+            Some(1_000),
+            "partial keeps"
+        );
+        st.ingest_snapshot_preserving_known(snap("RQ7", 120, None));
+        assert_eq!(
+            st.snapshots["RQ7"].quote_fetched_at,
+            Some(1_000),
+            "known keeps"
+        );
+        st.ingest_snapshot(snap("RQ7", 130, None));
+        assert_eq!(
+            st.snapshots["RQ7"].quote_fetched_at,
+            Some(1_000),
+            "full keeps"
+        );
+        assert_eq!(st.snapshots["RQ7"].market_price_cents, 130);
+        st.ingest_snapshot(snap("RQ7", 140, Some(2_000)));
+        assert_eq!(
+            st.snapshots["RQ7"].quote_fetched_at,
+            Some(2_000),
+            "new stamp wins"
+        );
+    }
+
+    /// Preserve-on-None through the quote ingest path: a quote with no price
+    /// (stamp `None`) must not erase the prior stamp, and a later priced quote
+    /// does refresh it.
+    #[test]
+    fn quote_without_price_preserves_prior_stamp_then_priced_quote_refreshes() {
+        let rig = refresh_rig();
+        let old = 1_000_000_000i64;
+        rig.screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("RQ5", 700, Some(old)));
+        let src = scripted(
+            &rig,
+            || {
+                Ok(FetchResult {
+                    symbol: "RQ5".into(),
+                    snapshot: Some(snap("RQ5", 0, None)),
+                    signal: None,
+                    fundamentals: None,
+                })
+            },
+            net_err,
+        );
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ5").is_some());
+        assert_eq!(
+            rig.screener.lock().unwrap().snapshots["RQ5"].quote_fetched_at,
+            Some(old)
+        );
+        let src = scripted(&rig, priced_quote("RQ5"), net_err);
+        let before = super::wall_epoch();
+        assert!(refresh_one_symbol(&src, &rig.gate, &rig.feed_status, 1, "RQ5").is_some());
+        assert!(rig.screener.lock().unwrap().snapshots["RQ5"]
+            .quote_fetched_at
+            .is_some_and(|t| t >= before));
+    }
+
+    /// S6: quotes stamped before `pass_start` must not make a full pass. Passing
+    /// `0` is now a compile error ([`PassStart`] is sealed); this pins the boundary.
+    #[test]
+    fn complete_coordinator_quote_pass_ignores_quotes_before_pass_start() {
+        use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+        use std::sync::Mutex;
+        let pass_start = 5_000i64;
+        let syms: Vec<String> = (0..10).map(|k| format!("P{k}")).collect();
+        let screener = Mutex::new(ScreenerState::new());
+        // All ten stamped *before* the pass began.
+        for s in &syms {
+            screener
+                .lock()
+                .unwrap()
+                .ingest_snapshot(snap(s, 100, Some(pass_start - 1)));
+        }
+        let feed_gen = AtomicU64::new(1);
+        let last = AtomicI64::new(0);
+        super::complete_coordinator_quote_pass(
+            &feed_gen,
+            1,
+            &last,
+            &syms,
+            &screener,
+            PassStart::at(pass_start),
+        );
+        assert_eq!(
+            last.load(Ordering::SeqCst),
+            0,
+            "pre-pass stamps must not count (pass_start must not be replaced with 0)"
+        );
+        // Control: re-stamped after the pass began, the same symbols now count.
+        for s in &syms {
+            screener
+                .lock()
+                .unwrap()
+                .ingest_snapshot(snap(s, 100, Some(pass_start + 1)));
+        }
+        super::complete_coordinator_quote_pass(
+            &feed_gen,
+            1,
+            &last,
+            &syms,
+            &screener,
+            PassStart::at(pass_start),
+        );
+        assert!(
+            last.load(Ordering::SeqCst) > 0,
+            "fresh-during-pass stamps count"
+        );
+    }
+
+    /// S3: production chart-fetch seam must forward regular_market_time.
+    #[test]
+    fn apply_candle_fetch_forwards_regular_market_time() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Mutex;
+        let active = std::sync::Arc::new(AtomicU64::new(1));
+        let rank = std::sync::Arc::new(AtomicU64::new(0));
+        let screener = std::sync::Arc::new(Mutex::new(ScreenerState::new()));
+        let gate = EnrichmentGate::for_test(
+            std::sync::Arc::clone(&active),
+            std::sync::Arc::clone(&screener),
+            std::sync::Arc::clone(&rank),
+        );
+        screener
+            .lock()
+            .unwrap()
+            .ingest_snapshot(snap("RMT", 0, None));
+        let bar_open = 1_000_000_000i64;
+        let rmt = bar_open + 60;
+        let fetch = crate::fetcher::CandleFetch::for_test(candles_at(bar_open), Some(rmt));
+        assert!(
+            super::apply_candle_fetch_if_current(&gate, 1, "RMT", fetch, Default::default(),)
+                .is_some()
+        );
+        assert_eq!(
+            screener.lock().unwrap().snapshots["RMT"].quote_fetched_at,
+            Some(rmt),
+            "rmt must reach the stamp (kills None at the call site)"
+        );
+    }
+
     #[test]
     fn stale_bulk_quote_and_chart_cannot_repopulate_new_profile() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -3974,6 +5056,7 @@ mod feed_coordinator_tests {
                 intrinsic_value_cents: 0,
                 previous_close_cents: 0,
                 next_earnings_epoch: None,
+                quote_fetched_at: None,
             }),
             signal: None,
             fundamentals: None,
@@ -3987,6 +5070,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let rank = std::sync::Arc::new(AtomicU64::new(0));
         let gate = EnrichmentGate::for_test(
@@ -4012,6 +5096,7 @@ mod feed_coordinator_tests {
                 4,
                 "OLD",
                 old_chart,
+                None,
                 RefreshOutcome::default(),
             ),
             None
@@ -4138,6 +5223,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let old_key = super::financial_dcf_input_key(&fund, Some(15_000));
         let old_revision = super::dcf_revision_key(&state, "NEW");
@@ -4413,6 +5499,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         let screener = Arc::new(Mutex::new(state));
         let cik_cache = Arc::new(Mutex::new(None));
@@ -4468,6 +5555,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         assert!(super::demand_inputs_are_current(
             &state,
@@ -4924,6 +6012,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 24_000,
             previous_close_cents: 19_500,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         state.clear_universe();
         assert!(state.snapshots.is_empty());
@@ -4941,6 +6030,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 24_000,
             previous_close_cents: 19_500,
             next_earnings_epoch: Some(1_800_000_000),
+            quote_fetched_at: None,
         });
         state.ingest_fundamentals(FundamentalSnapshot {
             symbol: "AAPL".into(),
@@ -4960,6 +6050,7 @@ mod feed_coordinator_tests {
                     intrinsic_value_cents: 0,
                     previous_close_cents: 0,
                     next_earnings_epoch: None,
+                    quote_fetched_at: None,
                 }),
                 signal: None,
                 fundamentals: None,
@@ -4997,6 +6088,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 0,
             previous_close_cents: 0,
             next_earnings_epoch: None,
+            quote_fetched_at: None,
         });
         assert!(needs_enrichment_retry(outcome, &state, "SPARSE"));
     }
@@ -5012,6 +6104,7 @@ mod feed_coordinator_tests {
             intrinsic_value_cents: 24_000,
             previous_close_cents: 19_500,
             next_earnings_epoch: Some(1_800_000_000),
+            quote_fetched_at: None,
         });
         state.ingest_fundamentals(FundamentalSnapshot {
             symbol: "AAPL".into(),
@@ -5031,6 +6124,7 @@ mod feed_coordinator_tests {
                     intrinsic_value_cents: 0,
                     previous_close_cents: 0,
                     next_earnings_epoch: None,
+                    quote_fetched_at: None,
                 }),
                 signal: None,
                 fundamentals: None,
@@ -5079,79 +6173,142 @@ fn apply_refresh_chart_if_current(
     generation: u64,
     sym: &str,
     candles: Vec<HistoricalCandle>,
+    regular_market_time: Option<i64>,
     mut outcome: RefreshOutcome,
 ) -> Option<RefreshOutcome> {
     let summary = compute_chart_summary(&candles);
     let crypto = is_crypto(sym);
     let etf = is_etf(sym);
     gate.mutate(generation, |state| {
-            let Some(summary) = summary else { return };
-            let close = summary.latest_close_cents;
-            let already = state.snapshots.contains_key(sym);
-            state.ingest_chart_summary(sym.to_string(), summary);
-            state.ingest_daily_candles(sym.to_string(), candles);
-            if close <= 0 {
-                return;
-            }
-            if already {
-                let needs_price = state
-                    .snapshots
-                    .get(sym)
-                    .map(|x| x.market_price_cents <= 0)
-                    .unwrap_or(true);
-                if needs_price {
-                    use crate::engine::MarketSnapshot;
-                    let prev = state.snapshots.get(sym).cloned();
-                    state.ingest_partial_snapshot(MarketSnapshot {
-                        symbol: sym.to_string(),
-                        company_name: prev.as_ref().and_then(|x| x.company_name.clone()),
-                        profitable: prev.as_ref().map(|x| x.profitable).unwrap_or(crypto || etf),
-                        market_price_cents: close,
-                        intrinsic_value_cents: prev
-                            .as_ref()
-                            .map(|x| x.intrinsic_value_cents)
-                            .unwrap_or(0),
-                        previous_close_cents: prev
-                            .as_ref()
-                            .map(|x| x.previous_close_cents)
-                            .unwrap_or(0),
-                        next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
-                    });
-                }
-                outcome.visible = true;
-            } else {
-                use crate::engine::{FundamentalSnapshot, MarketSnapshot};
+        let Some(summary) = summary else { return };
+        let close = summary.latest_close_cents;
+        let quote_ts = chart_quote_ts(regular_market_time, &candles);
+        let already = state.snapshots.contains_key(sym);
+        state.ingest_chart_summary(sym.to_string(), summary);
+        state.ingest_daily_candles(sym.to_string(), candles);
+        if close <= 0 {
+            return;
+        }
+        if already {
+            let needs_price = state
+                .snapshots
+                .get(sym)
+                .map(|x| x.market_price_cents <= 0)
+                .unwrap_or(true);
+            if needs_price {
+                use crate::engine::MarketSnapshot;
+                let prev = state.snapshots.get(sym).cloned();
                 state.ingest_partial_snapshot(MarketSnapshot {
                     symbol: sym.to_string(),
-                    company_name: None,
-                    profitable: crypto || etf,
+                    company_name: prev.as_ref().and_then(|x| x.company_name.clone()),
+                    profitable: prev.as_ref().map(|x| x.profitable).unwrap_or(crypto || etf),
                     market_price_cents: close,
-                    intrinsic_value_cents: 0,
-                    previous_close_cents: 0,
-                    next_earnings_epoch: None,
+                    intrinsic_value_cents: prev
+                        .as_ref()
+                        .map(|x| x.intrinsic_value_cents)
+                        .unwrap_or(0),
+                    previous_close_cents: prev
+                        .as_ref()
+                        .map(|x| x.previous_close_cents)
+                        .unwrap_or(0),
+                    next_earnings_epoch: prev.and_then(|x| x.next_earnings_epoch),
+                    quote_fetched_at: quote_ts,
                 });
-                let sector = if crypto {
-                    Some("Cryptocurrency".to_string())
-                } else {
-                    etf_sector(sym).map(|s| s.to_string())
-                };
-                if sector.is_some() {
-                    state.ingest_fundamentals(FundamentalSnapshot {
-                        symbol: sym.to_string(),
-                        sector_name: sector,
-                        ..Default::default()
-                    });
+                // `ingest_snapshot` keeps a prior stamp when the new one is `None`.
+                // This row had no price, so the chart close IS its quote: overwrite
+                // the stamp, clearing it for a present-but-future time (unknown →
+                // stale, fail-closed).
+                if let Some(s) = state.snapshots.get_mut(sym) {
+                    s.quote_fetched_at = quote_ts;
                 }
-                outcome.visible = true;
             }
-        })
+            outcome.visible = true;
+        } else {
+            use crate::engine::{FundamentalSnapshot, MarketSnapshot};
+            // New symbol: no prior stamp to keep, and `close > 0` is checked above.
+            state.ingest_partial_snapshot(MarketSnapshot {
+                symbol: sym.to_string(),
+                company_name: None,
+                profitable: crypto || etf,
+                market_price_cents: close,
+                intrinsic_value_cents: 0,
+                previous_close_cents: 0,
+                next_earnings_epoch: None,
+                quote_fetched_at: quote_ts,
+            });
+            let sector = if crypto {
+                Some("Cryptocurrency".to_string())
+            } else {
+                etf_sector(sym).map(|s| s.to_string())
+            };
+            if sector.is_some() {
+                state.ingest_fundamentals(FundamentalSnapshot {
+                    symbol: sym.to_string(),
+                    sector_name: sector,
+                    ..Default::default()
+                });
+            }
+            outcome.visible = true;
+        }
+    })
     .then_some(outcome)
+}
+
+/// Production chart-fetch → stamp seam (passes `fetch.regular_market_time` through).
+/// Kills a mutant that drops rmt to `None` at the refresh_one_symbol call site.
+fn apply_candle_fetch_if_current(
+    gate: &EnrichmentGate,
+    generation: u64,
+    sym: &str,
+    fetch: crate::fetcher::CandleFetch,
+    outcome: RefreshOutcome,
+) -> Option<RefreshOutcome> {
+    let regular_market_time = fetch.regular_market_time();
+    apply_refresh_chart_if_current(
+        gate,
+        generation,
+        sym,
+        fetch.candles,
+        regular_market_time,
+        outcome,
+    )
+}
+
+/// Network boundary of [`refresh_one_symbol`]: Yahoo in production. Tests swap in
+/// a scripted source so the real refresh body (generation checks, quote + chart
+/// ingest, stamping) runs without network.
+trait RefreshSource {
+    fn fetch_symbol(&self, sym: &str) -> std::io::Result<crate::fetcher::FetchResult>;
+    fn fetch_candles(
+        &self,
+        sym: &str,
+        range: &str,
+        interval: &str,
+    ) -> std::io::Result<crate::fetcher::CandleFetch>;
+}
+
+impl RefreshSource for YahooClient {
+    fn fetch_symbol(&self, sym: &str) -> std::io::Result<crate::fetcher::FetchResult> {
+        YahooClient::fetch_symbol(self, sym)
+    }
+
+    fn fetch_candles(
+        &self,
+        sym: &str,
+        range: &str,
+        interval: &str,
+    ) -> std::io::Result<crate::fetcher::CandleFetch> {
+        YahooClient::fetch_candles(self, sym, range, interval)
+    }
 }
 
 /// Fetch one symbol progressively: price/name makes it visible immediately, while
 /// quoteSummary completeness controls only whether it remains in the retry set.
+///
+/// Returns `None` as soon as the feed generation moves (profile switch / restart):
+/// the caller's worker must stop, and nothing from the stale generation is ingested.
 fn refresh_one_symbol(
-    client: &YahooClient,
+    client: &dyn RefreshSource,
     gate: &EnrichmentGate,
     feed_status: &std::sync::Mutex<crate::state::FeedStatus>,
     generation: u64,
@@ -5164,13 +6321,7 @@ fn refresh_one_symbol(
 
     match client.fetch_symbol(sym) {
         Ok(result) => {
-            outcome = apply_refresh_quote_if_current(
-            gate,
-            generation,
-            result,
-            crypto,
-            etf,
-        )?;
+            outcome = apply_refresh_quote_if_current(gate, generation, result, crypto, etf)?;
             if outcome.enriched {
                 if !mutate_current_feed_status(active_generation, generation, feed_status, |s| {
                     s.last_error = None;
@@ -5206,14 +6357,8 @@ fn refresh_one_symbol(
 
     // Year chart for spark/technicals — only attach to symbols already in the list,
     // or create crypto/ETF rows that can stand without analyst columns.
-    if let Ok(candles) = client.fetch_candles(sym, "1y", "1d") {
-        outcome = apply_refresh_chart_if_current(
-            &gate,
-            generation,
-            sym,
-            candles,
-            outcome,
-        )?;
+    if let Ok(fetch) = client.fetch_candles(sym, "1y", "1d") {
+        outcome = apply_candle_fetch_if_current(&gate, generation, sym, fetch, outcome)?;
     }
 
     generation_is_current(active_generation, generation).then_some(outcome)
@@ -5234,7 +6379,7 @@ pub fn start_feed(state: State<AppState>) -> Result<(), String> {
 }
 
 /// Spawn refresh / enrich / EDGAR / snapshot workers for symbols at generation.
-/// Workers exit when eed_generation no longer matches generation.
+/// Workers exit when `feed_generation` no longer matches `generation`.
 fn spawn_feed_workers(
     state: &AppState,
     symbols: Arc<Vec<String>>,
@@ -5278,6 +6423,7 @@ fn spawn_feed_workers(
         let gate = gate.clone();
         let initial_pass_completed_generation =
             Arc::clone(&state.initial_pass_completed_generation);
+        let last_full_pass_at = Arc::clone(&state.last_full_pass_at);
 
         thread::Builder::new()
             .name("feed-refresh".into())
@@ -5291,6 +6437,7 @@ fn spawn_feed_workers(
                     symbols.len(),
                     feed_log.path().display()
                 ));
+                let initial_start = PassStart::now();
                 let mut pending: Vec<String> = symbols.iter().cloned().collect();
 
                 for round in 0..=MAX_RETRY_ROUNDS {
@@ -5362,7 +6509,7 @@ fn spawn_feed_workers(
                                     }
                                     let sym = batch[i].as_str();
                                     let Some(outcome) = refresh_one_symbol(
-                                        &client,
+                                        client.as_ref(),
                                         &gate,
                                         &feed_status,
                                         generation,
@@ -5428,12 +6575,21 @@ fn spawn_feed_workers(
                     &initial_pass_completed_generation,
                     generation,
                 );
+                mark_full_pass_if_current(
+                    &feed_gen,
+                    generation,
+                    &last_full_pass_at,
+                    &symbols,
+                    &screener,
+                    initial_start,
+                );
 
                 loop {
                     thread::sleep(std::time::Duration::from_secs(FULL_REFRESH_INTERVAL_SECS));
                     if !generation_is_current(&feed_gen, generation) {
                         return;
                     }
+                    let pass_start = PassStart::now();
                     let cursor = Arc::new(AtomicUsize::new(0));
                     let mut handles = Vec::new();
                     for w in 0..REFRESH_CONCURRENCY {
@@ -5459,7 +6615,7 @@ fn spawn_feed_workers(
                                     }
                                     let sym = symbols[i].as_str();
                                     let Some(outcome) = refresh_one_symbol(
-                                        &client,
+                                        client.as_ref(),
                                         &gate,
                                         &feed_status,
                                         generation,
@@ -5488,6 +6644,14 @@ fn spawn_feed_workers(
                     for h in handles {
                         let _ = h.join();
                     }
+                    complete_coordinator_quote_pass(
+                        &feed_gen,
+                        generation,
+                        &last_full_pass_at,
+                        &symbols,
+                        &screener,
+                        pass_start,
+                    );
                 }
             })
             .map_err(|e| {
@@ -5568,7 +6732,7 @@ fn spawn_feed_workers(
                                     request.range,
                                     request.interval,
                                 ) {
-                                    Ok(candles) => candles,
+                                    Ok(fetch) => fetch.candles,
                                     Err(error)
                                         if crate::yahoo_session::is_rate_limit_error(&error) =>
                                     {
@@ -5583,9 +6747,9 @@ fn spawn_feed_workers(
                                     match kind {
                                         BulkChartKind::Weekly => {
                                             if !ingest_weekly_summary_if_current(
-            &gate,
-            generation,
-            sym.to_string(),
+                                                &gate,
+                                                generation,
+                                                sym.to_string(),
                                                 summary,
                                                 is_crypto(sym).then(|| candles.clone()),
                                             ) {
@@ -5616,9 +6780,9 @@ fn spawn_feed_workers(
                                                         now_e,
                                                     );
                                                 if !ingest_crypto_metrics_if_current(
-            &gate,
-            generation,
-            sym.to_string(),
+                                                    &gate,
+                                                    generation,
+                                                    sym.to_string(),
                                                     metrics,
                                                 ) {
                                                     return BulkChartAttemptOutcome::Cancelled;
@@ -5627,9 +6791,9 @@ fn spawn_feed_workers(
                                         }
                                         BulkChartKind::Hourly => {
                                             if !ingest_hourly_summary_if_current(
-            &gate,
-            generation,
-            sym.to_string(),
+                                                &gate,
+                                                generation,
+                                                sym.to_string(),
                                                 summary,
                                             ) {
                                                 return BulkChartAttemptOutcome::Cancelled;
@@ -5779,9 +6943,9 @@ fn spawn_feed_workers(
                                     );
                                     let success = if let Ok(analysis) = result {
                                         publish_financial_dcf_if_current(
-            &gate,
-            generation,
-            sym.to_string(),
+                                            &gate,
+                                            generation,
+                                            sym.to_string(),
                                             analysis,
                                         )
                                     } else {
@@ -5799,11 +6963,7 @@ fn spawn_feed_workers(
                             ) {
                                 // Closed-world refusal also clears any legacy value restored
                                 // before classification became available.
-                                if !clear_dcf_if_current(
-            &gate,
-            generation,
-            sym,
-        ) {
+                                if !clear_dcf_if_current(&gate, generation, sym) {
                                     return;
                                 }
                             }
@@ -5822,9 +6982,9 @@ fn spawn_feed_workers(
                         insider_schedule.record_result(sym, Instant::now(), &insider_result);
                         if let Ok(Some(ins)) = insider_result {
                             if !ingest_insider_if_current(
-            &gate,
-            generation,
-            sym.to_string(),
+                                &gate,
+                                generation,
+                                sym.to_string(),
                                 InsiderData {
                                     net_shares_90d: ins.net_shares_90d,
                                     buy_count: ins.buy_count,
@@ -6336,6 +7496,7 @@ pub fn get_crypto_metrics(
     let client = crate::fetcher::YahooClient::new().map_err(|e| e.to_string())?;
     let weekly = client
         .fetch_candles(&symbol, "5y", "1wk")
+        .map(|f| f.candles)
         .map_err(|e| format!("weekly candles: {}", e))?;
 
     // Compute basic technical from this (re-use existing engine)
@@ -6729,7 +7890,7 @@ pub fn get_price_provenance(
     let yahoo_cents = client
         .fetch_candles(&sym, "1d", "5m")
         .ok()
-        .and_then(|c| c.last().map(|x| x.close_cents))
+        .and_then(|f| f.candles.last().map(|x| x.close_cents))
         .filter(|p| *p > 0);
     let stooq_cents = crate::stooq::fetch_quote_cents(&sym).filter(|p| *p > 0);
 
@@ -6917,7 +8078,7 @@ pub async fn get_quote_prices(
                         let price = client
                             .fetch_candles(symbol, "5d", "1d")
                             .ok()
-                            .and_then(|candles| candles.last().map(|last| last.close_cents));
+                            .and_then(|f| f.candles.last().map(|last| last.close_cents));
                         std::thread::sleep(std::time::Duration::from_millis(150));
                         price
                     },
