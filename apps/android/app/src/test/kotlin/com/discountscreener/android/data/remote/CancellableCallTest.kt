@@ -77,13 +77,13 @@ class CancellableCallTest {
     @Test
     fun io_failure_reaches_active_caller() = runBlocking {
         val expected = IOException("read failed")
-        assertSame(expected, readFailure(expected, false))
+        assertRecoveredFailure(expected, readFailure(expected, false))
     }
 
     @Test
     fun runtime_failure_reaches_active_caller() = runBlocking {
         val expected = IllegalArgumentException("invalid source")
-        assertSame(expected, readFailure(expected, false))
+        assertRecoveredFailure(expected, readFailure(expected, false))
     }
 
     @Test
@@ -92,7 +92,16 @@ class CancellableCallTest {
         val actual = readFailure(expected, true)
         assertTrue(actual is CancellationException)
         assertEquals("call cancelled", actual?.message)
-        assertSame(expected, actual?.cause)
+        assertTrue("Cancellation must retain the original read failure",
+            generateSequence(actual?.cause) { it.cause }.any { it === expected })
+    }
+
+    private fun assertRecoveredFailure(expected: Exception, actual: Throwable?) {
+        // Coroutine debug mode copies exceptions to recover the suspended caller's stack.
+        assertEquals(expected.javaClass, actual?.javaClass)
+        assertEquals(expected.message, actual?.message)
+        assertTrue("The cause chain must retain the original read failure",
+            generateSequence(actual) { it.cause }.any { it === expected })
     }
 
     private suspend fun readFailure(expected: Exception, cancelCall: Boolean): Throwable? = supervisorScope {
