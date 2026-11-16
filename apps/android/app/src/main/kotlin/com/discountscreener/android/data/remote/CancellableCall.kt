@@ -52,11 +52,13 @@ internal suspend fun Call.readTextCancellable(response: Response): String =
                 if (continuation.isActive) {
                     continuation.resume(text)
                 }
-            } catch (error: IOException) {
+            } catch (error: Exception) {
+                // Closing a buffered source can throw IllegalStateException, not only IOException.
+                // Keep failures on the coroutine boundary, never on this unmanaged reader thread.
                 if (!continuation.isActive) {
                     return@Thread
                 }
-                if (isCanceled() || canceledIo(error)) {
+                if (isCanceled() || (error is IOException && canceledIo(error))) {
                     continuation.cancel(CancellationException("call cancelled", error))
                 } else {
                     continuation.resumeWithException(error)
