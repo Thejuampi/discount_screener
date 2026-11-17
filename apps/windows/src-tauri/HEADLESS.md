@@ -25,6 +25,30 @@ $B rank-snapshot ~/.local/state/vantage-headless/opportunity_snapshot.json --top
 
 Profiles: `sp500`, `dow`, `russell`, `merval`, `nikkei`, `europe`, `asia`, `qa` (+ aliases).
 
+## Build identity (`--version`)
+
+```bash
+$B --version    # vantage-headless 0.1.0 (<40-hex-sha>)
+$B -V           # same
+```
+
+`build.rs` stamps `DS_BUILD_SHA` from `git rev-parse HEAD` (override with
+`VANTAGE_BUILD_SHA`; must be a 40-hex SHA with optional `-dirty`, or `unknown`).
+`/status` reports the same value as `build_sha`.
+
+**`-dirty` can go stale.** Cargo only reruns the build script when watched
+paths or env vars change (HEAD, the branch ref, `refs/heads`, `packed-refs`,
+`version.ps1`, `VANTAGE_BUILD_SHA`). It has no hook for working-tree dirtiness,
+so a clean↔dirty flip without a commit keeps the previous `-dirty` suffix until
+one of those inputs changes. That is a Cargo limitation, not a missing
+`rerun-if-changed`.
+
+**`refs/heads` tradeoff.** Watching the whole `refs/heads` directory (not just
+this branch's loose ref) is required so a nested ref like `feat/foo` that was
+removed by `git pack-refs --prune` still dirties the build when the next commit
+recreates it. Side effect: creating or updating an **unrelated** branch also
+marks `vantage-headless` Dirty and restamps `DS_BUILD_SHA`.
+
 ## How it reuses the app
 
 * `gui` cargo feature (default) carries Tauri and its plugins. `--no-default-features`

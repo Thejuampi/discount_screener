@@ -1,15 +1,200 @@
+//! Build-time stamps for the Windows/Tauri app and `vantage-headless`.
+//!
+//! - `DS_APP_VERSION`: date-based version (same shape as `scripts/version.ps1`).
+//!   Prefers the PowerShell script when available (`pwsh`, then `powershell`) so
+//!   the desktop stamp stays bit-identical to Android's; otherwise replicates the
+//!   script in Rust so Linux builds never need PowerShell.
+//! - `DS_BUILD_SHA`: full 40-hex git SHA used by `vantage-headless --version`
+//!   (and `/status`). Override with `VANTAGE_BUILD_SHA` when `.git` is absent
+//!   (must be `[0-9a-f]{40}(-dirty)?` or `unknown`; anything else fails the
+//!   build). Without git and without an override, falls back to `unknown`
+//!   without failing. Appends `-dirty` when `git status --porcelain` is
+//!   non-empty at build time.
+//!
+//! ## Cargo rerun limitations
+//! `-dirty` can go stale: Cargo has no hook for "working tree dirtiness", only
+//! for file paths / env vars. We deliberately do **not** list every tracked
+//! file. A clean→dirty (or dirty→clean) flip without a commit therefore keeps
+//! the previous `-dirty` suffix until something we do watch changes (HEAD,
+//! the branch ref, `refs/heads`, `packed-refs`, `version.ps1`, or
+//! `VANTAGE_BUILD_SHA`). Watching all of `refs/heads` also means an unrelated
+//! branch update dirties this crate — needed so nested refs recreate after
+//! `pack-refs --prune` still refresh the SHA.
+
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn main() {
     println!("cargo:rerun-if-changed=../../../scripts/version.ps1");
-    println!("cargo:rerun-if-changed=../../../.git/HEAD");
+    println!("cargo:rerun-if-env-changed=VANTAGE_BUILD_SHA");
+    emit_git_reruns();
+
     println!("cargo:rustc-env=DS_APP_VERSION={}", app_version());
+    println!("cargo:rustc-env=DS_BUILD_SHA={}", build_sha());
+
     #[cfg(feature = "gui")]
     tauri_build::build()
 }
 
+/// Watch git identity inputs so `DS_BUILD_SHA` / `DS_APP_VERSION` stay fresh.
+///
+/// Paths come from `git rev-parse --git-path …` (preferably with
+/// `--path-format=absolute`, git ≥ 2.31). `--git-path` resolves refs into the
+/// **common** git dir. That matters for linked worktrees: `--absolute-git-dir`
+/// is `.git/worktrees/<name>/`, and joining a ref there yields a path that does
+/// not exist (Cargo then rebuilds every time). `--git-path refs/heads/<branch>`
+/// points at the shared `.git/refs/heads/<branch>` instead.
+///
+/// On git < 2.31 (no `--path-format`), we fall back to plain `--git-path` and
+/// absolutize: relative results are joined with the repo toplevel (git's cwd
+/// here), or — if that path does not exist — with `--absolute-git-dir` for
+/// `HEAD` and `--git-common-dir` for `refs/*` / `packed-refs`. Set
+/// `DS_GIT_PATH_LEGACY=1` to force that fallback (for testing).
+///
+/// After `git pack-refs --all --prune` the loose ref file is gone (and for
+/// nested names like `feat/foo`, so is `refs/heads/feat/`). Watching
+/// `packed-refs` covers packs; watching the stable `refs/heads` directory
+/// covers the loose ref coming back on the next commit (HEAD itself is often
+/// unchanged: it still says `ref: refs/heads/…`). **Tradeoff:** any update
+/// under `refs/heads` (including an unrelated branch) marks the build Dirty.
+/// That is required so nested refs surviving only as packed entries still
+/// refresh the SHA when recreated after prune.
+///
+/// **Only existing paths are emitted**: Cargo treats a missing
+/// `rerun-if-changed` path as Dirty on every build (`the file … is missing`).
+fn emit_git_reruns() {
+    println!("cargo:rerun-if-env-changed=DS_GIT_PATH_LEGACY");
+
+    let Some(head) = git_path("HEAD") else {
+        // No .git: still watch the relative HEAD the old build.rs watched, in
+        // case a shallow copy appears later in the same build tree.
+        emit_rerun_if_exists(Path::new("../../../.git/HEAD"));
+        return;
+    };
+    emit_rerun_if_exists(&head);
+
+    if let Ok(contents) = std::fs::read_to_string(&head) {
+        if let Some(r) = contents.strip_prefix("ref: ") {
+            let r = r.trim();
+            if !r.is_empty() {
+                if let Some(ref_path) = git_path(r) {
+                    // Loose ref when present. After `pack-refs --prune` it is
+                    // gone, and for nested branch names (`feat/foo`) the
+                    // intermediate dir (`refs/heads/feat`) is gone too. Always
+                    // watch the stable `refs/heads` directory (survives pack)
+                    // so recreating a loose ref dirties the build. Never emit a
+                    // missing path: Cargo treats those as Dirty on every build.
+                    emit_rerun_if_exists(&ref_path);
+                    if r.starts_with("refs/heads/") {
+                        if let Some(heads) = git_path("refs/heads") {
+                            emit_rerun_if_exists(&heads);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(packed) = git_path("packed-refs") {
+        emit_rerun_if_exists(&packed);
+    }
+}
+
+fn emit_rerun_if_exists(path: &Path) {
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+}
+
+/// Resolve `$GIT_DIR/<path>` to an absolute filesystem path.
+///
+/// Prefers `rev-parse --path-format=absolute --git-path` (git ≥ 2.31). On older
+/// git, or when `DS_GIT_PATH_LEGACY` is set, uses plain `--git-path` and
+/// absolutizes (see [`absolutize_git_path`]).
+fn git_path(p: &str) -> Option<PathBuf> {
+    let force_legacy = std::env::var_os("DS_GIT_PATH_LEGACY").is_some();
+    if !force_legacy {
+        if let Some(s) = git_stdout(&["rev-parse", "--path-format=absolute", "--git-path", p]) {
+            return Some(PathBuf::from(s));
+        }
+        // `--path-format` missing/unsupported: fall through to the legacy path.
+    }
+    let raw = git_stdout(&["rev-parse", "--git-path", p])?;
+    Some(absolutize_git_path(p, raw))
+}
+
+/// Turn a (possibly relative) `--git-path` result into an absolute path.
+///
+/// Without `--path-format`, git prints paths relative to the process cwd when
+/// they fall inside the work tree (e.g. `.git/HEAD` from the toplevel), and
+/// absolute when they do not (typical for linked-worktree paths under the
+/// common `.git`). If a relative path does not exist under the toplevel, treat
+/// it as relative to the worktree git dir (`HEAD`) or the common dir
+/// (`refs/*`, `packed-refs`).
+fn absolutize_git_path(p: &str, raw: String) -> PathBuf {
+    let path = PathBuf::from(raw.trim());
+    if path.is_absolute() {
+        return path;
+    }
+    // Relative to repo toplevel (we run git with current_dir = repo_root()).
+    let from_toplevel = repo_root().join(&path);
+    if from_toplevel.exists() {
+        return from_toplevel;
+    }
+    let base = if p == "HEAD" {
+        absolute_git_dir()
+    } else {
+        absolute_git_common_dir()
+    };
+    match base {
+        Some(b) => b.join(path),
+        None => from_toplevel,
+    }
+}
+
+fn absolute_git_dir() -> Option<PathBuf> {
+    if let Some(s) = git_stdout(&["rev-parse", "--absolute-git-dir"]) {
+        return Some(PathBuf::from(s));
+    }
+    let d = git_stdout(&["rev-parse", "--git-dir"])?;
+    let p = PathBuf::from(d);
+    if p.is_absolute() {
+        Some(p)
+    } else {
+        Some(repo_root().join(p))
+    }
+}
+
+fn absolute_git_common_dir() -> Option<PathBuf> {
+    let d = git_stdout(&["rev-parse", "--git-common-dir"])?;
+    let p = PathBuf::from(d);
+    if p.is_absolute() {
+        Some(p)
+    } else {
+        Some(repo_root().join(p))
+    }
+}
+
 fn app_version() -> String {
-    let output = Command::new("powershell")
+    if let Some(v) = try_powershell_version() {
+        return v;
+    }
+    rust_version_from_git().unwrap_or_else(|| "0.0.0-unknown".to_string())
+}
+
+fn try_powershell_version() -> Option<String> {
+    // Prefer `pwsh` (PowerShell 7+) then Windows PowerShell 5.x `powershell`.
+    for shell in ["pwsh", "powershell"] {
+        if let Some(v) = try_ps_script(shell) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn try_ps_script(shell: &str) -> Option<String> {
+    let output = Command::new(shell)
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -17,15 +202,130 @@ fn app_version() -> String {
             "-File",
             "../../../scripts/version.ps1",
         ])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .next()
-            .unwrap_or("0.0.0-unknown")
-            .trim()
-            .to_string(),
-        _ => "0.0.0-unknown".to_string(),
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
+    let line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+/// Rust port of `scripts/version.ps1` line 1 (the version string). Line 2
+/// (Android versionCode) is unused by this crate.
+fn rust_version_from_git() -> Option<String> {
+    let stamp = git_stdout(&["log", "-1", "--format=%cd", "--date=format:%Y.%m.%d.%H%M"])?;
+    let mut branch = git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch == "HEAD" {
+        // Detached HEAD (e.g. CI checked out a tag/commit): treat as a feature build.
+        branch = "detached".to_string();
+    }
+    let short = git_stdout(&["rev-parse", "--short", "HEAD"])?;
+    let dirty_suffix = if git_is_dirty() { "-dirty" } else { "" };
+    let is_release = branch == "main" || branch == "master";
+    if is_release {
+        Some(format!("{stamp}.{short}{dirty_suffix}"))
+    } else {
+        // version.ps1 uses ToLowerInvariant; Rust's to_lowercase is Unicode-aware
+        // (e.g. Turkish İ). Branch names we care about are ASCII, and the sanitize
+        // below keeps only [a-z0-9-], so the results are identical for those.
+        let safe: String = branch
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        Some(format!("{stamp}.{safe}.{short}{dirty_suffix}"))
+    }
+}
+
+fn build_sha() -> String {
+    if let Ok(v) = std::env::var("VANTAGE_BUILD_SHA") {
+        let v = v.trim();
+        if !v.is_empty() {
+            // Fail the build on a bad override: the caller asked for a specific
+            // identity, so silently stamping `unknown` would hide a misconfig
+            // in a release artifact. `unknown` itself is an allowed explicit value.
+            if !is_valid_build_sha(v) {
+                panic!(
+                    "invalid VANTAGE_BUILD_SHA={v:?}: expected [0-9a-f]{{40}}(-dirty)? or \"unknown\""
+                );
+            }
+            return v.to_string();
+        }
+    }
+    match git_stdout(&["rev-parse", "HEAD"]) {
+        Some(sha) if !sha.is_empty() => {
+            if git_is_dirty() {
+                format!("{sha}-dirty")
+            } else {
+                sha
+            }
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+fn is_valid_build_sha(v: &str) -> bool {
+    if v == "unknown" {
+        return true;
+    }
+    let sha = v.strip_suffix("-dirty").unwrap_or(v);
+    sha.len() == 40 && sha.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+fn git_is_dirty() -> bool {
+    // Single porcelain call shared by DS_APP_VERSION and DS_BUILD_SHA.
+    static DIRTY: OnceLock<bool> = OnceLock::new();
+    *DIRTY.get_or_init(|| match Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_root())
+        .output()
+    {
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        _ => false,
+    })
+}
+
+fn git_stdout(args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn repo_root() -> PathBuf {
+    // build.rs runs with CWD = package dir (apps/windows/src-tauri).
+    // Prefer an absolute path so legacy `--git-path` joins (and the
+    // cargo:rerun-if-changed lines we emit) are absolute even when git
+    // printed a toplevel-relative path like `.git/HEAD`.
+    let rel = Path::new("../../..");
+    std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join(rel))
+        .and_then(|p| p.canonicalize().ok())
+        .unwrap_or_else(|| rel.to_path_buf())
 }
